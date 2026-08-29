@@ -86,7 +86,7 @@ fun main(args: Array<String>) {
 
     container.use {
         println("matching-engine: started, awaiting shutdown signal")
-        ShutdownSignalBarrier().await()
+        ShutdownSignalBarrier().use { barrier -> barrier.await() }
         println("matching-engine: shutdown signal received")
     }
 }

@@ -61,7 +61,7 @@ fun runCluster(args: Args) {
 
     ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
         println("cluster: started, awaiting shutdown signal")
-        ShutdownSignalBarrier().await()
+        ShutdownSignalBarrier().use { it.await() }
         println("cluster: shutdown signal received")
     }
 }

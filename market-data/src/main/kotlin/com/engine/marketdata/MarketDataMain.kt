@@ -72,15 +72,20 @@ fun main(args: Array<String>) {
         }, "market-data-poller")
         worker.start()
 
-        barrier.await()
-        worker.interrupt()
+        barrier.use {
+            it.await()
+            worker.interrupt()
+            // Inside the barrier: closing it releases the signal and the JVM exits at once.
+            println(
+                "market-data: stopped. gaps=${service.gapsDetected} " +
+                    "missed=${service.eventsMissed} " +
+                    "foreignShard=${service.foreignShardEvents} " +
+                    "droppedL1=${publisher.droppedL1} droppedL2=${publisher.droppedL2} " +
+                    "droppedL3=${publisher.droppedL3}"
+            )
+            System.out.flush()
+        }
         worker.join(SHUTDOWN_TIMEOUT_MS)
-        println(
-            "market-data: stopped. gaps=${service.gapsDetected} missed=${service.eventsMissed} " +
-                "foreignShard=${service.foreignShardEvents} " +
-                "droppedL1=${publisher.droppedL1} droppedL2=${publisher.droppedL2} " +
-                "droppedL3=${publisher.droppedL3}"
-        )
     }
 }
 

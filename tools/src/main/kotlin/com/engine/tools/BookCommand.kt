@@ -169,7 +169,7 @@ fun runBook(args: Args) {
         worker.isDaemon = true
         worker.start()
 
-        barrier.await()
+        barrier.use { it.await() }
         worker.interrupt()
     }
 }

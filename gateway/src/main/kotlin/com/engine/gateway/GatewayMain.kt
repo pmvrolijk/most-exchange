@@ -77,16 +77,22 @@ fun main(args: Array<String>) {
         }
 
         cluster.use {
+            // Counted separately so an operator can tell "nothing arrived" from "forwarded but
+            // nothing came back" -- the two look identical from order state alone.
             val sink = object : GatewaySink {
+                var forwardedToCluster = 0L
                 var droppedToCluster = 0L
+                var sentToClient = 0L
                 var droppedToClient = 0L
 
                 override fun toCluster(buffer: DirectBuffer, offset: Int, length: Int) {
                     if (cluster.offer(buffer, offset, length) < 0) droppedToCluster++
+                    else forwardedToCluster++
                 }
 
                 override fun toClient(buffer: DirectBuffer, offset: Int, length: Int) {
                     if (outbound.offer(buffer, offset, length) < 0) droppedToClient++
+                    else sentToClient++
                 }
             }
             service = GatewayService(config.shard.securityIds, sink)
@@ -100,27 +106,55 @@ fun main(args: Array<String>) {
             println("gateway: started")
 
             val worker = Thread({
+                var lastKeepAliveNs = System.nanoTime()
                 while (!Thread.currentThread().isInterrupted) {
                     var work = inbound.poll(assembler, FRAGMENT_LIMIT)
                     work += cluster.pollEgress()
+
+                    // A cluster session that sends nothing is closed by the consensus module
+                    // after its session timeout, and every later offer then fails silently.
+                    // Polling egress is not enough -- a quiet market would kill the gateway.
+                    val now = System.nanoTime()
+                    if (now - lastKeepAliveNs >= KEEP_ALIVE_INTERVAL_NS) {
+                        cluster.sendKeepAlive()
+                        lastKeepAliveNs = now
+                    }
+
+                    if (cluster.isClosed) {
+                        System.err.println(
+                            "gateway: cluster session closed; orders can no longer be forwarded"
+                        )
+                        break
+                    }
                     idle.idle(work)
                 }
             }, "gateway-poller")
             worker.start()
 
-            barrier.await()
-            worker.interrupt()
+            barrier.use {
+                it.await()
+                worker.interrupt()
+                // Inside the barrier: closing it releases the signal and the JVM exits at once.
+                println(
+                    "gateway: stopped. forwardedToCluster=${sink.forwardedToCluster} " +
+                        "droppedToCluster=${sink.droppedToCluster} " +
+                        "sentToClient=${sink.sentToClient} " +
+                        "droppedToClient=${sink.droppedToClient} " +
+                        "liveOrders=${service.liveOrders} " +
+                        "rejectedLocally=${service.rejectedLocally} " +
+                        "untrackedReports=${service.untrackedReports}"
+                )
+                System.out.flush()
+            }
             worker.join(SHUTDOWN_TIMEOUT_MS)
-            println(
-                "gateway: stopped. liveOrders=${service.liveOrders} " +
-                    "rejectedLocally=${service.rejectedLocally} " +
-                    "untrackedReports=${service.untrackedReports}"
-            )
         }
     }
 }
 
 private const val FRAGMENT_LIMIT = 64
+
+/** Comfortably inside the consensus module's session timeout, which defaults to 10 seconds. */
+private val KEEP_ALIVE_INTERVAL_NS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1)
 private const val SHUTDOWN_TIMEOUT_MS = 5_000L
 
 data class GatewayConfig(

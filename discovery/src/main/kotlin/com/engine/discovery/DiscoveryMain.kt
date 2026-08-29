@@ -84,10 +84,14 @@ fun main(args: Array<String>) {
         worker.start()
 
         println("discovery: started")
-        barrier.await()
-        worker.interrupt()
+        barrier.use {
+            it.await()
+            worker.interrupt()
+            // Inside the barrier: closing it releases the signal and the JVM exits at once.
+            println("discovery: stopped. droppedFragments=$dropped")
+            System.out.flush()
+        }
         worker.join(SHUTDOWN_TIMEOUT_MS)
-        println("discovery: stopped. droppedFragments=$dropped")
     }
 }
 

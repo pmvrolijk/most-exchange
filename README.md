@@ -74,6 +74,10 @@ Starts every process â€” cluster host, engine, gateway, market data, discovery â
 trade through the CLI. Single node and IPC rather than multicast: it proves the components talk to
 each other, not that the network is configured. Logs land in `build/e2e/logs/`.
 
+[`docs/LocalTesting.md`](docs/LocalTesting.md) is the manual walkthrough of the same setup: startup
+order, a three-security shard file, seeding, sending orders, inspecting the books, and shutting down
+cleanly.
+
 ## Running
 
 A node is two processes. The media driver allocates, so it stays out of the engine binary

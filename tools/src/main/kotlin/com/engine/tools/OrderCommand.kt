@@ -180,13 +180,27 @@ private fun sendAndFollow(
 
         val idle = SleepingIdleStrategy(Duration.ofMillis(1).toNanos())
         val connectDeadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
-        while (!orders.isConnected && System.nanoTime() < connectDeadline) idle.idle(0)
+
+        // BOTH legs, not just the outbound one. Adding a subscription does not make it live --
+        // the image appears asynchronously -- so sending as soon as the publication connects
+        // races the acknowledgement and drops it whenever the engine wins.
+        while ((!orders.isConnected || !reports.isConnected) &&
+            System.nanoTime() < connectDeadline
+        ) {
+            idle.idle(0)
+        }
         if (!orders.isConnected) {
             System.err.println(
                 "most: no gateway listening on ${security.orderEntryChannel}:" +
                     "${security.orderEntryStreamId} for ${security.symbol}"
             )
             return
+        }
+        if (!reports.isConnected) {
+            System.err.println(
+                "most: warning -- not subscribed to ${security.executionReportChannel}:" +
+                    "${security.executionReportStreamId}; reports may be missed"
+            )
         }
 
         val buffer = UnsafeBuffer(ByteArray(512))

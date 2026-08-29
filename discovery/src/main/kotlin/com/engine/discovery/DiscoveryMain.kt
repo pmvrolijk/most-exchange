@@ -42,7 +42,11 @@ fun main(args: Array<String>) {
             "channel=${config.channel}:${config.streamId} every ${config.intervalMs}ms"
     )
     for (entry in universe.entries) {
-        println("discovery:   ${entry.spec.symbol} (${entry.spec.isin}) -> shard ${entry.shardId}")
+        val route = universe.routeFor(entry.shardId)
+        println(
+            "discovery:   ${entry.spec.symbol} (${entry.spec.isin}) -> shard ${entry.shardId} " +
+                "@ ${route?.orderEntryChannel}:${route?.orderEntryStreamId}"
+        )
     }
 
     val aeronContext = Aeron.Context()

@@ -45,8 +45,10 @@ class DirectoryEncoder(private val sink: DirectorySink) {
         for (route in universe.shards) {
             shard.wrapAndApplyHeader(buffer, 0, header)
                 .shardId(route.shardId)
-                .ingressChannel(route.ingressChannel)
-                .egressChannel(route.egressChannel)
+                .orderEntryStreamId(route.orderEntryStreamId)
+                .executionReportStreamId(route.executionReportStreamId)
+                .orderEntryChannel(route.orderEntryChannel)
+                .executionReportChannel(route.executionReportChannel)
             sink.send(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + ShardEntryEncoder.BLOCK_LENGTH)
         }
 
@@ -81,8 +83,10 @@ data class RoutedSecurity(
     val priceFloor: Long,
     val tickSize: Long,
     val levelCount: Int,
-    val ingressChannel: String,
-    val egressChannel: String,
+    val orderEntryChannel: String,
+    val orderEntryStreamId: Int,
+    val executionReportChannel: String,
+    val executionReportStreamId: Int,
 )
 
 /**
@@ -149,7 +153,11 @@ class DirectoryClient {
                 if (!inProgress) return
                 shard.wrap(buffer, body, blockLength, schemaVersion)
                 val id = shard.shardId()
-                pendingShards[id] = ShardRoute(id, shard.ingressChannel(), shard.egressChannel())
+                pendingShards[id] = ShardRoute(
+                    id,
+                    shard.orderEntryChannel(), shard.orderEntryStreamId(),
+                    shard.executionReportChannel(), shard.executionReportStreamId(),
+                )
             }
 
             SecurityEntryDecoder.TEMPLATE_ID -> {
@@ -202,8 +210,10 @@ class DirectoryClient {
                 priceFloor = fields.priceFloor,
                 tickSize = fields.tickSize,
                 levelCount = fields.levelCount,
-                ingressChannel = route.ingressChannel,
-                egressChannel = route.egressChannel,
+                orderEntryChannel = route.orderEntryChannel,
+                orderEntryStreamId = route.orderEntryStreamId,
+                executionReportChannel = route.executionReportChannel,
+                executionReportStreamId = route.executionReportStreamId,
             )
             byId[routed.securityId] = routed
             bySym[routed.symbol] = routed

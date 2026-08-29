@@ -7,16 +7,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `docs/Design.md` is the authoritative specification — read it before implementing anything, and
 update it alongside code when the design changes. §8 tracks the open questions.
 
-The Gradle skeleton is in place and green: six modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`),
-SBE codegen wired, 150 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+The Gradle skeleton is in place and green: seven modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`),
+SBE codegen wired, 184 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
 execution-report egress, book-event publication, and snapshot/restore; and `EngineConfig` /
 `EngineMain` — the `ClusteredServiceContainer` wiring; `MarketDataService` / `DepthBook` — L1/L2/L3
 derivation; `GatewayService` / `OrderStateStore` — validation and `cumQty` reconstruction; and
-`reference` / `discovery` — the shared shard security list and the tradable-universe directory. All
-six modules are implemented.
+`reference` / `discovery` — the shared shard security list and the tradable-universe directory; and
+`tools` — the `most` operator CLI. All seven modules are implemented.
 
 ## Commands
 
@@ -71,6 +71,10 @@ market-data and discovery alike — do not reintroduce per-process security list
 (`symbol`, `isin`, `name`, `currency`) and geometry; ISINs are check-digit validated at boot. Every
 process prints `ShardSpec.fingerprint()` at startup, which is how a geometry mismatch is caught
 before it silently diverges the books.
+
+**The directory publishes the GATEWAY's client endpoints**, not the cluster ingress/egress — an
+adapter connecting to the cluster directly would bypass the gateway's validation and `cumQty`
+reconstruction.
 
 **A gateway serves exactly one shard** — one cluster connection, and it rejects anything outside its
 list. `discovery` publishes the universe (security → shard → ingress channel) on a repeating

@@ -13,8 +13,10 @@ class UniverseTest {
         setProperty("discovery.shards", shardIds.joinToString(","))
         shardIds.forEach {
             setProperty("discovery.shard.$it.securitiesFile", "shard-$it.properties")
-            setProperty("discovery.shard.$it.ingressChannel", "aeron:udp?endpoint=shard$it:9010")
-            setProperty("discovery.shard.$it.egressChannel", "aeron:udp?endpoint=shard$it:9020")
+            setProperty("discovery.shard.$it.orderEntryChannel", "aeron:udp?endpoint=gw$it:20001")
+            setProperty("discovery.shard.$it.orderEntryStreamId", "20")
+            setProperty("discovery.shard.$it.executionReportChannel", "aeron:udp?endpoint=gw$it:20002")
+            setProperty("discovery.shard.$it.executionReportStreamId", "21")
         }
     }
 
@@ -42,7 +44,8 @@ class UniverseTest {
         assertEquals(1, universe.shardFor(1))
         assertEquals(2, universe.shardFor(2))
         assertEquals("BMW", universe.bySymbol("BMW")?.spec?.symbol)
-        assertEquals("aeron:udp?endpoint=shard2:9010", universe.routeFor(2)?.ingressChannel)
+        assertEquals("aeron:udp?endpoint=gw2:20001", universe.routeFor(2)?.orderEntryChannel)
+        assertEquals(21, universe.routeFor(2)?.executionReportStreamId)
     }
 
     @Test
@@ -97,7 +100,7 @@ class UniverseTest {
 
     @Test
     fun `a missing channel is reported by key`() {
-        val incomplete = registry(1).apply { remove("discovery.shard.1.ingressChannel") }
+        val incomplete = registry(1).apply { remove("discovery.shard.1.orderEntryChannel") }
         val error = assertFailsWith<IllegalStateException> {
             Universe.from(
                 incomplete,
@@ -108,7 +111,7 @@ class UniverseTest {
                 ),
             )
         }
-        assertContains(error.message!!, "discovery.shard.1.ingressChannel")
+        assertContains(error.message!!, "discovery.shard.1.orderEntryChannel")
     }
 
     @Test

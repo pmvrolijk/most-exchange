@@ -16,6 +16,7 @@ anything; §8 tracks the open questions.
 | `engine` | `MatchingEngineService` — the single-threaded deterministic state machine. Builds to a native binary. |
 | `market-data` | Consumes the Book Event Stream, derives L1 / L2 / L3 and publishes them as SBE over multicast. Separate process so feed fan-out never touches the matching thread. |
 | `gateway` | Order entry: `securityId` validation, per-order state for the outbound leg (`cumQty` reconstruction), outbound mapping. |
+| `tools` | The `most` operator CLI: browse the universe, send orders, inspect books. |
 
 Both boundaries speak **binary SBE, not FIX**. Protocol gateways that translate FIX or a proprietary
 session protocol sit upstream of `gateway` and downstream of `market-data`, outside this project.
@@ -61,7 +62,7 @@ selection, the SMP fixed-point loop, allocation), and the off-session expiry pur
 `MatchingEngineService` — the full `ClusteredService`, message dispatch, execution-report egress,
 book-event publication, and snapshot/restore. 76 tests.
 
-All six modules are implemented. 140 tests.
+All seven modules are implemented. 184 tests.
 
 ## Running
 

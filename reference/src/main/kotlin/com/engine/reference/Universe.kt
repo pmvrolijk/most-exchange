@@ -3,21 +3,31 @@ package com.engine.reference
 import java.io.File
 import java.util.Properties
 
-/** How to reach one shard's cluster. */
+/**
+ * How a client reaches one shard: the **gateway's** client-facing endpoints.
+ *
+ * Not the cluster's ingress and egress. Those belong to the gateway process, which is the only
+ * thing that holds a cluster session; an adapter that connected to them would bypass the
+ * validation and the cumQty reconstruction the gateway exists to perform.
+ */
 data class ShardRoute(
     val shardId: Int,
-    val ingressChannel: String,
-    val egressChannel: String,
+    val orderEntryChannel: String,
+    val orderEntryStreamId: Int,
+    val executionReportChannel: String,
+    val executionReportStreamId: Int,
 ) {
     init {
         require(shardId >= 0) { "shardId must be non-negative: $shardId" }
-        require(ingressChannel.isNotBlank()) { "shard $shardId has no ingress channel" }
-        require(egressChannel.isNotBlank()) { "shard $shardId has no egress channel" }
-        require(ingressChannel.length <= MAX_CHANNEL_LENGTH) {
-            "shard $shardId ingress channel exceeds $MAX_CHANNEL_LENGTH characters"
+        require(orderEntryChannel.isNotBlank()) { "shard $shardId has no order entry channel" }
+        require(executionReportChannel.isNotBlank()) {
+            "shard $shardId has no execution report channel"
         }
-        require(egressChannel.length <= MAX_CHANNEL_LENGTH) {
-            "shard $shardId egress channel exceeds $MAX_CHANNEL_LENGTH characters"
+        require(orderEntryChannel.length <= MAX_CHANNEL_LENGTH) {
+            "shard $shardId order entry channel exceeds $MAX_CHANNEL_LENGTH characters"
+        }
+        require(executionReportChannel.length <= MAX_CHANNEL_LENGTH) {
+            "shard $shardId execution report channel exceeds $MAX_CHANNEL_LENGTH characters"
         }
     }
 
@@ -71,8 +81,10 @@ data class Universe(
     val version: Long = run {
         val canonical = buildString {
             shards.sortedBy { it.shardId }.forEach {
-                append(it.shardId).append('|').append(it.ingressChannel)
-                    .append('|').append(it.egressChannel).append(';')
+                append(it.shardId).append('|').append(it.orderEntryChannel)
+                    .append('|').append(it.orderEntryStreamId)
+                    .append('|').append(it.executionReportChannel)
+                    .append('|').append(it.executionReportStreamId).append(';')
             }
             entries.sortedBy { it.spec.securityId }.forEach {
                 append(it.shardId).append('|').append(it.spec.canonical()).append(';')
@@ -128,15 +140,24 @@ data class Universe(
                 }
                 shards += ShardRoute(
                     shardId = id,
-                    ingressChannel = properties.getProperty("discovery.shard.$id.ingressChannel")
-                        ?: error("missing required configuration key: discovery.shard.$id.ingressChannel"),
-                    egressChannel = properties.getProperty("discovery.shard.$id.egressChannel")
-                        ?: error("missing required configuration key: discovery.shard.$id.egressChannel"),
+                    orderEntryChannel = required(properties, "discovery.shard.$id.orderEntryChannel"),
+                    orderEntryStreamId =
+                        required(properties, "discovery.shard.$id.orderEntryStreamId").toIntOrNull()
+                            ?: error("discovery.shard.$id.orderEntryStreamId must be a number"),
+                    executionReportChannel =
+                        required(properties, "discovery.shard.$id.executionReportChannel"),
+                    executionReportStreamId =
+                        required(properties, "discovery.shard.$id.executionReportStreamId").toIntOrNull()
+                            ?: error("discovery.shard.$id.executionReportStreamId must be a number"),
                 )
                 spec.securities.forEach { entries += UniverseEntry(it, id) }
             }
             return Universe(shards, entries)
         }
+
+        private fun required(properties: java.util.Properties, key: String): String =
+            properties.getProperty(key)?.trim()
+                ?: error("missing required configuration key: $key")
 
         fun load(path: String): Universe {
             val file = File(path)

@@ -702,6 +702,7 @@ backpressure, but each has its own publication, so a stalled one affects only it
     <type name="SeqNum"          primitiveType="int64" description="Per-stream, monotonic, gap-detectable"/>
     <type name="OrderCount"      primitiveType="int32"/>
     <type name="ShardId"         primitiveType="int32"/>
+    <type name="StreamId"        primitiveType="int32"/>
     <type name="Symbol"          primitiveType="char" length="16"/>
     <type name="Isin"            primitiveType="char" length="12"/>
     <type name="CurrencyCode"    primitiveType="char" length="3"/>
@@ -944,10 +945,14 @@ backpressure, but each has its own publication, so a stalled one affects only it
     <field name="securityCount"   id="3" type="OrderCount"/>
   </sbe:message>
 
-  <sbe:message name="ShardEntry" id="61" blockLength="264">
-    <field name="shardId"        id="1" type="ShardId"/>
-    <field name="ingressChannel" id="2" type="ChannelUri"/>
-    <field name="egressChannel"  id="3" type="ChannelUri"/>
+  <!-- The GATEWAY's client-facing endpoints, not the cluster's. An adapter talks to the
+       gateway; the cluster ingress is internal to the gateway process. -->
+  <sbe:message name="ShardEntry" id="61" blockLength="272">
+    <field name="shardId"                 id="1" type="ShardId"/>
+    <field name="orderEntryStreamId"      id="2" type="StreamId"/>
+    <field name="executionReportStreamId" id="3" type="StreamId"/>
+    <field name="orderEntryChannel"       id="4" type="ChannelUri"/>
+    <field name="executionReportChannel"  id="5" type="ChannelUri"/>
   </sbe:message>
 
   <sbe:message name="SecurityEntry" id="62" blockLength="112">
@@ -1745,6 +1750,12 @@ against half a universe.
 `universeVersion` changes if and only if the content does, so a repeat broadcast is distinguishable
 from a genuine update without diffing.
 
+**What the directory publishes is the *gateway's* client endpoints**, not the cluster's ingress and
+egress. Those belong to the gateway process, which is the only thing holding a cluster session; an
+adapter that connected to them directly would bypass the validation and the `cumQty` reconstruction
+the gateway exists to perform. Each `ShardEntry` therefore carries an order entry channel and stream
+and an execution report channel and stream.
+
 **The invariant discovery enforces is one shard per security.** Books are independent and nothing
 matches across shards, so a security served by two shards would hand clients two disjoint books
 under a single identifier with no error anywhere to say so. Symbols and ISINs must likewise be
@@ -1774,6 +1785,36 @@ Without them, the first `UnsafeBuffer` construction throws `IllegalAccessError` 
 5. **Shared memory:** mount `/dev/shm` as `tmpfs` for the Aeron ring buffers, bypassing disk I/O.
 6. **Term buffer sizing:** size the book event stream's term buffers so a consumer must be down for
    seconds — not milliseconds — before backpressure reaches the engine.
+
+---
+
+### Operator Tools
+
+The `tools` module ships a single `most` binary. Every subcommand begins by listening for a directory
+broadcast, because the routing table is the only thing mapping a symbol to the shard and gateway that
+serve it — which makes the tools the first real consumer of discovery, and the reason the published
+route had to change from cluster ingress to gateway endpoints.
+
+| Command | Purpose |
+| --- | --- |
+| `most securities` | The tradable universe: symbol, ISIN, shard, currency; `--verbose` adds geometry and endpoints |
+| `most send` | Submit an order, routed to the gateway owning the symbol; follows execution reports |
+| `most cancel` | Cancel a resting order |
+| `most book` | Rebuild and print books from the L2 depth feed |
+
+Two things the tools do differently from the engine, deliberately:
+
+* **The book inspector uses a `TreeMap`, not a flat ladder.** It prints a handful of levels a few
+  times a second, so sorted iteration and readable code are worth more than allocation-free access —
+  and unlike the engine it does not know a security's geometry until discovery tells it.
+* **Arguments are validated before the network is touched.** A malformed price must report a
+  malformed price, not whatever the transport happens to fail with first. Tick alignment is checked
+  after the directory arrives, since only it carries the tick; phase, collars and capacity stay in
+  the engine, because duplicating them in a client would mean two places to get them wrong.
+
+The inspector tracks sequences with `FeedSequenceTracker` and prints a staleness warning on a gap:
+under `MaxMulticastFlowControl` a slow subscriber takes an unrecoverable gap by design, so an
+operator reading depth off the screen has to be told when it can no longer be trusted.
 
 ---
 

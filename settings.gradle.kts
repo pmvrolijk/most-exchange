@@ -20,4 +20,5 @@ include(
     "engine",       // MatchingEngineService (Aeron Cluster) -> native image
     "market-data",  // Book Event Stream -> L1/L2/L3 feeds
     "gateway",      // Order entry: validation, cumQty reconstruction
+    "tools",        // Operator CLI: browse the universe, send orders, inspect books
 )

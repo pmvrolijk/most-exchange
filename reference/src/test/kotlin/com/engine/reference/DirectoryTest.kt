@@ -22,8 +22,8 @@ class DirectoryTest {
 
     private fun universe(): Universe = Universe(
         shards = listOf(
-            ShardRoute(1, "aeron:udp?endpoint=shard1:9010", "aeron:udp?endpoint=shard1:9020"),
-            ShardRoute(2, "aeron:udp?endpoint=shard2:9010", "aeron:udp?endpoint=shard2:9020"),
+            ShardRoute(1, "aeron:udp?endpoint=gw1:20001", 20, "aeron:udp?endpoint=gw1:20002", 21),
+            ShardRoute(2, "aeron:udp?endpoint=gw2:20001", 20, "aeron:udp?endpoint=gw2:20002", 21),
         ),
         entries = listOf(
             UniverseEntry(spec(1, "AAPL", ISIN_APPLE), 1),
@@ -53,11 +53,14 @@ class DirectoryTest {
         assertEquals(1, apple.shardId)
         assertEquals(ISIN_APPLE, apple.isin)
         assertEquals("USD", apple.currency)
-        assertEquals("aeron:udp?endpoint=shard1:9010", apple.ingressChannel)
+        assertEquals("aeron:udp?endpoint=gw1:20001", apple.orderEntryChannel)
+        assertEquals(20, apple.orderEntryStreamId)
+        assertEquals("aeron:udp?endpoint=gw1:20002", apple.executionReportChannel)
+        assertEquals(21, apple.executionReportStreamId)
 
         val bmw = client.routeFor(2)!!
         assertEquals(2, bmw.shardId)
-        assertEquals("aeron:udp?endpoint=shard2:9010", bmw.ingressChannel)
+        assertEquals("aeron:udp?endpoint=gw2:20001", bmw.orderEntryChannel)
     }
 
     @Test
@@ -134,7 +137,7 @@ class DirectoryTest {
         deliver(client, sink.fragments)
 
         val smaller = Universe(
-            shards = listOf(ShardRoute(1, "aeron:ipc", "aeron:ipc")),
+            shards = listOf(ShardRoute(1, "aeron:ipc", 20, "aeron:ipc", 21)),
             entries = listOf(UniverseEntry(spec(1, "AAPL", ISIN_APPLE), 1)),
         )
         val next = CapturingSink()

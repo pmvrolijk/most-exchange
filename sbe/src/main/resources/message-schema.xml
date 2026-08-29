@@ -25,6 +25,7 @@
     <type name="SeqNum"          primitiveType="int64" description="Per-stream, monotonic, gap-detectable"/>
     <type name="OrderCount"      primitiveType="int32"/>
     <type name="ShardId"         primitiveType="int32"/>
+    <type name="StreamId"        primitiveType="int32"/>
     <type name="Symbol"          primitiveType="char" length="16"/>
     <type name="Isin"            primitiveType="char" length="12"/>
     <type name="CurrencyCode"    primitiveType="char" length="3"/>
@@ -267,10 +268,14 @@
     <field name="securityCount"   id="3" type="OrderCount"/>
   </sbe:message>
 
-  <sbe:message name="ShardEntry" id="61" blockLength="264">
-    <field name="shardId"        id="1" type="ShardId"/>
-    <field name="ingressChannel" id="2" type="ChannelUri"/>
-    <field name="egressChannel"  id="3" type="ChannelUri"/>
+  <!-- The GATEWAY's client-facing endpoints, not the cluster's. An adapter talks to the
+       gateway; the cluster ingress is internal to the gateway process. -->
+  <sbe:message name="ShardEntry" id="61" blockLength="272">
+    <field name="shardId"                 id="1" type="ShardId"/>
+    <field name="orderEntryStreamId"      id="2" type="StreamId"/>
+    <field name="executionReportStreamId" id="3" type="StreamId"/>
+    <field name="orderEntryChannel"       id="4" type="ChannelUri"/>
+    <field name="executionReportChannel"  id="5" type="ChannelUri"/>
   </sbe:message>
 
   <sbe:message name="SecurityEntry" id="62" blockLength="112">

@@ -1,0 +1,18 @@
+[versions]
+kotlin = "2.4.10"
+aeron = "1.53.0"
+agrona = "2.6.0"
+sbe = "1.40.1"
+junit = "6.1.3"
+graalvm-buildtools = "1.1.11"
+
+[libraries]
+aeron-all = { module = "io.aeron:aeron-all", version.ref = "aeron" }
+agrona = { module = "org.agrona:agrona", version.ref = "agrona" }
+sbe-tool = { module = "uk.co.real-logic:sbe-tool", version.ref = "sbe" }
+junit-jupiter = { module = "org.junit.jupiter:junit-jupiter", version.ref = "junit" }
+junit-platform-launcher = { module = "org.junit.platform:junit-platform-launcher" }
+
+[plugins]
+kotlin-jvm = { id = "org.jetbrains.kotlin.jvm", version.ref = "kotlin" }
+graalvm-native = { id = "org.graalvm.buildtools.native", version.ref = "graalvm-buildtools" }

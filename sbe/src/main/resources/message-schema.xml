@@ -1,0 +1,325 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
+                   package="com.engine.sbe" id="1" version="1"
+                   semanticVersion="1.0" byteOrder="littleEndian">
+  <types>
+    <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
+    <composite name="messageHeader" description="Template ID and length of message root">
+      <type name="blockLength" primitiveType="uint16"/>
+      <type name="templateId"  primitiveType="uint16"/>
+      <type name="schemaId"    primitiveType="uint16"/>
+      <type name="version"     primitiveType="uint16"/>
+    </composite>
+
+    <type name="ParticipantId"   primitiveType="int64"/>
+    <type name="ClOrdId"         primitiveType="int64"/>
+    <type name="ExchangeOrderId" primitiveType="int64"/>
+    <type name="SecurityId"      primitiveType="int32"/>
+    <type name="Price"           primitiveType="int64" description="Fixed point, 8 implied decimals"/>
+    <type name="Quantity"        primitiveType="int64"/>
+    <type name="TradingDate"     primitiveType="int32" description="YYYYMMDD; 0 = GTC"/>
+    <type name="Timestamp"       primitiveType="int64" description="Sequenced cluster time"/>
+    <type name="SmpId"           primitiveType="int64" description="0 = default to participantId"/>
+    <type name="CollarBps"       primitiveType="int32" description="Basis points; 1 bp = 0.01%"/>
+    <type name="LevelCount"      primitiveType="int32"/>
+    <type name="SeqNum"          primitiveType="int64" description="Per-stream, monotonic, gap-detectable"/>
+    <type name="OrderCount"      primitiveType="int32"/>
+    <type name="ShardId"         primitiveType="int32"/>
+    <type name="Symbol"          primitiveType="char" length="16"/>
+    <type name="Isin"            primitiveType="char" length="12"/>
+    <type name="CurrencyCode"    primitiveType="char" length="3"/>
+    <type name="SecurityName"    primitiveType="char" length="48"/>
+    <type name="ChannelUri"      primitiveType="char" length="128"/>
+
+    <enum name="Side" encodingType="int8">
+      <validValue name="BUY">0</validValue>
+      <validValue name="SELL">1</validValue>
+    </enum>
+    <enum name="ExecType" encodingType="int8">
+      <validValue name="NEW">0</validValue>
+      <validValue name="TRADE">1</validValue>
+      <validValue name="CANCELED">2</validValue>
+      <validValue name="EXPIRED">3</validValue>
+      <validValue name="REJECTED">4</validValue>
+    </enum>
+    <enum name="Phase" encodingType="int8">
+      <validValue name="CLOSED">0</validValue>
+      <validValue name="PRE_OPEN">1</validValue>
+      <validValue name="OPEN_AUCTION">2</validValue>
+      <validValue name="CONTINUOUS">3</validValue>
+    </enum>
+    <enum name="SmpStrategy" encodingType="int8">
+      <validValue name="CANCEL_AGGRESSOR">0</validValue>
+      <validValue name="CANCEL_RESTING">1</validValue>
+    </enum>
+    <enum name="RemoveReason" encodingType="int8">
+      <validValue name="CANCELED">0</validValue>
+      <validValue name="FILLED">1</validValue>
+      <validValue name="EXPIRED">2</validValue>
+    </enum>
+    <enum name="RejectReason" encodingType="int32">
+      <validValue name="NONE">0</validValue>
+      <validValue name="PRICE_OUT_OF_BOUNDS">1</validValue>
+      <validValue name="ORDER_EXPIRED">2</validValue>
+      <validValue name="UNKNOWN_ORDER">3</validValue>
+      <validValue name="UNAUTHORIZED_PARTICIPANT">4</validValue>
+      <validValue name="MARKET_CLOSED">5</validValue>
+      <validValue name="UNKNOWN_SECURITY">6</validValue>
+      <validValue name="BOOK_CAPACITY">7</validValue>
+      <validValue name="PRICE_OUT_OF_LADDER">8</validValue>
+      <validValue name="SELF_MATCH_PREVENTED">9</validValue>
+      <validValue name="VOLATILITY_HALT">10</validValue>
+    </enum>
+  </types>
+
+  <!-- ============================ Inbound ============================ -->
+
+  <sbe:message name="NewOrderSingle" id="1" blockLength="56">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="clOrdId"       id="2" type="ClOrdId"/>
+    <field name="price"         id="3" type="Price"/>
+    <field name="qty"           id="4" type="Quantity"/>
+    <field name="smpId"         id="5" type="SmpId"/>
+    <field name="securityId"    id="6" type="SecurityId"/>
+    <field name="expireDate"    id="7" type="TradingDate"/>
+    <field name="side"          id="8" type="Side"/>
+    <field name="smpStrategy"   id="9" type="SmpStrategy"/>
+  </sbe:message>
+
+  <sbe:message name="OrderCancelRequest" id="2" blockLength="40">
+    <field name="participantId"   id="1" type="ParticipantId"/>
+    <field name="origClOrdId"     id="2" type="ClOrdId"/>
+    <field name="clOrdId"         id="3" type="ClOrdId"/>
+    <field name="exchangeOrderId" id="4" type="ExchangeOrderId"/>
+    <field name="securityId"      id="5" type="SecurityId"/>
+    <field name="side"            id="6" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="SessionTransition" id="3" blockLength="16">
+    <field name="transitionTime" id="1" type="Timestamp"/>
+    <field name="tradingDate"    id="2" type="TradingDate"/>
+    <field name="targetPhase"    id="3" type="Phase"/>
+  </sbe:message>
+
+  <sbe:message name="PurgeExpiredOrders" id="4" blockLength="16">
+    <field name="purgeTime"   id="1" type="Timestamp"/>
+    <field name="tradingDate" id="2" type="TradingDate"/>
+  </sbe:message>
+
+  <sbe:message name="SecurityDefinition" id="5" blockLength="40">
+    <field name="referencePrice"    id="1" type="Price"/>
+    <field name="priceFloor"        id="2" type="Price"/>
+    <field name="tickSize"          id="3" type="Price"/>
+    <field name="securityId"        id="4" type="SecurityId"/>
+    <field name="staticCollarBps"   id="5" type="CollarBps"/>
+    <field name="dynamicCollarBps"  id="6" type="CollarBps"/>
+    <field name="levelCount"        id="7" type="LevelCount"/>
+  </sbe:message>
+
+  <!-- ====================== Outbound: private ======================== -->
+
+  <!-- cumQty is intentionally absent: the gateway derives it from origQty - leavesQty. -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="64">
+    <field name="participantId"   id="1" type="ParticipantId"/>
+    <field name="clOrdId"         id="2" type="ClOrdId"/>
+    <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
+    <field name="price"           id="4" type="Price"/>
+    <field name="lastQty"         id="5" type="Quantity"/>
+    <field name="leavesQty"       id="6" type="Quantity"/>
+    <field name="securityId"      id="7" type="SecurityId"/>
+    <field name="rejectReason"    id="8" type="RejectReason"/>
+    <field name="execType"        id="9" type="ExecType"/>
+    <field name="side"            id="10" type="Side"/>
+  </sbe:message>
+
+  <!-- =================== Outbound: book events ======================= -->
+
+  <sbe:message name="OrderAdded" id="20" blockLength="48">
+    <field name="seqNum"          id="0" type="SeqNum"/>
+    <field name="exchangeOrderId" id="1" type="ExchangeOrderId"/>
+    <field name="price"           id="2" type="Price"/>
+    <field name="qty"             id="3" type="Quantity"/>
+    <field name="securityId"      id="4" type="SecurityId"/>
+    <field name="shardId"         id="5" type="ShardId"/>
+    <field name="side"            id="6" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="OrderReduced" id="21" blockLength="56">
+    <field name="seqNum"          id="0" type="SeqNum"/>
+    <field name="exchangeOrderId" id="1" type="ExchangeOrderId"/>
+    <field name="price"           id="2" type="Price"/>
+    <field name="lastQty"         id="3" type="Quantity"/>
+    <field name="leavesQty"       id="4" type="Quantity"/>
+    <field name="securityId"      id="5" type="SecurityId"/>
+    <field name="shardId"         id="6" type="ShardId"/>
+    <field name="side"            id="7" type="Side"/>
+  </sbe:message>
+
+  <!-- leavesQty makes the L2 feed derivable from the event stream alone: without the removed
+       quantity every downstream aggregator would have to shadow per-order state. -->
+  <sbe:message name="OrderRemoved" id="22" blockLength="48">
+    <field name="seqNum"          id="0" type="SeqNum"/>
+    <field name="exchangeOrderId" id="1" type="ExchangeOrderId"/>
+    <field name="price"           id="2" type="Price"/>
+    <field name="leavesQty"       id="3" type="Quantity"/>
+    <field name="securityId"      id="4" type="SecurityId"/>
+    <field name="shardId"         id="5" type="ShardId"/>
+    <field name="side"            id="6" type="Side"/>
+    <field name="reason"          id="7" type="RemoveReason"/>
+  </sbe:message>
+
+  <sbe:message name="TradeExecuted" id="23" blockLength="56">
+    <field name="seqNum"        id="0" type="SeqNum"/>
+    <field name="price"         id="1" type="Price"/>
+    <field name="qty"           id="2" type="Quantity"/>
+    <field name="takerOrderId"  id="3" type="ExchangeOrderId"/>
+    <field name="makerOrderId"  id="4" type="ExchangeOrderId"/>
+    <field name="securityId"    id="5" type="SecurityId"/>
+    <field name="shardId"       id="6" type="ShardId"/>
+    <field name="aggressorSide" id="7" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="AuctionUncrossed" id="24" blockLength="32">
+    <field name="seqNum"       id="0" type="SeqNum"/>
+    <field name="uncrossPrice" id="1" type="Price"/>
+    <field name="executedQty"  id="2" type="Quantity"/>
+    <field name="securityId"   id="3" type="SecurityId"/>
+    <field name="shardId"      id="4" type="ShardId"/>
+  </sbe:message>
+
+  <sbe:message name="SessionChanged" id="25" blockLength="24">
+    <field name="seqNum"     id="0" type="SeqNum"/>
+    <field name="securityId" id="1" type="SecurityId"/>
+    <field name="shardId"    id="2" type="ShardId"/>
+    <field name="phase"      id="3" type="Phase"/>
+  </sbe:message>
+
+  <sbe:message name="VolatilityHalted" id="26" blockLength="48">
+    <field name="seqNum"          id="0" type="SeqNum"/>
+    <field name="collarReference" id="1" type="Price"     description="Snapshot at aggressor arrival"/>
+    <field name="attemptedPrice"  id="2" type="Price"/>
+    <field name="breachedBound"   id="3" type="Price"/>
+    <field name="securityId"      id="4" type="SecurityId"/>
+    <field name="shardId"         id="5" type="ShardId"/>
+    <field name="aggressorSide"   id="6" type="Side"/>
+  </sbe:message>
+
+
+  <!-- ============ Derived feeds, published by the Market Data process ============ -->
+
+  <sbe:message name="DepthUpdate" id="40" blockLength="40">
+    <field name="seqNum"       id="1" type="SeqNum"/>
+    <field name="price"        id="2" type="Price"/>
+    <field name="aggregateQty" id="3" type="Quantity" description="0 means the level is gone"/>
+    <field name="securityId"   id="4" type="SecurityId"/>
+    <field name="shardId"      id="5" type="ShardId"/>
+    <field name="orderCount"   id="6" type="OrderCount"/>
+    <field name="side"         id="7" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="TopOfBook" id="41" blockLength="48">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="bidPrice"   id="2" type="Price"/>
+    <field name="bidQty"     id="3" type="Quantity"/>
+    <field name="askPrice"   id="4" type="Price"/>
+    <field name="askQty"     id="5" type="Quantity"/>
+    <field name="securityId" id="6" type="SecurityId"/>
+    <field name="shardId"    id="7" type="ShardId"/>
+  </sbe:message>
+
+  <sbe:message name="LastTrade" id="42" blockLength="40">
+    <field name="seqNum"        id="1" type="SeqNum"/>
+    <field name="price"         id="2" type="Price"/>
+    <field name="qty"           id="3" type="Quantity"/>
+    <field name="securityId"    id="4" type="SecurityId"/>
+    <field name="shardId"       id="5" type="ShardId"/>
+    <field name="aggressorSide" id="6" type="Side"/>
+  </sbe:message>
+
+  <!-- ================= Client-facing, published by the Gateway =================== -->
+
+  <!-- The engine omits cumQty and origQty (no room in a 64-byte order slot); the gateway
+       remembers origQty and restores both on the outbound leg. -->
+  <sbe:message name="ClientExecutionReport" id="50" blockLength="80">
+    <field name="participantId"   id="1"  type="ParticipantId"/>
+    <field name="clOrdId"         id="2"  type="ClOrdId"/>
+    <field name="exchangeOrderId" id="3"  type="ExchangeOrderId"/>
+    <field name="price"           id="4"  type="Price"/>
+    <field name="lastQty"         id="5"  type="Quantity"/>
+    <field name="leavesQty"       id="6"  type="Quantity"/>
+    <field name="cumQty"          id="7"  type="Quantity"/>
+    <field name="origQty"         id="8"  type="Quantity"/>
+    <field name="securityId"      id="9"  type="SecurityId"/>
+    <field name="rejectReason"    id="10" type="RejectReason"/>
+    <field name="execType"        id="11" type="ExecType"/>
+    <field name="side"            id="12" type="Side"/>
+  </sbe:message>
+
+
+  <!-- ============ Tradable universe directory, published by Discovery ============ -->
+
+  <!-- Broadcast periodically on a well-known channel rather than served on request: an adapter
+       joins, waits for the next cycle, and builds its routing table with no session state. -->
+
+  <sbe:message name="DirectoryBegin" id="60" blockLength="16">
+    <field name="universeVersion" id="1" type="SeqNum" description="Changes iff the universe does"/>
+    <field name="shardCount"      id="2" type="OrderCount"/>
+    <field name="securityCount"   id="3" type="OrderCount"/>
+  </sbe:message>
+
+  <sbe:message name="ShardEntry" id="61" blockLength="264">
+    <field name="shardId"        id="1" type="ShardId"/>
+    <field name="ingressChannel" id="2" type="ChannelUri"/>
+    <field name="egressChannel"  id="3" type="ChannelUri"/>
+  </sbe:message>
+
+  <sbe:message name="SecurityEntry" id="62" blockLength="112">
+    <field name="priceFloor"  id="1" type="Price"/>
+    <field name="tickSize"    id="2" type="Price"/>
+    <field name="securityId"  id="3" type="SecurityId"/>
+    <field name="shardId"     id="4" type="ShardId"/>
+    <field name="levelCount"  id="5" type="LevelCount"/>
+    <field name="symbol"      id="6" type="Symbol"/>
+    <field name="isin"        id="7" type="Isin"/>
+    <field name="currency"    id="8" type="CurrencyCode"/>
+    <field name="name"        id="9" type="SecurityName"/>
+  </sbe:message>
+
+  <sbe:message name="DirectoryEnd" id="63" blockLength="8">
+    <field name="universeVersion" id="1" type="SeqNum"/>
+  </sbe:message>
+
+  <!-- ================= Snapshot (cluster-internal, never on the wire) ============ -->
+
+  <sbe:message name="SnapshotEngineState" id="30" blockLength="16">
+    <field name="nextExchangeOrderId" id="1" type="ExchangeOrderId"/>
+    <field name="nextBookEventSeqNum" id="2" type="SeqNum"/>
+  </sbe:message>
+
+  <sbe:message name="SnapshotBook" id="31" blockLength="40">
+    <field name="staticReference"   id="1" type="Price"/>
+    <field name="dynamicReference"  id="2" type="Price"/>
+    <field name="securityId"        id="3" type="SecurityId"/>
+    <field name="tradingDate"       id="4" type="TradingDate"/>
+    <field name="staticCollarBps"   id="5" type="CollarBps"/>
+    <field name="dynamicCollarBps"  id="6" type="CollarBps"/>
+    <field name="phase"             id="7" type="Phase"/>
+  </sbe:message>
+
+  <sbe:message name="SnapshotOrder" id="32" blockLength="64">
+    <field name="participantId"   id="1" type="ParticipantId"/>
+    <field name="smpId"           id="2" type="SmpId"/>
+    <field name="clOrdId"         id="3" type="ClOrdId"/>
+    <field name="exchangeOrderId" id="4" type="ExchangeOrderId"/>
+    <field name="price"           id="5" type="Price"/>
+    <field name="leavesQty"       id="6" type="Quantity"/>
+    <field name="securityId"      id="7" type="SecurityId"/>
+    <field name="expireDate"      id="8" type="TradingDate"/>
+    <field name="side"            id="9" type="Side"/>
+    <field name="smpStrategy"     id="10" type="SmpStrategy"/>
+  </sbe:message>
+
+  <sbe:message name="SnapshotEnd" id="33" blockLength="8">
+    <field name="restingOrderCount" id="1" type="Quantity"/>
+  </sbe:message>
+</sbe:messageSchema>

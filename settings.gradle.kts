@@ -1,0 +1,23 @@
+rootProject.name = "most-exchange"
+
+pluginManagement {
+    repositories {
+        gradlePluginPortal()
+        mavenCentral()
+    }
+}
+
+dependencyResolutionManagement {
+    repositories {
+        mavenCentral()
+    }
+}
+
+include(
+    "sbe",          // SBE schema + generated codecs, shared by every process
+    "reference",    // Security specs, shard registry, tradable-universe directory
+    "discovery",    // Publishes the universe so adapters can route by security
+    "engine",       // MatchingEngineService (Aeron Cluster) -> native image
+    "market-data",  // Book Event Stream -> L1/L2/L3 feeds
+    "gateway",      // Order entry: validation, cumQty reconstruction
+)

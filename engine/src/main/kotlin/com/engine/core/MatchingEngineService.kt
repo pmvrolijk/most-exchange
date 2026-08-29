@@ -27,6 +27,7 @@ import com.engine.sbe.VolatilityHaltedEncoder
 import io.aeron.ExclusivePublication
 import io.aeron.Image
 import io.aeron.Publication
+import io.aeron.cluster.client.AeronCluster
 import io.aeron.cluster.codecs.CloseReason
 import io.aeron.cluster.service.ClientSession
 import io.aeron.cluster.service.Cluster
@@ -516,9 +517,25 @@ class MatchingEngineService(
             return
         }
         val reference = securityDefinitionDecoder.referencePrice()
+        val staticBps = securityDefinitionDecoder.staticCollarBps()
+
+        // Design.md §3.2: the ladder must be strictly wider than the static collar band, so that
+        // collar rejection always fires first and PRICE_OUT_OF_LADDER stays unreachable. A
+        // definition that breaks the invariant would have orders inside the band rejected by the
+        // backstop instead, which is confusing and hides the real limit. Reject it instead.
+        if (staticBps > 0) {
+            val bound = reference * staticBps / BPS_DENOMINATOR
+            if (!book.isLevelInRange(book.levelOf(reference - bound)) ||
+                !book.isLevelInRange(book.levelOf(reference + bound))
+            ) {
+                rejectedDefinitions++
+                return
+            }
+        }
+
         book.staticReference = reference
         book.dynamicReference = reference
-        book.staticCollarBps = securityDefinitionDecoder.staticCollarBps()
+        book.staticCollarBps = staticBps
         book.dynamicCollarBps = securityDefinitionDecoder.dynamicCollarBps()
     }
 
@@ -708,7 +725,11 @@ class MatchingEngineService(
             val result = session.tryClaim(length, claim)
             if (result > 0 || result == ClientSession.MOCKED_OFFER) {
                 if (result > 0) {
-                    execReportEncoder.wrapAndApplyHeader(claim.buffer(), claim.offset(), headerEncoder)
+                    // Aeron reserves the cluster session header in front of the payload; writing
+                    // at claim.offset() would overwrite it and the egress adapter would reject
+                    // the message for carrying the wrong schema.
+                    val payloadOffset = claim.offset() + AeronCluster.SESSION_HEADER_LENGTH
+                    execReportEncoder.wrapAndApplyHeader(claim.buffer(), payloadOffset, headerEncoder)
                         .participantId(participantId)
                         .clOrdId(clOrdId)
                         .exchangeOrderId(exchangeOrderId)

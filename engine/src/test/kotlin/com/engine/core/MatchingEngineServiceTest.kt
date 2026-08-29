@@ -278,3 +278,35 @@ class MatchingEngineServiceTest {
         assertEquals("NEW", h.reports.last().execType)
     }
 }
+
+class SecurityDefinitionInvariantTest {
+
+    @Test
+    fun `a collar band wider than the ladder is rejected`() {
+        // Design.md §3.2: the ladder must be wider than the static band, so collar rejection
+        // always fires first and PRICE_OUT_OF_LADDER stays unreachable.
+        val h = Harness(arrayOf(serviceBook(1, levelCount = 128)))
+        h.defineSecurity(h.books[0], referencePrice = 100L, staticCollarBps = 5000)
+
+        assertEquals(1L, h.service.rejectedDefinitions)
+        assertEquals(0L, h.books[0].staticReference)
+    }
+
+    @Test
+    fun `a band inside the ladder is accepted`() {
+        val h = Harness(arrayOf(serviceBook(1, levelCount = 1024)))
+        h.defineSecurity(h.books[0], referencePrice = 100L, staticCollarBps = 5000)
+
+        assertEquals(0L, h.service.rejectedDefinitions)
+        assertEquals(100L, h.books[0].staticReference)
+    }
+
+    @Test
+    fun `without a collar the ladder is the only bound`() {
+        val h = Harness(arrayOf(serviceBook(1, levelCount = 128)))
+        h.defineSecurity(h.books[0], referencePrice = 100L, staticCollarBps = 0)
+
+        assertEquals(0L, h.service.rejectedDefinitions)
+        assertEquals(100L, h.books[0].staticReference)
+    }
+}

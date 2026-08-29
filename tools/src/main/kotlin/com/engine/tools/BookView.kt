@@ -54,7 +54,7 @@ class BookView(val securityId: Int, val symbol: String) {
         append("── $symbol (id $securityId) ")
         append("─".repeat(if (symbol.length < 40) 40 - symbol.length else 1))
         append('\n')
-        append(String.format("%18s %10s │ %-10s %-18s%n", "bid qty", "bid", "ask", "ask qty"))
+        append(String.format("%10s %-6s %10s │ %-10s %-10s %s%n", "qty", "ords", "bid", "ask", "qty", "ords"))
 
         val bidRows = bids.entries.take(depth)
         val askRows = asks.entries.take(depth)
@@ -62,18 +62,20 @@ class BookView(val securityId: Int, val symbol: String) {
         if (rows == 0) {
             append("  (empty)\n")
         } else {
+            // An absent level prints blank rather than zero: "0 (0)" at no price reads as
+            // real liquidity that happens to be empty, which is not what it means.
             for (i in 0 until rows) {
                 val bid = bidRows.getOrNull(i)
                 val ask = askRows.getOrNull(i)
                 append(
                     String.format(
-                        "%12d (%3d) %10s │ %-10s %-12d (%d)%n",
-                        bid?.value?.qty ?: 0,
-                        bid?.value?.orders ?: 0,
+                        "%10s %-6s %10s │ %-10s %-10s %s%n",
+                        bid?.value?.qty?.toString() ?: "",
+                        bid?.value?.orders?.let { "($it)" } ?: "",
                         bid?.key?.let { PriceCodec.format(it) } ?: "",
                         ask?.key?.let { PriceCodec.format(it) } ?: "",
-                        ask?.value?.qty ?: 0,
-                        ask?.value?.orders ?: 0,
+                        ask?.value?.qty?.toString() ?: "",
+                        ask?.value?.orders?.let { "($it)" } ?: "",
                     ),
                 )
             }

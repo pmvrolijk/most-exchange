@@ -13,6 +13,7 @@ import io.aeron.DirectBufferVector
 import io.aeron.cluster.service.ClientSession
 import io.aeron.cluster.service.Cluster
 import io.aeron.cluster.service.ClusteredServiceContainer
+import io.aeron.cluster.client.AeronCluster
 import io.aeron.logbuffer.BufferClaim
 import io.aeron.protocol.DataHeaderFlyweight
 import org.agrona.DirectBuffer
@@ -71,10 +72,14 @@ class FakeSession(
     override fun offer(b: DirectBuffer, offset: Int, length: Int): Long = 1L
     override fun offer(vectors: Array<out DirectBufferVector>): Long = 1L
 
+    /**
+     * Reserves room for the cluster session header exactly as Aeron does, so the payload offset
+     * the service must use is the one it would use in production.
+     */
     override fun tryClaim(length: Int, bufferClaim: BufferClaim): Long {
-        val framed = length + DataHeaderFlyweight.HEADER_LENGTH
+        val framed = length + AeronCluster.SESSION_HEADER_LENGTH + DataHeaderFlyweight.HEADER_LENGTH
         bufferClaim.wrap(buffer, position, framed)
-        claimed += position + DataHeaderFlyweight.HEADER_LENGTH
+        claimed += position + DataHeaderFlyweight.HEADER_LENGTH + AeronCluster.SESSION_HEADER_LENGTH
         position += (framed + 31) and 31.inv()
         return 1L
     }

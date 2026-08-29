@@ -22,7 +22,16 @@ const val NOT_FOUND = -1L
 class OrderStateStore {
 
     private val pendingByParticipant = Long2ObjectHashMap<Long2LongHashMap>()
-    private val liveByExchangeOrderId = Long2LongHashMap(NOT_FOUND)
+    private val origQtyByExchangeOrderId = Long2LongHashMap(NOT_FOUND)
+
+    /**
+     * Filled quantity, accumulated from each fill's lastQty rather than derived as
+     * `origQty - leavesQty`. A terminal report carries `leavesQty = 0` whether the order filled
+     * or was cancelled, so deriving it would report a cancelled order as fully filled.
+     */
+    // The missing value must be one a real cumQty can never take: Agrona refuses to store a
+    // value equal to it, and a freshly acknowledged order has filled exactly zero.
+    private val cumQtyByExchangeOrderId = Long2LongHashMap(NOT_FOUND)
 
     var liveOrders = 0
         private set
@@ -42,12 +51,22 @@ class OrderStateStore {
         val pending = pendingByParticipant.get(participantId) ?: return NOT_FOUND
         val origQty = pending.remove(clOrdId)
         if (origQty == NOT_FOUND) return NOT_FOUND
-        liveByExchangeOrderId.put(exchangeOrderId, origQty)
+        origQtyByExchangeOrderId.put(exchangeOrderId, origQty)
+        cumQtyByExchangeOrderId.put(exchangeOrderId, 0L)
         liveOrders++
         return origQty
     }
 
-    fun origQtyOf(exchangeOrderId: Long): Long = liveByExchangeOrderId.get(exchangeOrderId)
+    fun origQtyOf(exchangeOrderId: Long): Long = origQtyByExchangeOrderId.get(exchangeOrderId)
+
+    fun cumQtyOf(exchangeOrderId: Long): Long =
+        cumQtyByExchangeOrderId.get(exchangeOrderId).let { if (it == NOT_FOUND) 0L else it }
+
+    /** Accumulates a fill. Ignored for an order this gateway never saw. */
+    fun recordFill(exchangeOrderId: Long, lastQty: Long) {
+        if (origQtyByExchangeOrderId.get(exchangeOrderId) == NOT_FOUND) return
+        cumQtyByExchangeOrderId.put(exchangeOrderId, cumQtyOf(exchangeOrderId) + lastQty)
+    }
 
     /** Drops a rejected order that never reached the book, so pending state cannot accumulate. */
     fun discardPending(participantId: Long, clOrdId: Long) {
@@ -55,6 +74,7 @@ class OrderStateStore {
     }
 
     fun release(exchangeOrderId: Long) {
-        if (liveByExchangeOrderId.remove(exchangeOrderId) != NOT_FOUND) liveOrders--
+        cumQtyByExchangeOrderId.remove(exchangeOrderId)
+        if (origQtyByExchangeOrderId.remove(exchangeOrderId) != NOT_FOUND) liveOrders--
     }
 }

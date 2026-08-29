@@ -62,7 +62,17 @@ selection, the SMP fixed-point loop, allocation), and the off-session expiry pur
 `MatchingEngineService` — the full `ClusteredService`, message dispatch, execution-report egress,
 book-event publication, and snapshot/restore. 76 tests.
 
-All seven modules are implemented. 184 tests.
+All seven modules are implemented. 188 tests, plus an end-to-end script.
+
+## End-to-end test
+
+```sh
+./gradlew installDist && ./e2e/run-e2e.sh
+```
+
+Starts every process — cluster host, engine, gateway, market data, discovery — and drives a real
+trade through the CLI. Single node and IPC rather than multicast: it proves the components talk to
+each other, not that the network is configured. Logs land in `build/e2e/logs/`.
 
 ## Running
 

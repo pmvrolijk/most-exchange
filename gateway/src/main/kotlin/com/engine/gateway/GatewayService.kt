@@ -172,8 +172,13 @@ class GatewayService(
         // it with what is known rather than dropping a report the client is waiting for.
         if (origQty == NOT_FOUND && execType != ExecType.REJECTED) untrackedReports++
 
+        // CumQty is accumulated from fills, never derived from leavesQty: a terminal report
+        // carries leavesQty = 0 whether the order filled or was cancelled, so deriving it would
+        // report a cancelled order as fully filled.
+        if (execType == ExecType.TRADE) state.recordFill(exchangeOrderId, execReport.lastQty())
+
         val knownOrigQty = if (origQty == NOT_FOUND) 0L else origQty
-        val cumQty = if (origQty == NOT_FOUND) 0L else origQty - leavesQty
+        val cumQty = if (origQty == NOT_FOUND) 0L else state.cumQtyOf(exchangeOrderId)
 
         emitClientReport(
             participantId, clOrdId, exchangeOrderId, execReport.securityId(), execType,

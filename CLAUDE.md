@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 update it alongside code when the design changes. §8 tracks the open questions.
 
 The Gradle skeleton is in place and green: seven modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`),
-SBE codegen wired, 184 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+SBE codegen wired, 188 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
@@ -26,6 +26,15 @@ process. Boot config carries only geometry and capacity — reference prices and
 `SecurityDefinition` commands through the log. **Every node must boot with identical geometry**;
 `EngineConfig.fingerprint()` exists so that is checkable, since it is the one misconfiguration
 consensus cannot catch.
+
+`./e2e/run-e2e.sh` (after `./gradlew installDist`) runs every process against a real single-node
+cluster and drives a trade through the CLI. Run it after changing anything on the wire: it has
+already caught three defects unit tests could not — a clobbered Aeron session header, cumQty derived
+from a terminal report's leavesQty, and an unenforced ladder-range invariant.
+
+**`ClientSession.tryClaim` reserves `AeronCluster.SESSION_HEADER_LENGTH` ahead of the payload.**
+Encode at `claim.offset() + SESSION_HEADER_LENGTH`, never at `claim.offset()`. The test fake models
+this; keep it that way or the tests validate a layout the cluster rejects.
 
 ```sh
 ./gradlew build                                    # compile, generate codecs, test

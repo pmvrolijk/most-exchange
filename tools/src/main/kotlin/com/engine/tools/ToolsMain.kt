@@ -12,12 +12,20 @@ private val USAGE = """
       most send   --symbol SYM --side buy|sell --price P --qty Q [options]
       most cancel --symbol SYM --side buy|sell --order-id ID --orig-clordid ID [options]
       most book   [--symbol SYM[,SYM...]] [--depth N] [--refresh MS]
+      most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
+      most session --phase closed|pre-open|open-auction|continuous [--shard N]
+      most purge  [--trading-date YYYYMMDD] [--shard N]
+      most cluster [--dir DIR]
 
     Commands:
       securities  List the tradable universe and the shard serving each security.
       send        Submit an order, routed to the gateway that owns the symbol.
       cancel      Cancel a resting order.
       book        Rebuild and print order books from the L2 depth feed.
+      define      Seed a security's reference price and collar widths.
+      session     Move a shard to a trading phase; the uncross runs on the way to continuous.
+      purge       Run the off-session expiry sweep.
+      cluster     Run a single-node cluster host for local development.
 
     Order options:
       --clordid ID             Client order id (default: current millis)
@@ -49,6 +57,10 @@ fun main(argv: Array<String>) {
             "send" -> runSend(args)
             "cancel" -> runCancel(args)
             "book" -> runBook(args)
+            "define" -> runDefine(args)
+            "session" -> runSession(args)
+            "purge" -> runPurge(args)
+            "cluster" -> runCluster(args)
             else -> {
                 System.err.println("most: unknown command '$command'")
                 println()

@@ -62,6 +62,9 @@ fun main(args: Array<String>) {
             .egressListener(egressListener)
             .ingressChannel(config.ingressChannel)
             .egressChannel(config.egressChannel)
+        // Multi-node clusters advertise every member's ingress endpoint so the client can find
+        // the leader; a channel carrying its own endpoint is the single-node shorthand.
+        config.ingressEndpoints?.let(clusterContext::ingressEndpoints)
 
         val cluster = try {
             AeronCluster.connect(clusterContext)
@@ -124,6 +127,7 @@ data class GatewayConfig(
     val shard: ShardSpec,
     val aeronDirectoryName: String?,
     val ingressChannel: String,
+    val ingressEndpoints: String?,
     val egressChannel: String,
     val clientInboundChannel: String,
     val clientInboundStreamId: Int,
@@ -136,8 +140,8 @@ data class GatewayConfig(
         fun from(properties: Properties, shard: ShardSpec): GatewayConfig = GatewayConfig(
             shard = shard,
             aeronDirectoryName = properties.getProperty("gateway.aeronDir"),
-            ingressChannel = properties.getProperty("gateway.ingressChannel")
-                ?: "aeron:udp?endpoint=localhost:9010",
+            ingressChannel = properties.getProperty("gateway.ingressChannel") ?: "aeron:udp",
+            ingressEndpoints = properties.getProperty("gateway.ingressEndpoints"),
             egressChannel = properties.getProperty("gateway.egressChannel")
                 ?: "aeron:udp?endpoint=localhost:9020",
             clientInboundChannel = properties.getProperty("gateway.client.inbound.channel")

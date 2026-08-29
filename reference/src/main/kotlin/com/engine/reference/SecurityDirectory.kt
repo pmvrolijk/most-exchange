@@ -115,6 +115,7 @@ class DirectoryClient {
 
     private var bySymbol: Map<String, RoutedSecurity> = emptyMap()
     private var bySecurityId: Map<Int, RoutedSecurity> = emptyMap()
+    private var routesByShard: Map<Int, ShardRoute> = emptyMap()
 
     var version = 0L
         private set
@@ -129,6 +130,11 @@ class DirectoryClient {
     fun routeFor(securityId: Int): RoutedSecurity? = bySecurityId[securityId]
 
     fun routeForSymbol(symbol: String): RoutedSecurity? = bySymbol[symbol]
+
+    /** Shard-wide commands -- a session transition, a purge -- address a shard, not a security. */
+    fun shardRoute(shardId: Int): ShardRoute? = routesByShard[shardId]
+
+    val shards: Collection<ShardRoute> get() = routesByShard.values
 
     fun onDirectoryMessage(buffer: DirectBuffer, offset: Int, length: Int) {
         if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
@@ -224,6 +230,7 @@ class DirectoryClient {
         }
         bySecurityId = byId
         bySymbol = bySym
+        routesByShard = HashMap(pendingShards)
         version = pendingVersion
     }
 

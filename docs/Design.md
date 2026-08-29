@@ -1818,8 +1818,37 @@ operator reading depth off the screen has to be told when it can no longer be tr
 
 ---
 
+### End-to-End Test
+
+`e2e/run-e2e.sh` runs every process — cluster host, engine, gateway, market data, discovery — and
+drives a real trade through the CLI: list the universe, define a security, open the session, rest an
+order, cross it, watch the depth, cancel the remainder. Single node and IPC rather than multicast,
+because it proves the components talk to each other, not that the network is configured.
+
+It found three defects that unit tests could not:
+
+* **The engine overwrote Aeron's cluster session header.** `ClientSession.tryClaim` reserves
+  `SESSION_HEADER_LENGTH` bytes ahead of the payload; encoding at `claim.offset()` clobbered it and
+  every execution report was rejected by the egress adapter as carrying the wrong schema. The fake
+  session in the unit tests did not model the header, so the tests validated the wrong layout — it
+  now reserves the same space.
+* **The gateway reported a cancelled order as fully filled.** `cumQty` was derived as
+  `origQty - leavesQty`, but a terminal report carries `leavesQty = 0` whether the order filled or
+  was cancelled. It is now accumulated from each fill's `lastQty`, which is what `CumQty` means. The
+  unit test that should have caught this asserted the buggy value while its name described the
+  correct one.
+* **Nothing enforced the ladder-range invariant.** §3.2 requires the ladder to be wider than the
+  static collar band; a configuration that broke it had orders inside the band rejected by the
+  `PRICE_OUT_OF_LADDER` backstop instead. `SecurityDefinition` now rejects a collar whose band falls
+  outside the ladder.
+
 ## 8. Open Items
 
+* **No market data snapshot for late joiners.** A subscriber that joins after trading starts sees
+  only subsequent updates, and §5 tells a consumer to "resynchronise from a snapshot" that does not
+  exist. The e2e test works around it by starting the inspector before any depth is published. A
+  periodic L2 snapshot, or a request-response recovery channel, is needed before a real consumer can
+  join mid-session.
 * **Halt-recovery runbook.** §4.6 requires an operator to re-seed `staticReference` via
   `SecurityDefinition` before `PRE_OPEN` when the halt price sits outside the static band. The
   procedure, and who is authorised to issue it, need defining operationally.

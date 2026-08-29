@@ -200,16 +200,20 @@ class GatewayServiceTest {
 
         val cancel = sink.toClient.last()
         assertEquals("CANCELED", cancel.execType)
-        assertEquals(10L, cancel.cumQty)
+        // 4 filled, 6 cancelled. A terminal report carries leavesQty = 0 either way, so cumQty
+        // must come from the fills rather than from origQty - leavesQty.
+        assertEquals(4L, cancel.cumQty)
+        assertEquals(10L, cancel.origQty)
         assertEquals(0, service.liveOrders)
     }
 
     @Test
-    fun `an expiry releases state`() {
+    fun `an expiry releases state and reports nothing filled`() {
         newOrder(1, 100, 1, qty = 10)
         report(1, 100, 500, ExecType.NEW, leavesQty = 10)
         report(1, 100, 500, ExecType.EXPIRED, leavesQty = 0)
 
+        assertEquals(0L, sink.toClient.last().cumQty)
         assertEquals(0, service.liveOrders)
     }
 

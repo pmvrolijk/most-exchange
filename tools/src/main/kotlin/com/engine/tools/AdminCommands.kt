@@ -1,31 +1,17 @@
 package com.engine.tools
 
+import com.engine.reference.OperatorCommands
 import com.engine.reference.PriceCodec
 import com.engine.reference.ShardRoute
-import com.engine.sbe.MessageHeaderEncoder
-import com.engine.sbe.Phase
-import com.engine.sbe.PurgeExpiredOrdersEncoder
-import com.engine.sbe.SecurityDefinitionEncoder
-import com.engine.sbe.SessionTransitionEncoder
 import org.agrona.MutableDirectBuffer
 import org.agrona.concurrent.SleepingIdleStrategy
 import org.agrona.concurrent.UnsafeBuffer
 import java.time.Duration
 import java.time.LocalDate
 
-fun parsePhase(text: String): Byte = when (text.lowercase().replace("_", "-")) {
-    "closed" -> Phase.CLOSED.value()
-    "pre-open", "preopen" -> Phase.PRE_OPEN.value()
-    "open-auction", "auction" -> Phase.OPEN_AUCTION.value()
-    "continuous" -> Phase.CONTINUOUS.value()
-    else -> throw IllegalArgumentException(
-        "phase must be closed, pre-open, open-auction or continuous, got '$text'"
-    )
-}
+fun parsePhase(text: String): Byte = OperatorCommands.parsePhase(text)
 
-fun todayAsTradingDate(): Int = LocalDate.now().let {
-    it.year * 10_000 + it.monthValue * 100 + it.dayOfMonth
-}
+fun todayAsTradingDate(): Int = OperatorCommands.tradingDateOf(LocalDate.now())
 
 /** Operator commands go to the gateway like any other message and pass through untouched. */
 private fun sendToShard(
@@ -105,15 +91,16 @@ fun runDefine(args: Args) {
             }
         },
         build = { buffer ->
-            SecurityDefinitionEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
-                .referencePrice(reference)
-                .priceFloor(priceFloor)
-                .tickSize(tickSize)
-                .securityId(securityId)
-                .staticCollarBps(staticBps)
-                .dynamicCollarBps(dynamicBps)
-                .levelCount(levelCount)
-            MessageHeaderEncoder.ENCODED_LENGTH + SecurityDefinitionEncoder.BLOCK_LENGTH
+            OperatorCommands.encodeSecurityDefinition(
+                buffer,
+                securityId = securityId,
+                referencePrice = reference,
+                priceFloor = priceFloor,
+                tickSize = tickSize,
+                levelCount = levelCount,
+                staticCollarBps = staticBps,
+                dynamicCollarBps = dynamicBps,
+            )
         },
         describe = {
             "defined $symbol on shard $shardId: reference ${PriceCodec.format(reference)}, " +
@@ -132,11 +119,7 @@ fun runSession(args: Args) {
         args,
         resolveShard = { it.shardRoute(shardId) },
         build = { buffer ->
-            SessionTransitionEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
-                .transitionTime(0L)
-                .tradingDate(tradingDate)
-                .targetPhase(Phase.get(phase))
-            MessageHeaderEncoder.ENCODED_LENGTH + SessionTransitionEncoder.BLOCK_LENGTH
+            OperatorCommands.encodeSessionTransition(buffer, phase, tradingDate)
         },
         describe = { "shard $shardId -> ${args.required("phase")} (trading date $tradingDate)" },
     )
@@ -151,10 +134,7 @@ fun runPurge(args: Args) {
         args,
         resolveShard = { it.shardRoute(shardId) },
         build = { buffer ->
-            PurgeExpiredOrdersEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
-                .purgeTime(0L)
-                .tradingDate(tradingDate)
-            MessageHeaderEncoder.ENCODED_LENGTH + PurgeExpiredOrdersEncoder.BLOCK_LENGTH
+            OperatorCommands.encodePurgeExpiredOrders(buffer, tradingDate)
         },
         describe = { "shard $shardId purged for trading date $tradingDate" },
     )

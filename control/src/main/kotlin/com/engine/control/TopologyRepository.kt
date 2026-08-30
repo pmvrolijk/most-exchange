@@ -78,9 +78,11 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
         jdbc.update(
             """
             INSERT INTO security (security_id, shard_id, symbol, isin, name, currency,
-                                  price_floor, tick_size, level_count, max_orders)
+                                  price_floor, tick_size, level_count, max_orders,
+                                  reference_price, static_collar_bps, dynamic_collar_bps)
             VALUES (:securityId, :shardId, :symbol, :isin, :name, :currency,
-                    :priceFloor, :tickSize, :levelCount, :maxOrders)
+                    :priceFloor, :tickSize, :levelCount, :maxOrders,
+                    :referencePrice, :staticCollarBps, :dynamicCollarBps)
             """.trimIndent(),
             securityParameters(row),
         )
@@ -91,7 +93,9 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
         UPDATE security SET shard_id = :shardId, symbol = :symbol, isin = :isin, name = :name,
                             currency = :currency, price_floor = :priceFloor,
                             tick_size = :tickSize, level_count = :levelCount,
-                            max_orders = :maxOrders
+                            max_orders = :maxOrders, reference_price = :referencePrice,
+                            static_collar_bps = :staticCollarBps,
+                            dynamic_collar_bps = :dynamicCollarBps
         WHERE security_id = :securityId
         """.trimIndent(),
         securityParameters(row),
@@ -111,6 +115,9 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
         .addValue("tickSize", row.tickSize)
         .addValue("levelCount", row.levelCount)
         .addValue("maxOrders", row.maxOrders)
+        .addValue("referencePrice", row.referencePrice)
+        .addValue("staticCollarBps", row.staticCollarBps)
+        .addValue("dynamicCollarBps", row.dynamicCollarBps)
 
     // ------------------------------------------------------------ participants
 
@@ -172,6 +179,10 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
                 tickSize = rs.getLong("tick_size"),
                 levelCount = rs.getInt("level_count"),
                 maxOrders = rs.getInt("max_orders"),
+                // Nullable: a security exists before anyone has decided its reference price.
+                referencePrice = rs.getObject("reference_price") as Long?,
+                staticCollarBps = rs.getObject("static_collar_bps") as Int?,
+                dynamicCollarBps = rs.getObject("dynamic_collar_bps") as Int?,
             )
         }
 

@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 update it alongside code when the design changes. §8 tracks the open questions.
 
 The Gradle skeleton is in place and green: eight modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`),
-SBE codegen wired, 251 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+SBE codegen wired, 274 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
@@ -101,6 +101,25 @@ parsers and live beside them so drift fails a round-trip test. Releases are immu
 allocates the next version — and carry topology only; Aeron dirs, cluster dirs and feed channels stay
 in each process's own config. `docs/ControlPlane.md` is the walkthrough. Its tests need Docker
 (Testcontainers Postgres), because most of what they assert is schema behaviour.
+
+**Operator commands are unacknowledged, and that shapes the control plane.** `SecurityDefinition`,
+`SessionTransition` and `PurgeExpiredOrders` go to the gateway's client channel like any other
+message and are forwarded into the log untouched; the engine applies or rejects them without
+replying, and a rejected definition only increments `rejectedDefinitions`. So a sender may claim
+only that bytes were sent. `control` separates `sent` from `confirmed`, confirming a phase from
+`SessionChanged` on L3 and never claiming a definition was applied. Anything checkable before the
+wire is checked there instead — a static band outside the ladder is refused locally, because the
+engine refuses it in silence. **Encoders live in `reference`'s `OperatorCommands`**, shared by the
+CLI and the control plane; do not write a second encoding of a wire message.
+
+**A halt is visible only on L3.** `VolatilityHalted` is forwarded verbatim and nothing derives it
+onto L1 or L2, so a depth subscriber cannot tell a halt from a scheduled close — which is why
+`control` subscribes to L3. **Reopening is ordered and both orderings matter:** re-seed the
+definition *before* `PRE_OPEN` (`staticReference` is only reset by an executing uncross, so a stale
+collar rejects the very orders needed to reopen), then walk `PRE_OPEN → OPEN_AUCTION → CONTINUOUS`
+in full (the uncross runs only on the last transition; jumping to `CONTINUOUS` silently skips the
+auction). **A session transition is shard-wide** — there is no per-security session command, so
+reopening one halted security reopens every book on the shard.
 
 **One security list per shard.** `reference`'s `ShardSpec` is read by the engine, gateway,
 market-data and discovery alike — do not reintroduce per-process security lists. It carries identity

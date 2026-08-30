@@ -1880,6 +1880,27 @@ The inspector tracks sequences with `FeedSequenceTracker` and prints a staleness
 under `MaxMulticastFlowControl` a slow subscriber takes an unrecoverable gap by design, so an
 operator reading depth off the screen has to be told when it can no longer be trusted.
 
+#### Operator commands from the control plane
+
+`most define` / `most session` / `most purge` are not the only senders any more: the control plane
+sends the same three commands, through the same gateway client channel, using the same encoders —
+`OperatorCommands` in `reference`, shared by both so a wire message has one implementation.
+
+Two properties of these commands shape everything built on them.
+
+**They are not acknowledged.** The engine applies or rejects an operator command without replying,
+and a rejected `SecurityDefinition` increments `rejectedDefinitions` and nothing else. So a sender
+can honestly report only that bytes reached the gateway. The control plane closes as much of the
+loop as the feed allows: it watches L3 and treats `SessionChanged` as confirmation of a phase
+transition, which covers session and reopen. Nothing confirms a definition, and its responses say so
+rather than implying success. What can be checked *before* sending is checked instead — a static
+band that falls outside the ladder is refused locally, because the engine would refuse it in silence.
+
+**A halt is visible only on L3.** `VolatilityHalted` is forwarded verbatim to L3 and nothing is
+derived from it onto L1 or L2, so a depth subscriber cannot tell a halt from a scheduled close.
+Anything that needs to *know* a security broke — and recovery cannot begin otherwise — must subscribe
+to the book event stream or L3. That is why the control plane consumes L3 rather than L1.
+
 #### `most load` — the measurement harness
 
 `most load` is the only tool with a hot path. It generates orders into parallel primitive arrays
@@ -1948,9 +1969,10 @@ It found three defects that unit tests could not:
   exist. The e2e test works around it by starting the inspector before any depth is published. A
   periodic L2 snapshot, or a request-response recovery channel, is needed before a real consumer can
   join mid-session.
-* **Halt-recovery runbook.** §4.6 requires an operator to re-seed `staticReference` via
-  `SecurityDefinition` before `PRE_OPEN` when the halt price sits outside the static band. The
-  procedure, and who is authorised to issue it, need defining operationally.
+* **Halt-recovery authorisation.** The *procedure* is now executable —
+  `POST /api/shards/{id}/reopen` in the control plane re-seeds the definition and walks
+  `PRE_OPEN → OPEN_AUCTION → CONTINUOUS` in that order (`docs/ControlPlane.md`). Who is authorised to
+  issue it is still undefined: the control plane has no authentication.
 * **Auction SMP pass limit.** §4.5 specifies a maximum pass count as a safety valve; the value needs
   to come from measurement against realistic auction books.
 * **Reference price seeding for a security with no trades.** The `SecurityDefinition` value stands

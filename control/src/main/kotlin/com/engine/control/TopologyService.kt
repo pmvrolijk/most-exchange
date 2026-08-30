@@ -48,6 +48,16 @@ class TopologyService(private val repository: TopologyRepository) {
 
     fun security(securityId: Int): SecurityRow? = repository.security(securityId)
 
+    fun securitiesOfShard(shardId: Int): List<SecurityRow> = repository.securitiesOfShard(shardId)
+
+    /** For command paths, where an empty or unknown shard is a caller error rather than a state. */
+    fun securitiesOfShardOrThrow(shardId: Int): List<SecurityRow> {
+        requireNotNull(repository.shard(shardId)) { "no such shard: $shardId" }
+        val securities = repository.securitiesOfShard(shardId)
+        require(securities.isNotEmpty()) { "shard $shardId serves no securities" }
+        return securities
+    }
+
     fun participants(): List<ParticipantRow> = repository.participants()
 
     fun participant(participantId: Long): ParticipantRow? = repository.participant(participantId)

@@ -10,6 +10,11 @@ dependencies {
     // per shard, one shard per security -- is enforced by constructing the real types, and the
     // fingerprint is computed by the same code the engine prints.
     implementation(project(":reference"))
+    // The control plane holds an Aeron client of its own: it sends operator commands to the
+    // gateway's client channel exactly as `most` does, and watches the L3 feed. `reference` keeps
+    // these as `implementation`, so they are not transitive.
+    implementation(libs.aeron.all)
+    implementation(libs.agrona)
 
     implementation(libs.spring.boot.starter.web)
     implementation(libs.spring.boot.starter.jdbc)
@@ -27,4 +32,10 @@ dependencies {
 application {
     applicationName = "control"
     mainClass.set("com.engine.control.ControlApplicationKt")
+    // Agrona 2.x reaches jdk.internal.misc.Unsafe for its buffer intrinsics and Aeron needs
+    // sun.nio.ch; without these the first UnsafeBuffer throws IllegalAccessError.
+    applicationDefaultJvmArgs = listOf(
+        "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
+        "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
+    )
 }

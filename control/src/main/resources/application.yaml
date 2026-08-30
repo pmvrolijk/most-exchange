@@ -20,3 +20,17 @@ control:
   # Where published releases are written. Each publish creates an immutable numbered subdirectory;
   # deployments point engine.securitiesFile and friends at one of them.
   releaseDir: ${CONTROL_RELEASE_DIR:./build/releases}
+
+  # The live link to a running exchange: operator commands out, book events in. Optional -- with no
+  # media driver the REST API still serves and /api/status says why the link is down. Authoring
+  # reference data must never require an Aeron driver.
+  aeron:
+    enabled: ${CONTROL_AERON_ENABLED:true}
+    dir: ${CONTROL_AERON_DIR:}
+  discovery:
+    channel: ${CONTROL_DISCOVERY_CHANNEL:aeron:udp?endpoint=239.10.0.1:40000}
+    streamId: ${CONTROL_DISCOVERY_STREAM:100}
+  # L3, not L1 or L2: a volatility halt is only visible on the raw book event stream.
+  l3:
+    channel: ${CONTROL_L3_CHANNEL:aeron:udp?endpoint=239.10.1.3:40003}
+    streamId: ${CONTROL_L3_STREAM:3}

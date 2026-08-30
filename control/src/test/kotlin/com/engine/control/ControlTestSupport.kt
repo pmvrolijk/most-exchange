@@ -57,6 +57,9 @@ abstract class PostgresTest {
             registry.add("spring.datasource.username") { postgres.username }
             registry.add("spring.datasource.password") { postgres.password }
             registry.add("control.releaseDir") { releaseDir }
+            // No media driver in the suite: the link is exercised through a fake, and the point of
+            // it being optional is that everything else works without one.
+            registry.add("control.aeron.enabled") { "false" }
         }
     }
 }

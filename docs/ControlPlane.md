@@ -4,9 +4,9 @@ Reference data and shard topology are authored in Postgres, through a REST backe
 **published** as the same `.properties` artifacts the engine, gateway, market-data and discovery
 have always booted from.
 
-This is the first slice of the control plane. It does not yet talk to a running cluster: sending
-`SecurityDefinition` and `SessionTransition`, monitoring shards through the discovery feed, storing
-ticks and scheduling are still ahead (`docs/Future.md`).
+It also holds a live link to a running exchange: it sends the three operator commands, watches the
+discovery and L3 feeds, and can walk a halted security back through the reopen sequence. Tick storage
+and scheduling are still ahead (`docs/Future.md`).
 
 ---
 
@@ -65,7 +65,8 @@ shard(shard_id, order_entry_channel, order_entry_stream_id,
       execution_report_channel, execution_report_stream_id)
 
 security(security_id, shard_id, symbol, isin, name, currency,
-         price_floor, tick_size, level_count, max_orders)
+         price_floor, tick_size, level_count, max_orders,     -- geometry: published
+         reference_price, static_collar_bps, dynamic_collar_bps)  -- sent as a command
 
 participant(participant_id, name, smp_id, enabled)
 
@@ -75,6 +76,13 @@ spec_release_shard(version, shard_id, fingerprint)
 
 Prices are fixed point with 8 implied decimals throughout, exactly as on the wire: `tick_size =
 1000000` is 0.01.
+
+**Reference price and collars are authored but never published.** They are not geometry: they reach
+the engine as `SecurityDefinition` commands through the replicated log, because every node must apply
+them at the same log position. They are consequently **outside the fingerprint**, which covers only
+what processes must agree on at boot — seeding a reference price must not invalidate a release, and
+does not. They record what an operator *seeded*, not what the engine currently holds, and cannot: an
+executing uncross moves `staticReference` with nobody asking.
 
 **Participants are authored but not yet enforced.** The engine has an `UNAUTHORIZED_PARTICIPANT`
 reject reason that nothing currently raises, and binding a participant to an authenticated session
@@ -157,7 +165,116 @@ Comparing them is still the operator's job, as it is today. Making the four proc
 mismatch is the obvious next step and is deliberately **not** in this slice — it changes four
 processes on the boot path, and is worth doing on its own.
 
-## 6. Getting started
+## 6. Live cluster control
+
+The backend holds an Aeron client of its own and talks to the **gateway's client channel**, exactly
+as `most` does — never to the cluster directly, so an operator command takes the same validated path
+an order does and is sequenced through the replicated log.
+
+**The link is optional.** Authoring reference data must work with no media driver anywhere near it,
+so a missing driver is reported by `GET /api/status` and nothing else breaks. Set
+`control.aeron.enabled=false` to skip it entirely.
+
+```
+POST /api/securities/{id}/definition   seed or re-seed reference price and collars
+POST /api/shards/{id}/session          move a shard to a phase
+POST /api/shards/{id}/purge            the off-session expiry sweep
+POST /api/shards/{id}/reopen           the halt-recovery runbook, as one operation
+GET  /api/status                       what the exchange is actually doing
+```
+
+### Sent is not confirmed
+
+Operator commands are **not acknowledged**. The engine applies or rejects them without replying, and
+a rejected `SecurityDefinition` increments a counter and says nothing. Every response therefore
+carries both flags, and they mean different things:
+
+```json
+{ "command": "session CONTINUOUS shard 0", "sent": true, "confirmed": true,
+  "detail": "every book on shard 0 reported CONTINUOUS" }
+
+{ "command": "define AAPL", "sent": true, "confirmed": false,
+  "detail": "seeded reference 110.00, static 5000bps, dynamic 100bps -- not confirmable:
+             no feed acknowledges a SecurityDefinition, so a rejection would be silent" }
+```
+
+`sent` means the bytes reached the gateway. `confirmed` means the control plane afterwards *saw* the
+effect on the book event stream — `SessionChanged` for a phase. A definition can never be confirmed,
+and reporting a bare 200 for both would claim knowledge the backend does not have.
+
+Since a definition cannot be confirmed, everything checkable is checked **before** it goes on the
+wire: an unknown security, a missing reference price, and — the one that matters — a static band
+that falls outside the pre-allocated ladder, which the engine refuses in silence:
+
+```
+a 5000bp static band around 300.00 spans 150.00..450.00, outside AAPL's ladder
+0.00..327.67; the engine would reject it without replying
+```
+
+Geometry is never taken from the caller. `priceFloor`, `tickSize` and `levelCount` come from the
+database — the same rows the shard booted from — because a definition whose geometry disagrees with
+the allocated book is rejected, silently, and the operator has no way to tell.
+
+### Monitoring: discovery and L3
+
+The poller consumes two feeds. **Discovery** gives the routing table and its version. **L3** — not
+L1 or L2 — gives live per-security phase, auction uncrosses, trades and, critically, halts: a
+`VolatilityHalted` event is forwarded only to L3, so a depth subscriber cannot distinguish a halt
+from a scheduled close. Recovery cannot begin from a halt you cannot see.
+
+`GET /api/status` also reports **routing drift** — where the database and what discovery is actually
+broadcasting disagree:
+
+```json
+"routingDrift": ["shard 0 is broadcast by discovery but absent from the database"]
+```
+
+Commands route from the database, not the directory: the control plane is the authority on topology,
+and a command must still be sendable when discovery is down. Where the two disagree, that is said
+out loud rather than one silently winning.
+
+### Reopening a halted security
+
+A halt sets **one security** to `CLOSED` and leaves the resting book intact. There is no halt phase;
+the `VolatilityHalted` event is the only thing distinguishing it from a scheduled close.
+
+```sh
+curl -X POST localhost:8080/api/shards/0/reopen -H 'Content-Type: application/json' \
+  -d '{"securityId": 1, "referencePrice": 11000000000}'
+```
+
+That performs, in this order:
+
+1. `SecurityDefinition`, re-seeding `staticReference` at the new level.
+2. `SessionTransition(PRE_OPEN)` — orders accepted and booked, no matching.
+3. `SessionTransition(OPEN_AUCTION)`.
+4. `SessionTransition(CONTINUOUS)` — the uncross runs on *this* transition.
+
+**Both orderings are load-bearing.** Re-seeding must come first because `staticReference` is only
+reset by an *executing* uncross, while orders are accepted from `PRE_OPEN` onward: if the halt moved
+price outside the old static band, the very orders needed to reopen are rejected by the stale collar
+before the auction that would have fixed it gets any — a deadlock that looks like nothing happening.
+And the phases must be walked in full, because the uncross runs only on `OPEN_AUCTION → CONTINUOUS`;
+jumping straight to `CONTINUOUS` is accepted and silently skips the auction.
+
+**A session transition is shard-wide.** The engine applies the phase to every book it hosts — there
+is no per-security session command — so reopening one halted security reopens everything else on the
+shard. The response says so every time, not only when it bites:
+
+```json
+"warning": "a session transition is shard-wide: this moved AAPL, MSFT, not only AAPL"
+```
+
+### Configuration
+
+| Variable | Default | |
+| --- | --- | --- |
+| `CONTROL_AERON_ENABLED` | `true` | Set `false` for a database-only deployment |
+| `CONTROL_AERON_DIR` | driver default | Must be a driver this host can reach |
+| `CONTROL_DISCOVERY_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.0.1:40000` / `100` | |
+| `CONTROL_L3_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.1.3:40003` / `3` | L3, not L1 |
+
+## 7. Getting started
 
 ```sh
 docker run -d --name most-control-db -p 5432:5432 \
@@ -191,7 +308,7 @@ field reports a different fingerprint rather than echoing the input's.
 
 A shard security file carries no endpoints, so the shard must exist before importing into it.
 
-## 7. Testing
+## 8. Testing
 
 `./gradlew :control:test` needs Docker: the tests run against a real Postgres via Testcontainers,
 because half of what this module relies on is schema behaviour — `CHAR(12)` padding an ISIN on the

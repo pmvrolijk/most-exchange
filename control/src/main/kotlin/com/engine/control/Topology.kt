@@ -48,6 +48,12 @@ data class SecurityRow(
     val tickSize: Long,
     val levelCount: Int,
     val maxOrders: Int,
+    // Not geometry, and deliberately not published: reference prices and collar widths arrive at
+    // runtime as SecurityDefinition commands, and are outside the fingerprint for that reason.
+    // Null until an operator seeds them; a definition cannot be sent without them.
+    val referencePrice: Long? = null,
+    val staticCollarBps: Int? = null,
+    val dynamicCollarBps: Int? = null,
 ) {
     fun toSpec(): SecuritySpec = SecuritySpec(
         securityId = securityId,

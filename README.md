@@ -63,7 +63,7 @@ selection, the SMP fixed-point loop, allocation), and the off-session expiry pur
 `MatchingEngineService` — the full `ClusteredService`, message dispatch, execution-report egress,
 book-event publication, and snapshot/restore. 76 tests.
 
-All eight modules are implemented. 251 tests, plus an end-to-end script.
+All eight modules are implemented. 274 tests, plus an end-to-end script.
 
 ## End-to-end test
 

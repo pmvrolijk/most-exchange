@@ -5,8 +5,8 @@ Reference data and shard topology are authored in Postgres, through a REST backe
 have always booted from.
 
 It also holds a live link to a running exchange: it sends the three operator commands, watches the
-discovery and L3 feeds, and can walk a halted security back through the reopen sequence. Tick storage
-and scheduling are still ahead (`docs/Future.md`).
+discovery and L3 feeds, drives the trading day from a calendar, and can walk a halted security back
+through the reopen sequence. Tick storage is still ahead (`docs/Future.md`).
 
 ---
 
@@ -72,6 +72,12 @@ participant(participant_id, name, smp_id, enabled)
 
 spec_release(version, created_at, universe_version, directory, note)
 spec_release_shard(version, shard_id, fingerprint)
+
+session_schedule(name, zone, weekdays, purge_time, enabled)
+session_schedule_entry(schedule_name, at_time, phase)
+market_holiday(schedule_name, holiday_date, description)
+schedule_run(id, at, shard_id, action, phase, trading_date, sent, confirmed, detail)
+shard.schedule_name                              -- which schedule a shard follows
 ```
 
 Prices are fixed point with 8 implied decimals throughout, exactly as on the wire: `tick_size =
@@ -274,7 +280,98 @@ shard. The response says so every time, not only when it bites:
 | `CONTROL_DISCOVERY_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.0.1:40000` / `100` | |
 | `CONTROL_L3_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.1.3:40003` / `3` | L3, not L1 |
 
-## 7. Getting started
+## 7. Scheduling
+
+A schedule is a named trading day — local times mapped to phases, plus a purge time — that a shard
+follows. It lives here and fires here, not in the engine.
+
+**That costs no determinism.** The `SessionTransition` the scheduler emits is sequenced through the
+replicated log like any other command, so every node applies it at the same log position. What
+keeping it out of the engine buys is that a trading calendar — weekends, holidays, daylight saving —
+stays outside the deterministic state machine, where a bug kills every node simultaneously.
+
+```sh
+curl -X PUT localhost:8080/api/schedules/equities -H 'Content-Type: application/json' -d '{
+  "name": "equities", "zone": "Europe/Amsterdam",
+  "weekdays": ["MONDAY","TUESDAY","WEDNESDAY","THURSDAY","FRIDAY"],
+  "purgeTime": "07:00",
+  "entries": [
+    { "at": "08:00",  "phase": "pre-open" },
+    { "at": "08:55",  "phase": "open-auction" },
+    { "at": "09:00",  "phase": "continuous" },
+    { "at": "17:30",  "phase": "closed" } ] }'
+
+curl -X PUT localhost:8080/api/shards/0/schedule -d '{"scheduleName":"equities"}' \
+     -H 'Content-Type: application/json'
+curl -X POST localhost:8080/api/schedules/equities/holidays \
+     -H 'Content-Type: application/json' -d '{"date":"2026-12-25","description":"Christmas"}'
+```
+
+**Times are local and the zone is stored with them.** A market opens at 09:00 local whatever the
+offset is that week; storing UTC instants would move the open by an hour twice a year.
+
+### Every tick is a reconciliation, not a trigger
+
+The scheduler does not fire timers. On each tick it compares the phase the calendar says a shard
+should be in against the phase the **L3 feed says it is in**, and sends the difference. One choice,
+three consequences: it is idempotent, it recovers by itself after an outage, and there is no
+missed-timer state to keep anywhere.
+
+**The difference between two phases is a path, not a destination.** The uncross runs only on
+`OPEN_AUCTION → CONTINUOUS`, so a backend that was down through the open and catches up at 09:15
+walks `PRE_OPEN → OPEN_AUCTION → CONTINUOUS`. Sending `CONTINUOUS` straight from `CLOSED` would be
+accepted by the engine and would skip the auction, leaving any crossed resting book crossed until an
+aggressor happened to arrive. Closing is a single step — nothing is computed on the way down.
+
+### What it refuses to do
+
+**It never reopens a halted security.** Recovery is operator-driven by design, and reconciling back
+to `CONTINUOUS` would not merely override that — it would do it *without an auction*, since from the
+scheduler's point of view the shard is already past `OPEN_AUCTION`. A halt makes the shard skip,
+with the remedy in the message:
+
+```
+skipped  CONTINUOUS  AAPL halted; recovery is operator-driven (POST /api/shards/0/reopen)
+```
+
+**It waits rather than guessing an unknown phase.** A freshly booted engine has made no transition,
+so it has emitted no `SessionChanged` and its phase is genuinely unknown here. Guessing `CLOSED`
+would be right after a cold boot and catastrophic after a control-plane restart mid-session — which
+looks identical from the feed. So it waits, and says what unblocks it: **send any session command
+once to establish a baseline**, after which the feed keeps it current. That is the one manual step
+in bringing a cold cluster up.
+
+**A late purge is skipped, not run.** The sweep is due only between its time and the first
+transition of the day. After `PRE_OPEN` the book is accepting orders, and a late sweep would expire
+orders someone had just placed.
+
+It also stands down when a shard's books disagree on their phase, and when another control-plane
+instance holds the scheduler's Postgres advisory lock — a duplicated transition is survivable, a
+duplicated purge is not something to leave to luck.
+
+### Seeing what it did
+
+```
+GET  /api/scheduler/runs        what it did, and what it deliberately did not do
+POST /api/scheduler/tick        reconcile now instead of waiting for the next tick
+GET  /api/schedules/{name}/preview?date=2026-12-25
+```
+
+A skip is recorded when its **reason changes**, not on every tick — deduplicated against the audit
+log itself, so it also survives a restart without re-logging conditions that were already there. A
+halted security appears once, not every five seconds all weekend.
+
+```
+skipped  CONTINUOUS    no phase seen yet for AAPL, MSFT: send any session command once...
+session  PRE_OPEN      sent=True  confirmed=True  every book on shard 0 reported PRE_OPEN
+session  OPEN_AUCTION  sent=True  confirmed=True  every book on shard 0 reported OPEN_AUCTION
+session  CONTINUOUS    sent=True  confirmed=True  every book on shard 0 reported CONTINUOUS
+```
+
+`CONTROL_SCHEDULER_ENABLED` (default `true`) and `CONTROL_SCHEDULER_INTERVAL_MS` (default `5000`)
+configure it.
+
+## 8. Getting started
 
 ```sh
 docker run -d --name most-control-db -p 5432:5432 \
@@ -308,7 +405,7 @@ field reports a different fingerprint rather than echoing the input's.
 
 A shard security file carries no endpoints, so the shard must exist before importing into it.
 
-## 8. Testing
+## 9. Testing
 
 `./gradlew :control:test` needs Docker: the tests run against a real Postgres via Testcontainers,
 because half of what this module relies on is schema behaviour — `CHAR(12)` padding an ISIN on the

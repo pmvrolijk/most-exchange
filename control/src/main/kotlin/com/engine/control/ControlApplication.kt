@@ -2,6 +2,7 @@ package com.engine.control
 
 import org.springframework.boot.autoconfigure.SpringBootApplication
 import org.springframework.boot.runApplication
+import org.springframework.scheduling.annotation.EnableScheduling
 
 /**
  * The exchange control plane.
@@ -14,6 +15,7 @@ import org.springframework.boot.runApplication
  * (Design.md §7).
  */
 @SpringBootApplication
+@EnableScheduling
 class ControlApplication
 
 fun main(args: Array<String>) {

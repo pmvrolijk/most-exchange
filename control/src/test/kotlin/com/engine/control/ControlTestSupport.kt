@@ -28,6 +28,9 @@ abstract class PostgresTest {
     @Autowired
     private lateinit var jdbc: JdbcTemplate
 
+    @Autowired
+    private lateinit var clusterLink: ClusterLink
+
     /**
      * Truncated rather than rolled back. The publisher writes files as well as rows, and a test
      * transaction that unwound the rows while leaving the directories behind would let a broken
@@ -36,9 +39,13 @@ abstract class PostgresTest {
     @BeforeEach
     fun clean() {
         jdbc.execute(
-            "TRUNCATE spec_release_shard, spec_release, security, participant, shard " +
+            "TRUNCATE spec_release_shard, spec_release, security, participant, shard, " +
+                "session_schedule, session_schedule_entry, market_holiday, schedule_run " +
                 "RESTART IDENTITY CASCADE",
         )
+        // The Spring context is shared across test classes, so observed feed state outlives a
+        // truncate. A halt left behind by one test would make the next one skip.
+        clusterLink.state.clear()
     }
 
     companion object {
@@ -60,6 +67,9 @@ abstract class PostgresTest {
             // No media driver in the suite: the link is exercised through a fake, and the point of
             // it being optional is that everything else works without one.
             registry.add("control.aeron.enabled") { "false" }
+            // The scheduler is driven explicitly through reconcile(instant) in tests: a background
+            // tick reading the wall clock would make them depend on what time the suite runs.
+            registry.add("control.scheduler.enabled") { "false" }
         }
     }
 }

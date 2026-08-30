@@ -1901,6 +1901,32 @@ derived from it onto L1 or L2, so a depth subscriber cannot tell a halt from a s
 Anything that needs to *know* a security broke — and recovery cannot begin otherwise — must subscribe
 to the book event stream or L3. That is why the control plane consumes L3 rather than L1.
 
+#### Session scheduling
+
+The trading calendar lives in the control plane, not the engine. `onTimerEvent` remains unused and
+`Cluster.scheduleTimer` is still uncalled — deliberately. The `SessionTransition` the scheduler
+emits is sequenced through the log like any other command, so every node applies it at the same log
+position and no determinism is lost by scheduling outside; what is gained is that weekends,
+holidays and daylight saving stay out of a state machine where a bug kills every node at once.
+
+Each tick is a **reconciliation** rather than a trigger: it compares the phase the calendar wants
+against the phase L3 reports and sends the difference, which makes it idempotent and self-healing
+after an outage with no missed-timer state anywhere. Two consequences are worth stating, because
+both are easy to get wrong:
+
+* **The difference between two phases is a path.** The uncross runs only on
+  `OPEN_AUCTION → CONTINUOUS`, so catching up to `CONTINUOUS` from `CLOSED` walks the intermediate
+  phases. Sending `CONTINUOUS` directly is accepted and silently skips the auction, leaving a
+  crossed resting book crossed.
+* **A halted security is never reconciled back open.** §4.6 makes recovery operator-driven, and an
+  automatic reconciliation would additionally reopen it *without* an auction, since the shard is
+  already past `OPEN_AUCTION` as far as the scheduler is concerned.
+
+The engine emits `SessionChanged` only on a transition, so a cold cluster's phase is unknown to any
+observer until something moves it. The scheduler waits rather than assuming `CLOSED` — a
+control-plane restart mid-session looks identical from the feed, and assuming there would shut a
+live market. Sending any session command once establishes the baseline.
+
 #### `most load` — the measurement harness
 
 `most load` is the only tool with a hot path. It generates orders into parallel primitive arrays

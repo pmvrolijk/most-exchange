@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 update it alongside code when the design changes. §8 tracks the open questions.
 
 The Gradle skeleton is in place and green: eight modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`),
-SBE codegen wired, 274 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+SBE codegen wired, 300 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
@@ -111,6 +111,18 @@ only that bytes were sent. `control` separates `sent` from `confirmed`, confirmi
 wire is checked there instead — a static band outside the ladder is refused locally, because the
 engine refuses it in silence. **Encoders live in `reference`'s `OperatorCommands`**, shared by the
 CLI and the control plane; do not write a second encoding of a wire message.
+
+**The trading calendar lives in the control plane, and `onTimerEvent` stays unused.** Scheduling
+outside the engine costs no determinism — the `SessionTransition` it emits is sequenced through the
+log — and keeps holidays and DST out of the state machine. Each tick **reconciles** the phase the
+calendar wants against the phase L3 reports, so it is idempotent and self-healing. Two rules it must
+keep: **the difference between phases is a path, not a destination** (the uncross runs only on
+`OPEN_AUCTION → CONTINUOUS`, so catching up walks the intermediate phases; sending `CONTINUOUS`
+directly silently skips the auction), and **a halted security is never reconciled back open** —
+recovery is operator-driven, and doing it automatically would also skip the auction. A cold cluster
+has emitted no `SessionChanged`, so its phase is unknown; the scheduler waits rather than assuming
+`CLOSED`, since a control-plane restart mid-session looks identical and assuming would shut a live
+market. One session command establishes the baseline.
 
 **A halt is visible only on L3.** `VolatilityHalted` is forwarded verbatim and nothing derives it
 onto L1 or L2, so a depth subscriber cannot tell a halt from a scheduled close — which is why

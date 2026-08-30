@@ -81,6 +81,19 @@ class ExchangeState {
 
     fun securities(): List<SecurityState> = securities.values.sortedBy { it.securityId }
 
+    /**
+     * Forgets everything observed. Used when a test needs a clean slate, and available to an
+     * operator whose backend has been watching a cluster that was rebuilt underneath it — stale
+     * phases would otherwise make the scheduler reconcile against a market that no longer exists.
+     */
+    fun clear() {
+        securities.clear()
+        directory = null
+        seen.set(0)
+        gaps.set(0)
+        missed.set(0)
+    }
+
     fun securityState(securityId: Int): SecurityState? = securities[securityId]
 
     fun recordEvent(missedCount: Long) {

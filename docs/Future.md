@@ -9,7 +9,8 @@
       live cluster control: operator commands, discovery and L3 monitoring, and halt recovery
       (docs/ControlPlane.md). Not yet: authentication, and a definition cannot be confirmed because
       nothing on any feed acknowledges one
-- [ ] Scheduling from control plane backend
+- [x] Scheduling from control plane backend — session schedules with timezones, holidays and the
+      daily purge, reconciled against the L3 feed rather than fired from timers (docs/ControlPlane.md)
 - [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries  
 - [ ] Admin frontend for backend control plane, Vue
 

@@ -34,3 +34,11 @@ control:
   l3:
     channel: ${CONTROL_L3_CHANNEL:aeron:udp?endpoint=239.10.1.3:40003}
     streamId: ${CONTROL_L3_STREAM:3}
+
+  # Session scheduling. Every tick reconciles the phase the calendar says a shard should be in
+  # against the phase L3 says it is in, and sends the difference -- so it is idempotent, recovers
+  # by itself after an outage, and keeps no missed-timer state. It never reopens a halted security:
+  # recovery is operator-driven by design.
+  scheduler:
+    enabled: ${CONTROL_SCHEDULER_ENABLED:true}
+    intervalMs: ${CONTROL_SCHEDULER_INTERVAL_MS:5000}

@@ -1722,6 +1722,39 @@ subscribers care about most.
 Geometry (`priceFloor`, `tickSize`, `levelCount`) must match the engine's exactly: the same values
 that turn a price into a ladder level there turn it into a depth level here.
 
+### Where Reference Data Is Authored
+
+Reference data and shard topology are authored in Postgres through the `control` module and
+**published** as the same shard security files described below; `docs/ControlPlane.md` is the whole
+picture. The split is deliberate and is the design's, not a convenience:
+
+* **The database is not on any process's boot path.** A node reads a file. A database outage would
+  otherwise stop a node starting, and — the reason that matters — a write landing between two nodes'
+  boots would give them different geometry. They would not fail; they would diverge on the first
+  order, which is the one class of misconfiguration consensus cannot catch.
+* **A release is immutable.** Publishing writes a numbered directory and records the fingerprint per
+  shard; republishing allocates the next version rather than rewriting one, so a directory a running
+  process was pointed at never changes underneath it. Rendering is deterministic — ordered, no
+  timestamp — so identical content publishes to identical bytes and two releases can be diffed.
+* **The control plane reimplements no rule.** It constructs the real `SecuritySpec`, `ShardSpec`,
+  `ShardRoute` and `Universe` from its rows, so ISIN check digits, the wire-derived length limits,
+  ten securities per shard, one shard per security, and the fingerprint itself all come from one
+  implementation. A second one that drifted by a separator would report agreement between processes
+  that disagree, which is worse than not checking.
+* **A release carries topology, not deployment.** Aeron directories, cluster directories and feed
+  channels stay in each process's own configuration; the release carries only what every process
+  must agree on.
+
+One duplication this removes: a gateway's client endpoints are declared in both `gateway.properties`
+and `discovery.properties` today with nothing checking they agree, and are now one row rendered into
+both.
+
+`ShardSpec.render()` and `Universe.render()` are the inverses of the `from(Properties)` parsers and
+live beside them, so a generator that emitted a key the parser does not read fails a round-trip test
+rather than a deployment.
+
+---
+
 ### Shard Configuration — One Security List
 
 A shard has **one security file**, read by the engine, the gateway, the market data process and

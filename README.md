@@ -17,6 +17,7 @@ anything; §8 tracks the open questions.
 | `market-data` | Consumes the Book Event Stream, derives L1 / L2 / L3 and publishes them as SBE over multicast. Separate process so feed fan-out never touches the matching thread. |
 | `gateway` | Order entry: `securityId` validation, per-order state for the outbound leg (`cumQty` reconstruction), outbound mapping. |
 | `tools` | The `most` operator CLI: browse the universe, send orders, inspect books. |
+| `control` | The control plane: Postgres-backed reference data and shard topology, a REST API, and the published specs every process boots from. Never on a boot path — see [docs/ControlPlane.md](docs/ControlPlane.md). |
 
 Both boundaries speak **binary SBE, not FIX**. Protocol gateways that translate FIX or a proprietary
 session protocol sit upstream of `gateway` and downstream of `market-data`, outside this project.
@@ -62,7 +63,7 @@ selection, the SMP fixed-point loop, allocation), and the off-session expiry pur
 `MatchingEngineService` — the full `ClusteredService`, message dispatch, execution-report egress,
 book-event publication, and snapshot/restore. 76 tests.
 
-All seven modules are implemented. 188 tests, plus an end-to-end script.
+All eight modules are implemented. 251 tests, plus an end-to-end script.
 
 ## End-to-end test
 

@@ -1,0 +1,22 @@
+# The control plane authors reference data; it is deliberately NOT on the boot path of the engine,
+# gateway, market-data or discovery. Those read published files, so this database can be down and
+# the cluster still starts.
+
+spring:
+  application:
+    name: control
+  datasource:
+    url: ${CONTROL_DB_URL:jdbc:postgresql://localhost:5432/most_control}
+    username: ${CONTROL_DB_USER:most}
+    password: ${CONTROL_DB_PASSWORD:most}
+  flyway:
+    enabled: true
+    locations: classpath:db/migration
+
+server:
+  port: ${CONTROL_PORT:8080}
+
+control:
+  # Where published releases are written. Each publish creates an immutable numbered subdirectory;
+  # deployments point engine.securitiesFile and friends at one of them.
+  releaseDir: ${CONTROL_RELEASE_DIR:./build/releases}

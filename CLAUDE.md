@@ -7,8 +7,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 `docs/Design.md` is the authoritative specification — read it before implementing anything, and
 update it alongside code when the design changes. §8 tracks the open questions.
 
-The Gradle skeleton is in place and green: seven modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`),
-SBE codegen wired, 188 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+The Gradle skeleton is in place and green: eight modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`),
+SBE codegen wired, 251 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
@@ -17,7 +17,8 @@ execution-report egress, book-event publication, and snapshot/restore; and `Engi
 derivation; `GatewayService` / `OrderStateStore` — validation and `cumQty` reconstruction; and
 `reference` / `discovery` — the shared shard security list and the tradable-universe directory; and
 `tools` — the `most` operator CLI, including `most load`, the paced load generator and latency
-harness. All seven modules are implemented.
+harness; and `control` — the Postgres-backed control plane that authors reference data and publishes
+the specs every process boots from. All eight modules are implemented.
 
 ## Commands
 
@@ -56,7 +57,8 @@ this; keep it that way or the tests validate a layout the cluster rejects.
 - **Never hand-write SBE byte offsets.** Edit `sbe/src/main/resources/message-schema.xml`; codecs
   regenerate into `sbe/build/generated/sbe/`. Keep the schema and Design.md §5 in step — the schema
   file was extracted from the doc and the two are meant to stay identical.
-- **Warnings are errors** in every module. This is deliberate: a silent "inline function cannot be
+- **Warnings are errors** in every module, `control` included — it already caught a
+  `java.lang.Long` where `kotlin.Long` belonged. This is deliberate: a silent "inline function cannot be
   inlined" would break the zero-allocation profile. Do not disable it to get a build through — fix
   the warning. Reserve `inline` for functions taking callbacks; on plain helpers Kotlin correctly
   warns it buys nothing.
@@ -84,6 +86,21 @@ byte-identical state.
   — converting a match callback to a functional interface or object boxes on every fill.
 - **Zero-copy publishing.** Use `Publication.tryClaim` and encode directly into the log buffer; do not
   encode into a scratch buffer and `offer` it.
+
+**The control plane authors reference data; it is never on a boot path.** `control` owns the
+Postgres schema for securities, shards and participants, and *publishes* immutable numbered releases
+of the same shard security files and discovery registry the four processes have always read. A node
+reads a file, never the database: an outage would stop a node starting, and a write landing between
+two nodes' boots would give them different geometry — they would not fail, they would diverge on the
+first order. **Never reimplement a domain rule there.** It builds real `SecuritySpec`/`ShardSpec`/
+`ShardRoute`/`Universe` objects from its rows and calls their methods, so the ISIN check, the
+wire-derived length limits, ten-per-shard, one-shard-per-security and `fingerprint()` have exactly
+one implementation; a second that drifted by a separator would report agreement between processes
+that disagree. `ShardSpec.render()`/`Universe.render()` are the inverses of the `from(Properties)`
+parsers and live beside them so drift fails a round-trip test. Releases are immutable — republishing
+allocates the next version — and carry topology only; Aeron dirs, cluster dirs and feed channels stay
+in each process's own config. `docs/ControlPlane.md` is the walkthrough. Its tests need Docker
+(Testcontainers Postgres), because most of what they assert is schema behaviour.
 
 **One security list per shard.** `reference`'s `ShardSpec` is read by the engine, gateway,
 market-data and discovery alike — do not reintroduce per-process security lists. It carries identity

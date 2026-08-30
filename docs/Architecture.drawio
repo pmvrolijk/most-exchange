@@ -1,0 +1,274 @@
+<mxfile host="app.diagrams.net" agent="most-exchange" version="24.0.0" type="device" compressed="false">
+  <diagram name="System Architecture" id="most-architecture">
+    <mxGraphModel dx="2580" dy="1080" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="2580" pageHeight="1080" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <!-- ============================== titles ============================== -->
+        <mxCell id="title" value="most-exchange &#8212; system architecture" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=24;fontStyle=1;fontColor=#1F2933;" vertex="1" parent="1">
+          <mxGeometry x="40" y="16" width="900" height="34" as="geometry" />
+        </mxCell>
+        <mxCell id="subtitle" value="One shard shown in full. Books are independent, so capacity is added by adding shards &#8212; never more securities per shard (max 10 per shard, 1M orders per book)." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=13;fontColor=#5A6570;" vertex="1" parent="1">
+          <mxGeometry x="40" y="50" width="1360" height="20" as="geometry" />
+        </mxCell>
+
+        <!-- ============================ upstream ============================= -->
+        <mxCell id="upstream" value="&lt;b&gt;Upstream protocol gateways&lt;/b&gt;&#160;&#8212; FIX, proprietary session protocols. &lt;i&gt;Outside this project.&lt;/i&gt;&lt;br&gt;They translate their own wire format to the SBE of &#167;5, and embed &lt;b&gt;DirectoryClient&lt;/b&gt; to route by security." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F4F4;strokeColor=#9AA0A6;dashed=1;fontSize=13;fontColor=#4A5560;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="88" width="1360" height="66" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== shard 0 ============================= -->
+        <mxCell id="shard0" value="SHARD 0 &#8212; one security list, one fingerprint (ShardSpec.fingerprint), printed by every process in this box" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFBFC;strokeColor=#8FA8C8;verticalAlign=top;align=left;spacingLeft=14;spacingTop=4;fontSize=15;fontStyle=1;fontColor=#2C3E50;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="40" y="230" width="1360" height="430" as="geometry" />
+        </mxCell>
+
+        <mxCell id="gw0" value="&lt;b&gt;gateway&lt;/b&gt;&lt;br&gt;&lt;br&gt;validates securityId&lt;br&gt;holds origQty &#8594; restores cumQty&lt;br&gt;sends cluster keepalives (1s)&lt;br&gt;&lt;br&gt;&lt;i&gt;client in&lt;/i&gt; stream 20&lt;br&gt;&lt;i&gt;client out&lt;/i&gt; stream 21" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#D5E8D4;strokeColor=#82B366;fontSize=12;align=center;verticalAlign=middle;" vertex="1" parent="shard0">
+          <mxGeometry x="24" y="70" width="220" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="cluster0" value="Aeron Cluster &#8212; Raft-replicated log, 3 or 5 nodes" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EAF1FB;strokeColor=#6C8EBF;verticalAlign=top;align=left;spacingLeft=12;spacingTop=4;fontSize=14;fontStyle=1;fontColor=#1F4E79;container=1;collapsible=0;" vertex="1" parent="shard0">
+          <mxGeometry x="330" y="52" width="640" height="308" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node0" value="Node 0 &#8212; LEADER" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;verticalAlign=top;align=center;spacingTop=2;fontSize=12;fontStyle=1;fontColor=#1F4E79;container=1;collapsible=0;" vertex="1" parent="cluster0">
+          <mxGeometry x="16" y="56" width="192" height="232" as="geometry" />
+        </mxCell>
+        <mxCell id="drv0" value="ClusteredMediaDriver&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;media driver + archive&lt;br&gt;+ consensus module&lt;br&gt;&lt;i&gt;allocates &#8212; own process&lt;/i&gt;&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EDEDED;strokeColor=#9AA0A6;fontSize=11;align=center;" vertex="1" parent="node0">
+          <mxGeometry x="13" y="34" width="166" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="eng0" value="&lt;b&gt;engine&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;MatchingEngineService&lt;br&gt;single-threaded,&lt;br&gt;deterministic, no clock&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;align=center;" vertex="1" parent="node0">
+          <mxGeometry x="13" y="132" width="166" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node1" value="Node 1 &#8212; follower" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;verticalAlign=top;align=center;spacingTop=2;fontSize=12;fontStyle=1;fontColor=#1F4E79;container=1;collapsible=0;" vertex="1" parent="cluster0">
+          <mxGeometry x="224" y="56" width="192" height="232" as="geometry" />
+        </mxCell>
+        <mxCell id="drv1" value="ClusteredMediaDriver" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EDEDED;strokeColor=#9AA0A6;fontSize=11;align=center;" vertex="1" parent="node1">
+          <mxGeometry x="13" y="34" width="166" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="eng1" value="&lt;b&gt;engine&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;identical service over&lt;br&gt;the identical log &#8212;&lt;br&gt;byte-identical state&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;align=center;" vertex="1" parent="node1">
+          <mxGeometry x="13" y="132" width="166" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="node2" value="Node 2 &#8212; follower" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#6C8EBF;verticalAlign=top;align=center;spacingTop=2;fontSize=12;fontStyle=1;fontColor=#1F4E79;container=1;collapsible=0;" vertex="1" parent="cluster0">
+          <mxGeometry x="432" y="56" width="192" height="232" as="geometry" />
+        </mxCell>
+        <mxCell id="drv2" value="ClusteredMediaDriver" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#EDEDED;strokeColor=#9AA0A6;fontSize=11;align=center;" vertex="1" parent="node2">
+          <mxGeometry x="13" y="34" width="166" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="eng2" value="&lt;b&gt;engine&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size: 10px;&quot;&gt;a crash here kills&lt;br&gt;every node at the&lt;br&gt;same log position&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#DAE8FC;strokeColor=#6C8EBF;fontSize=11;align=center;" vertex="1" parent="node2">
+          <mxGeometry x="13" y="132" width="166" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mds0" value="&lt;b&gt;market-data&lt;/b&gt;&lt;br&gt;&lt;br&gt;derives L1 / L2 / L3 from&lt;br&gt;the book event stream&lt;br&gt;&lt;br&gt;&lt;i&gt;a separate process, so feed&lt;br&gt;fan-out never touches&lt;br&gt;the matching thread&lt;/i&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#E1D5E7;strokeColor=#9673A6;fontSize=12;align=center;verticalAlign=middle;" vertex="1" parent="shard0">
+          <mxGeometry x="1070" y="70" width="260" height="170" as="geometry" />
+        </mxCell>
+
+        <mxCell id="shardnote" value="Every process here boots from the &lt;b&gt;same&lt;/b&gt; shard security file and prints the same fingerprint. A mismatch would diverge the books rather than fail loudly &#8212; the one class of misconfiguration consensus cannot catch." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontColor=#5A6570;" vertex="1" parent="shard0">
+          <mxGeometry x="24" y="378" width="1000" height="34" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== shard N ============================= -->
+        <mxCell id="shardN" value="&lt;b&gt;SHARD 1 &#8230; SHARD N&lt;/b&gt; &#8212; identical topology: its own cluster, gateway, market-data, security list and fingerprint.&lt;br&gt;Books are fully independent (no cross-instrument matching). Feed sequences are namespaced by shardId, so several shards can share one multicast group." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFBFC;strokeColor=#8FA8C8;dashed=1;fontSize=13;align=center;verticalAlign=middle;fontColor=#2C3E50;" vertex="1" parent="1">
+          <mxGeometry x="40" y="720" width="1000" height="88" as="geometry" />
+        </mxCell>
+
+        <!-- =============================== feeds ============================== -->
+        <mxCell id="l1" value="&lt;b&gt;L1&lt;/b&gt; &#183; TopOfBook + LastTrade&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;239.10.1.1:40001 &#183; stream 1&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="40" y="852" width="430" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="l2" value="&lt;b&gt;L2&lt;/b&gt; &#183; DepthUpdate&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;239.10.1.2:40002 &#183; stream 2&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="485" y="852" width="430" height="76" as="geometry" />
+        </mxCell>
+        <mxCell id="l3" value="&lt;b&gt;L3&lt;/b&gt; &#183; book events, forwarded verbatim&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;239.10.1.3:40003 &#183; stream 3 &#183; &lt;b&gt;the only feed carrying VolatilityHalted&lt;/b&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=12;align=center;" vertex="1" parent="1">
+          <mxGeometry x="930" y="852" width="470" height="76" as="geometry" />
+        </mxCell>
+
+        <mxCell id="feednote" value="SBE over UDP multicast, &lt;b&gt;MaxMulticastFlowControl&lt;/b&gt; &#8212; the fastest receiver governs, so a slow subscriber takes an unrecoverable gap rather than throttling the publisher. Gap detection and re-synchronisation are the subscriber's job (FeedSequenceTracker)." style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontColor=#5A6570;" vertex="1" parent="1">
+          <mxGeometry x="40" y="934" width="1360" height="30" as="geometry" />
+        </mxCell>
+
+        <mxCell id="downstream" value="&lt;b&gt;Market data adapters&lt;/b&gt; &#8212; &lt;i&gt;outside this project.&lt;/i&gt; Embed DirectoryClient to map securityId &#8594; symbol, and FeedSequenceTracker to detect gaps." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F4F4F4;strokeColor=#9AA0A6;dashed=1;fontSize=13;fontColor=#4A5560;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="40" y="976" width="1360" height="62" as="geometry" />
+        </mxCell>
+
+        <!-- =========================== control plane ========================== -->
+        <mxCell id="cp" value="CONTROL PLANE &#8212; authors reference data, drives the trading day. Never on any process's boot path." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F2FBFB;strokeColor=#0E8088;verticalAlign=top;align=left;spacingLeft=14;spacingTop=4;fontSize=15;fontStyle=1;fontColor=#0E5F63;container=1;collapsible=0;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="88" width="1030" height="372" as="geometry" />
+        </mxCell>
+
+        <mxCell id="vue" value="&lt;b&gt;Admin frontend (Vue)&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;&lt;i&gt;planned&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0E8088;dashed=1;fontSize=12;align=center;" vertex="1" parent="cp">
+          <mxGeometry x="30" y="52" width="290" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="cli" value="&lt;b&gt;most&lt;/b&gt; &#8212; operator CLI&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;securities &#183; send &#183; cancel &#183; book&lt;br&gt;define &#183; session &#183; purge &#183; load&lt;br&gt;&lt;i&gt;reaches the gateway on the same&lt;br&gt;client channel control uses&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#0E8088;fontSize=12;align=center;" vertex="1" parent="cp">
+          <mxGeometry x="350" y="52" width="290" height="86" as="geometry" />
+        </mxCell>
+        <mxCell id="pg" value="&lt;b&gt;PostgreSQL&lt;/b&gt;&lt;br&gt;&lt;font style=&quot;font-size:10px;&quot;&gt;shards &#183; securities &#183; participants&lt;br&gt;schedules &#183; holidays &#183; releases&lt;/font&gt;" style="shape=cylinder3;boundedLbl=1;backgroundOutline=1;size=12;whiteSpace=wrap;html=1;fillColor=#FFF2CC;strokeColor=#D6B656;fontSize=12;align=center;verticalAlign=middle;" vertex="1" parent="cp">
+          <mxGeometry x="670" y="52" width="290" height="86" as="geometry" />
+        </mxCell>
+
+        <mxCell id="ctl" value="&lt;b&gt;control&lt;/b&gt; &#8212; Spring Boot&lt;br&gt;&lt;font style=&quot;font-size:11px;&quot;&gt;REST API &#183; publishes immutable releases &#183; Aeron client for operator commands &#183; watches discovery + L3 &#183; scheduler&lt;br&gt;&lt;br&gt;&lt;i&gt;Reference data is validated by constructing the real&lt;/i&gt; reference &lt;i&gt;domain types &#8212; the fingerprint is never reimplemented.&lt;br&gt;Each scheduler tick reconciles the phase the calendar wants against the phase L3 reports, and sends the difference.&lt;/i&gt;&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#B0E3E6;strokeColor=#0E8088;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="cp">
+          <mxGeometry x="30" y="186" width="930" height="150" as="geometry" />
+        </mxCell>
+
+        <!-- ============================ release artifact ====================== -->
+        <mxCell id="rel" value="&lt;b&gt;Published release&lt;/b&gt; &#183; releases/000007/ &#8212; immutable, never rewritten&lt;br&gt;&lt;font style=&quot;font-size:11px;&quot;&gt;shard-N-securities.properties &#183; discovery.properties &#183; manifest.json (fingerprint per shard)&lt;br&gt;&lt;i&gt;This file, not the database, is what every process boots from.&lt;/i&gt;&lt;/font&gt;" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#666666;dashed=1;fontSize=13;align=center;verticalAlign=middle;" vertex="1" parent="1">
+          <mxGeometry x="1740" y="512" width="800" height="112" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== discovery =========================== -->
+        <mxCell id="disc" value="&lt;b&gt;discovery&lt;/b&gt;&lt;br&gt;&lt;br&gt;&lt;font style=&quot;font-size:11px;&quot;&gt;Broadcasts the tradable universe on a repeating cycle &#8212; no request protocol, so a restarted adapter recovers on its own.&lt;br&gt;&lt;br&gt;Publishes the &lt;b&gt;gateway's&lt;/b&gt; client endpoints, not the cluster's: an adapter that connected to the cluster would bypass validation and cumQty reconstruction.&lt;br&gt;&lt;br&gt;239.10.0.1:40000 &#183; stream 100&lt;/font&gt;" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFE6CC;strokeColor=#D79B00;fontSize=14;align=center;verticalAlign=top;spacingTop=8;fontColor=#7A4F00;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="680" width="560" height="240" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== invariants ========================== -->
+        <mxCell id="notes" value="&lt;b&gt;Invariants this shape encodes&lt;/b&gt;&lt;br&gt;&lt;br&gt;&#8226; A node is &lt;b&gt;two processes&lt;/b&gt;. The driver allocates, so it stays out of the engine.&lt;br&gt;&lt;br&gt;&#8226; The engine never calls a clock. Time is the sequenced consensus timestamp.&lt;br&gt;&lt;br&gt;&#8226; Book events and egress are &lt;b&gt;leader-only&lt;/b&gt;; the book event stream is muted on followers via onRoleChange.&lt;br&gt;&lt;br&gt;&#8226; Operator commands take the &lt;b&gt;same path as an order&lt;/b&gt; and are sequenced through the log &#8212; there is no control channel.&lt;br&gt;&lt;br&gt;&#8226; Commands are &lt;b&gt;unacknowledged&lt;/b&gt;. SessionChanged on L3 confirms a phase; nothing confirms a SecurityDefinition.&lt;br&gt;&lt;br&gt;&#8226; A halt is visible &lt;b&gt;only on L3&lt;/b&gt;, and recovery is operator-driven." style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFDE7;strokeColor=#D6B656;align=left;verticalAlign=top;spacingLeft=12;spacingTop=8;fontSize=11;fontColor=#4A4A4A;" vertex="1" parent="1">
+          <mxGeometry x="2110" y="680" width="430" height="240" as="geometry" />
+        </mxCell>
+
+        <!-- ================================ legend ============================ -->
+        <mxCell id="legend" value="&lt;b&gt;Legend&lt;/b&gt;&#160;&#160;&#160;&#8212;&#8594; order / execution path&#160;&#160;&#183;&#160;&#160;&#8212;&#8594; market data (multicast)&#160;&#160;&#183;&#160;&#160;&#8212;&#8594; control plane&#160;&#160;&#183;&#160;&#160;&#183;&#183;&#183;&#8594; boot-time configuration&#160;&#160;&#183;&#160;&#160;dashed box = outside this project, or planned" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#AEB6BF;align=left;verticalAlign=middle;spacingLeft=14;fontSize=12;fontColor=#4A5560;" vertex="1" parent="1">
+          <mxGeometry x="1510" y="940" width="1030" height="58" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== order path ========================== -->
+        <mxCell id="e1" value="NewOrderSingle &#183; OrderCancelRequest" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.08;exitY=1;exitDx=0;exitDy=0;entryX=0.25;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="upstream" target="gw0">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="55" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e4" value="ClientExecutionReport &#183; cumQty restored" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.75;exitY=0;exitDx=0;exitDy=0;entryX=0.2;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="gw0" target="upstream">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="-38" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e2" value="ingress" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.3;exitDx=0;exitDy=0;entryX=0;entryY=0.3;entryDx=0;entryDy=0;" edge="1" parent="1" source="gw0" target="cluster0">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="-14" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e3" value="egress&lt;br&gt;&lt;i&gt;leader only&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.75;exitDx=0;exitDy=0;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" edge="1" parent="1" source="cluster0" target="gw0">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="18" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e5" value="Book Event Stream&lt;br&gt;IPC 12 &#183; &lt;i&gt;leader only&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#9673A6;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="cluster0" target="mds0">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="40" y="72" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- ================================ feeds ============================= -->
+        <mxCell id="e6a" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="mds0" target="l1">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1240" y="822" />
+              <mxPoint x="255" y="822" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6b" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="mds0" target="l2">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1240" y="832" />
+              <mxPoint x="700" y="832" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="e6c" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="mds0" target="l3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1240" y="842" />
+              <mxPoint x="1165" y="842" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e7a" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.2;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l1" target="downstream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7b" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l2" target="downstream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e7c" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.8;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="l3" target="downstream">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <!-- ============================== discovery =========================== -->
+        <mxCell id="e8" value="tradable universe&lt;br&gt;&#8594; gateway endpoints" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="disc" target="upstream">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1480" y="800" />
+              <mxPoint x="1480" y="121" />
+            </Array>
+            <mxPoint x="0" y="134" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e9" value="routing table&lt;br&gt;+ drift vs the database" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.1;exitY=0;exitDx=0;exitDy=0;entryX=0.06;entryY=1;entryDx=0;entryDy=0;" edge="1" parent="1" source="disc" target="ctl">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="55" y="-20" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <!-- =========================== control plane wiring =================== -->
+        <mxCell id="e10" value="phases, halts, uncrosses, trades" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.6;entryDx=0;entryDy=0;" edge="1" parent="1" source="l3" target="ctl">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1448" y="890" />
+              <mxPoint x="1448" y="364" />
+            </Array>
+            <mxPoint x="80" y="0" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e11" value="SecurityDefinition &#183; SessionTransition &#183; PurgeExpiredOrders&#160;&#8212;&#160;&lt;i&gt;the same client channel an order uses&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.35;exitDx=0;exitDy=0;entryX=0;entryY=0.85;entryDx=0;entryDy=0;" edge="1" parent="1" source="ctl" target="gw0">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1420" y="326" />
+              <mxPoint x="1420" y="690" />
+              <mxPoint x="18" y="690" />
+              <mxPoint x="18" y="445" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e12" value="" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;startArrow=block;startFill=1;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.85;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="pg" target="ctl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e13" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.1;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="vue" target="ctl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e14" value="REST" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="cli" target="ctl">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e15" value="POST /api/releases&lt;br&gt;&lt;i&gt;validate, freeze, render&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.65;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="ctl" target="rel">
+          <mxGeometry relative="1" as="geometry">
+            <mxPoint x="0" y="15" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e16" value="boot: shard security file&lt;br&gt;&lt;i&gt;engine &#183; gateway &#183; market-data&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" edge="1" parent="1" source="rel" target="shard0">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1470" y="568" />
+              <mxPoint x="1470" y="445" />
+            </Array>
+            <mxPoint x="-180" y="-78" as="offset" />
+          </mxGeometry>
+        </mxCell>
+
+        <mxCell id="e17" value="boot: registry + every shard's file&lt;br&gt;&lt;i&gt;the one process that needs them all&lt;/i&gt;" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.75;entryY=0;entryDx=0;entryDy=0;" edge="1" parent="1" source="rel" target="disc">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

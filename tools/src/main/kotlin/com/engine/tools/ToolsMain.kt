@@ -12,6 +12,7 @@ private val USAGE = """
       most send   --symbol SYM --side buy|sell --price P --qty Q [options]
       most cancel --symbol SYM --side buy|sell --order-id ID --orig-clordid ID [options]
       most book   [--symbol SYM[,SYM...]] [--depth N] [--refresh MS]
+      most load   --symbol SYM[,SYM...] --price-min P --price-max P [options]
       most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
       most session --phase closed|pre-open|open-auction|continuous [--shard N]
       most purge  [--trading-date YYYYMMDD] [--shard N]
@@ -22,10 +23,23 @@ private val USAGE = """
       send        Submit an order, routed to the gateway that owns the symbol.
       cancel      Cancel a resting order.
       book        Rebuild and print order books from the L2 depth feed.
+      load        Drive a shard at a fixed rate and measure round-trip latency and throughput.
       define      Seed a security's reference price and collar widths.
       session     Move a shard to a trading phase; the uncross runs on the way to continuous.
       purge       Run the off-session expiry sweep.
       cluster     Run a single-node cluster host for local development.
+
+    Load options (the shard must already be defined and CONTINUOUS):
+      --count N                Orders to send (default 1000000)
+      --delay-us N             Microseconds between orders (default 10); 0 sends unpaced
+      --rate N                 Orders per second, instead of --delay-us
+      --warmup N               Leading orders excluded from the histograms
+      --qty-min Q --qty-max Q  Quantity range (default 1..100)
+      --participants N         Participant ids from --participant upward (default 4)
+      --seed N                 Generator seed, so a run repeats exactly (default 42)
+      --drain-ms N             Keep collecting reports this long after the last send (default 2000)
+      --interval-ms N          Progress line cadence (default 1000; 0 is silent)
+      --histogram FILE         Write the latency distribution for plotting
 
     Order options:
       --clordid ID             Client order id (default: current millis)
@@ -57,6 +71,7 @@ fun main(argv: Array<String>) {
             "send" -> runSend(args)
             "cancel" -> runCancel(args)
             "book" -> runBook(args)
+            "load" -> runLoad(args)
             "define" -> runDefine(args)
             "session" -> runSession(args)
             "purge" -> runPurge(args)

@@ -16,7 +16,8 @@ execution-report egress, book-event publication, and snapshot/restore; and `Engi
 `EngineMain` — the `ClusteredServiceContainer` wiring; `MarketDataService` / `DepthBook` — L1/L2/L3
 derivation; `GatewayService` / `OrderStateStore` — validation and `cumQty` reconstruction; and
 `reference` / `discovery` — the shared shard security list and the tradable-universe directory; and
-`tools` — the `most` operator CLI. All seven modules are implemented.
+`tools` — the `most` operator CLI, including `most load`, the paced load generator and latency
+harness. All seven modules are implemented.
 
 ## Commands
 
@@ -28,11 +29,12 @@ process. Boot config carries only geometry and capacity — reference prices and
 consensus cannot catch.
 
 `./e2e/run-e2e.sh` (after `./gradlew installDist`) runs every process against a real single-node
-cluster and drives a trade through the CLI. Run it after changing anything on the wire: it has
-already caught five defects unit tests could not: a clobbered Aeron session header, cumQty derived
-from a terminal report's leavesQty, an unenforced ladder-range invariant, a gateway cluster session
-that died after 10s idle for want of keepalives, and processes that never exited on SIGTERM.
-`docs/LocalTesting.md` is the manual walkthrough.
+cluster, drives a trade through the CLI, then runs a short `most load` to prove the harness still
+correlates. Run it after changing anything on the wire: it has already caught five defects unit tests
+could not: a clobbered Aeron session header, cumQty derived from a terminal report's leavesQty, an
+unenforced ladder-range invariant, a gateway cluster session that died after 10s idle for want of
+keepalives, and processes that never exited on SIGTERM. `docs/LocalTesting.md` is the manual
+walkthrough, and its §9 is the benchmarking procedure.
 
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is
@@ -88,6 +90,17 @@ market-data and discovery alike — do not reintroduce per-process security list
 (`symbol`, `isin`, `name`, `currency`) and geometry; ISINs are check-digit validated at boot. Every
 process prints `ShardSpec.fingerprint()` at startup, which is how a geometry mismatch is caught
 before it silently diverges the books.
+
+**An order the gateway cannot forward must not be consumed.** `AeronCluster.offer` returning
+`BACK_PRESSURED`/`ADMIN_ACTION` is transient; treating it as a drop loses an order the client
+believes it placed, with no ack and no reject. The gateway uses `controlledPoll` and returns
+`Action.ABORT` so the fragment is offered again — and `Action.COMMIT`, never `Action.CONTINUE`, on
+the handled path, since `CONTINUE` commits only at the end of the poll and a later `ABORT` would
+rewind past fragments already forwarded and duplicate them. The pending `origQty` recorded before
+the offer must be unwound when the offer does not send. A dead session is not retryable, so it
+rejects with `GATEWAY_UNAVAILABLE`. **The outbound leg cannot do this** — egress must keep being
+drained or the session dies — so it drops and counts; retrying there was measured and cost 10x on
+the p99 while still dropping.
 
 **The directory publishes the GATEWAY's client endpoints**, not the cluster ingress/egress — an
 adapter connecting to the cluster directly would bypass the gateway's validation and `cumQty`
@@ -218,6 +231,15 @@ actually exists before designing around it.
 
 **Prices and quantities** are fixed-point `int64` with 8 implied decimals. Never introduce floating
 point into pricing or matching arithmetic.
+
+**Measure with `most load`, and read both latencies.** It reports *service time* (from the actual
+send) and *response time* (from the scheduled send); quoting only the first is coordinated omission
+and hides exactly the queueing that appears at the rate one is trying to find. `pacing lateness` says
+whether the generator itself was the bottleneck. Its schedule is absolute — `start + i * delay` —
+because a relative sleep drifts and then catches up in bursts. Two things silently invalidate a run:
+a `maxOrders` too small for the rate (everything becomes `BOOK_CAPACITY`) and a price band outside
+the static collar or the ladder. Both show as reject counts in the summary, which is why the summary
+prints them. `docs/LocalTesting.md` §9 is the walkthrough.
 
 ## Performance budget
 

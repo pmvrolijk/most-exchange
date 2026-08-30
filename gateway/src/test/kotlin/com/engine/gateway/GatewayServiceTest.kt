@@ -14,7 +14,6 @@ import org.agrona.DirectBuffer
 import org.agrona.concurrent.UnsafeBuffer
 import kotlin.test.Test
 import kotlin.test.assertEquals
-import kotlin.test.assertFalse
 import kotlin.test.assertTrue
 
 data class ClientReport(
@@ -33,11 +32,15 @@ class RecordingSink : GatewaySink {
     val toCluster = mutableListOf<Int>()
     val toClient = mutableListOf<ClientReport>()
 
+    /** What the next offer to the cluster should pretend to be. */
+    var clusterOffer = ClusterOffer.SENT
+
     private val header = MessageHeaderDecoder()
     private val decoder = ClientExecutionReportDecoder()
 
-    override fun toCluster(buffer: DirectBuffer, offset: Int, length: Int) {
-        toCluster += length
+    override fun toCluster(buffer: DirectBuffer, offset: Int, length: Int): ClusterOffer {
+        if (clusterOffer == ClusterOffer.SENT) toCluster += length
+        return clusterOffer
     }
 
     override fun toClient(buffer: DirectBuffer, offset: Int, length: Int) {
@@ -70,7 +73,7 @@ class GatewayServiceTest {
         qty: Long,
         price: Long = 100,
         side: Side = Side.BUY,
-    ): Boolean {
+    ): ClientMessageAction {
         NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId).clOrdId(clOrdId).price(price).qty(qty).smpId(0)
             .securityId(securityId).expireDate(0).side(side).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
@@ -80,7 +83,11 @@ class GatewayServiceTest {
         )
     }
 
-    private fun cancelRequest(participantId: Long, clOrdId: Long, securityId: Int): Boolean {
+    private fun cancelRequest(
+        participantId: Long,
+        clOrdId: Long,
+        securityId: Int,
+    ): ClientMessageAction {
         OrderCancelRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId).origClOrdId(clOrdId).clOrdId(clOrdId + 1)
             .exchangeOrderId(1).securityId(securityId).side(Side.BUY)
@@ -111,14 +118,20 @@ class GatewayServiceTest {
 
     @Test
     fun `a valid order is forwarded untouched`() {
-        assertTrue(newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10))
+        assertEquals(
+            ClientMessageAction.CONSUME,
+            newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10),
+        )
         assertEquals(1, sink.toCluster.size)
         assertTrue(sink.toClient.isEmpty())
     }
 
     @Test
     fun `an out of shard security is rejected without a cluster round trip`() {
-        assertFalse(newOrder(participantId = 1, clOrdId = 100, securityId = 99, qty = 10))
+        assertEquals(
+            ClientMessageAction.CONSUME,
+            newOrder(participantId = 1, clOrdId = 100, securityId = 99, qty = 10),
+        )
 
         assertTrue(sink.toCluster.isEmpty())
         val rejection = sink.toClient.single()
@@ -129,15 +142,15 @@ class GatewayServiceTest {
 
     @Test
     fun `non positive quantity and price are rejected locally`() {
-        assertFalse(newOrder(1, 100, 1, qty = 0))
-        assertFalse(newOrder(1, 101, 1, qty = 10, price = 0))
+        newOrder(1, 100, 1, qty = 0)
+        newOrder(1, 101, 1, qty = 10, price = 0)
         assertEquals(2, sink.toClient.size)
         assertTrue(sink.toCluster.isEmpty())
     }
 
     @Test
     fun `a cancel for an out of shard security is rejected locally`() {
-        assertFalse(cancelRequest(participantId = 1, clOrdId = 100, securityId = 99))
+        cancelRequest(participantId = 1, clOrdId = 100, securityId = 99)
         assertEquals(RejectReason.UNKNOWN_SECURITY.value(), sink.toClient.single().rejectReason)
     }
 
@@ -146,7 +159,8 @@ class GatewayServiceTest {
         val b = UnsafeBuffer(ByteArray(64))
         com.engine.sbe.SessionTransitionEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
             .transitionTime(0).tradingDate(20260829).targetPhase(com.engine.sbe.Phase.CONTINUOUS)
-        assertTrue(
+        assertEquals(
+            ClientMessageAction.CONSUME,
             service.onClientMessage(
                 b, 0,
                 MessageHeaderEncoder.ENCODED_LENGTH +
@@ -258,8 +272,100 @@ class GatewayServiceTest {
     }
 
     @Test
+    fun `a back pressured order is neither sent nor consumed`() {
+        // The defect this replaced: the order was dropped and the client told nothing, so it
+        // waited forever for an acknowledgement that could never come.
+        sink.clusterOffer = ClusterOffer.RETRY
+        assertEquals(
+            ClientMessageAction.RETRY,
+            newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10),
+        )
+
+        assertTrue(sink.toCluster.isEmpty())
+        assertTrue(sink.toClient.isEmpty(), "backpressure is transient, not a rejection")
+    }
+
+    @Test
+    fun `a retried order is recorded once, not twice`() {
+        // The retry re-delivers the same fragment, so the pending entry must have been unwound.
+        // Recording it twice would leave a stale entry that nothing ever releases.
+        sink.clusterOffer = ClusterOffer.RETRY
+        newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
+        sink.clusterOffer = ClusterOffer.SENT
+        newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
+
+        assertEquals(1, sink.toCluster.size)
+        report(1, 100, exchangeOrderId = 500, execType = ExecType.NEW, leavesQty = 10)
+        assertEquals(1, service.liveOrders)
+        assertEquals(10L, sink.toClient.single().origQty)
+
+        // And nothing is left pending under the old key.
+        report(1, 100, exchangeOrderId = 501, execType = ExecType.NEW, leavesQty = 10)
+        assertEquals(1L, service.untrackedReports)
+    }
+
+    @Test
+    fun `an unreachable cluster rejects the order back to the client`() {
+        sink.clusterOffer = ClusterOffer.FAILED
+        assertEquals(
+            ClientMessageAction.CONSUME,
+            newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10),
+        )
+
+        assertTrue(sink.toCluster.isEmpty())
+        val rejection = sink.toClient.single()
+        assertEquals("REJECTED", rejection.execType)
+        assertEquals(RejectReason.GATEWAY_UNAVAILABLE.value(), rejection.rejectReason)
+        assertEquals(10L, rejection.origQty)
+        assertEquals(1L, service.unreachableRejects)
+        // Nothing may be left pending, or liveOrders drifts up for the life of the process.
+        assertEquals(0, service.liveOrders)
+    }
+
+    @Test
+    fun `an unreachable cluster rejects a cancel too`() {
+        sink.clusterOffer = ClusterOffer.FAILED
+        assertEquals(
+            ClientMessageAction.CONSUME,
+            cancelRequest(participantId = 1, clOrdId = 100, securityId = 1),
+        )
+        assertEquals(
+            RejectReason.GATEWAY_UNAVAILABLE.value(),
+            sink.toClient.single().rejectReason,
+        )
+    }
+
+    @Test
+    fun `a back pressured cancel is retried`() {
+        sink.clusterOffer = ClusterOffer.RETRY
+        assertEquals(
+            ClientMessageAction.RETRY,
+            cancelRequest(participantId = 1, clOrdId = 100, securityId = 1),
+        )
+        assertTrue(sink.toClient.isEmpty())
+    }
+
+    @Test
+    fun `a back pressured operator command is retried, and a lost one is counted`() {
+        val b = UnsafeBuffer(ByteArray(64))
+        com.engine.sbe.SessionTransitionEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
+            .transitionTime(0).tradingDate(20260829).targetPhase(com.engine.sbe.Phase.CONTINUOUS)
+        val length = MessageHeaderEncoder.ENCODED_LENGTH +
+            com.engine.sbe.SessionTransitionEncoder.BLOCK_LENGTH
+
+        sink.clusterOffer = ClusterOffer.RETRY
+        assertEquals(ClientMessageAction.RETRY, service.onClientMessage(b, 0, length))
+
+        // No client session to reject to, so the only honest thing is to count it.
+        sink.clusterOffer = ClusterOffer.FAILED
+        assertEquals(ClientMessageAction.CONSUME, service.onClientMessage(b, 0, length))
+        assertEquals(1L, service.undeliverableCommands)
+        assertTrue(sink.toClient.isEmpty())
+    }
+
+    @Test
     fun `a truncated message is ignored`() {
-        assertFalse(service.onClientMessage(buffer, 0, 2))
+        assertEquals(ClientMessageAction.CONSUME, service.onClientMessage(buffer, 0, 2))
         assertTrue(sink.toCluster.isEmpty())
     }
 }

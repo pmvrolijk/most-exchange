@@ -111,6 +111,33 @@ authenticated session principal at session open would be stronger; see §8.
 This is why the gateway is stateful: it is the only component that remembers an order's original
 quantity, and that memory is what lets the engine keep an order at exactly one cache line.
 
+#### Backpressure on the inbound leg
+
+**An order the gateway cannot forward must not be consumed.** `AeronCluster.offer` returns
+`BACK_PRESSURED` or `ADMIN_ACTION` under congestion; treating either as a drop loses an order the
+client believes it has placed, with no acknowledgement and no rejection — the one outcome a client
+cannot recover from, since there is nothing to retry against and nothing to time out on.
+
+The gateway therefore polls its client subscription with `controlledPoll`. A message the cluster
+cannot take right now leaves the fragment unconsumed (`Action.ABORT`) and is offered again on the
+next poll, which propagates congestion back to the client's own publication instead of swallowing
+it. Successfully handled fragments return `Action.COMMIT`, not `Action.CONTINUE`: `CONTINUE` commits
+the position only at the end of the whole poll, so a later `ABORT` would rewind past fragments
+already forwarded and send them to the cluster a second time.
+
+Two consequences follow. The pending `origQty` recorded before the offer has to be unwound when the
+offer does not send, or a retried order is recorded twice and a failed one leaks an entry nothing
+ever releases. And a genuinely dead session — `NOT_CONNECTED`, `CLOSED` — is not retryable, so the
+order is rejected back to the client with `RejectReason.GATEWAY_UNAVAILABLE`, a reason no engine
+ever emits because a message the engine never saw cannot be rejected by it.
+
+**The outbound leg is different, and is honestly lossy.** Cluster egress cannot be left unconsumed
+the way ingress can — the poller that drains it is the same thread that keeps the session alive — so
+a subscriber that falls behind loses execution reports, counted as `droppedToClient`. Retrying the
+outbound offer was measured and made matters worse: the spin burned the poller thread that also
+drives ingress and keepalives, moving the round-trip p99 from 0.3 ms to 4 ms while still dropping.
+The remedy is a larger term buffer or a faster subscriber, not a busier gateway.
+
 ### Determinism Protocol
 
 * No `System.currentTimeMillis()` / `nanoTime()` in the engine. Time is read only from
@@ -747,6 +774,9 @@ backpressure, but each has its own publication, so a stalled one affects only it
       <validValue name="PRICE_OUT_OF_LADDER">8</validValue>
       <validValue name="SELF_MATCH_PREVENTED">9</validValue>
       <validValue name="VOLATILITY_HALT">10</validValue>
+      <!-- Gateway-only: the cluster session could not accept the message. The engine
+           never emits it, since a message it never saw cannot be rejected by it. -->
+      <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
     </enum>
   </types>
 
@@ -1801,6 +1831,7 @@ route had to change from cluster ingress to gateway endpoints.
 | `most send` | Submit an order, routed to the gateway owning the symbol; follows execution reports |
 | `most cancel` | Cancel a resting order |
 | `most book` | Rebuild and print books from the L2 depth feed |
+| `most load` | Drive a shard at a fixed rate and measure round-trip latency and throughput |
 
 Two things the tools do differently from the engine, deliberately:
 
@@ -1815,6 +1846,41 @@ Two things the tools do differently from the engine, deliberately:
 The inspector tracks sequences with `FeedSequenceTracker` and prints a staleness warning on a gap:
 under `MaxMulticastFlowControl` a slow subscriber takes an unrecoverable gap by design, so an
 operator reading depth off the screen has to be told when it can no longer be trusted.
+
+#### `most load` — the measurement harness
+
+`most load` is the only tool with a hot path. It generates orders into parallel primitive arrays
+before the run starts, then sends them with `tryClaim`, encoding straight into the log buffer, so
+nothing allocates once the clock starts and the generator is not what is being measured. Prices are
+drawn as *tick indices* over a configured band and materialised as `floor + tick x index`, which
+makes on-tick alignment true by construction; a seeded `xorshift64*` makes a run reproducible.
+
+Three properties make its numbers trustworthy:
+
+* **The schedule is absolute.** Order *i* is due at `start + i x delay`, never `sleep(delay)` after
+  the last send. A relative delay drifts, and catching up after a stall by sending flat out turns a
+  paced run into a burst — which is the opposite of the sustained rate being measured.
+* **Response time is reported alongside service time.** Service time is `report - actual send`;
+  response time is `report - scheduled send`, and includes the time an order waited because the
+  sender itself had fallen behind. Reporting only service time is coordinated omission: at the rate
+  the stack cannot sustain, the two diverge by orders of magnitude and only the second is what a
+  client would experience. Sender lateness is recorded separately, so "the generator was the
+  bottleneck" is visible rather than hidden inside the latency figures.
+* **A trade is attributed to the aggressor by ordering, not by a threshold.** Egress is one ordered
+  stream from one deterministic engine, so every report an aggressing order generates arrives before
+  any report for a later order. A `TRADE` arriving while its own order is still the most recently
+  acknowledged one is therefore an immediate fill; a later one is the resting side of somebody
+  else's aggression, whose latency would measure how long it sat on the book.
+
+What it measures is the **whole client round trip** — gateway, cluster ingress, Raft append and
+archive write, engine, egress, gateway, client publication. On a single-node local cluster the
+archive's disk write dominates, so the figure is an end-to-end capacity number and not the engine's
+internal budget from §2. Splitting the stages needs timestamps in the gateway and the engine.
+
+Two failure modes turn a benchmark into a measurement of something else, so both are called out in
+the summary rather than left to be inferred: a price band too wide to cross fills the book until
+every order is a `BOOK_CAPACITY` reject, and a band outside the static collar is rejected at
+acceptance. Reject reasons are printed with counts whenever any are non-zero.
 
 ---
 

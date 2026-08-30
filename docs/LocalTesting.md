@@ -1,7 +1,7 @@
 # Running the Exchange Locally
 
 How to bring up the whole system on one machine, seed it, trade through it, watch the market data,
-and take it down again.
+measure what it does under load, and take it down again.
 
 This is a development setup: **one cluster node** and **Aeron IPC** rather than multicast. It proves
 the components talk to each other, not that the network is configured. Production runs three or five
@@ -397,7 +397,91 @@ takes an unrecoverable gap by design, so the warning means what it says.
 
 ---
 
-## 9. Shut down
+## 9. Measure throughput and latency
+
+`most load` drives the shard at a fixed rate and reports what came back. It measures the **whole
+client round trip** — gateway, cluster consensus and archive write, engine, egress, gateway, client
+publication — so on a single node the archive's disk write dominates and the figure is an end-to-end
+capacity number, not the engine's internal budget.
+
+Two things must be right first, or the run measures something else:
+
+* **`maxOrders` must be realistic.** A book that fills rejects everything after it with
+  `BOOK_CAPACITY`. The `security.N.maxOrders=1000000` of §2 is the number to benchmark against; a
+  small value produces a run that measures the reject path and says so.
+* **The band must sit inside the static collar** seeded by `most define`, and inside the ladder.
+  `most load` warns about the ladder, which it can see in the directory; the collar it cannot, so a
+  band outside it shows up as a `PRICE_OUT_OF_BOUNDS` count in the summary.
+
+```sh
+most load --symbol AAPL --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+  --count 300000 --delay-us 10 --participant 20 --participants 4 $CONN
+```
+
+```
+load: AAPL  300,000 orders in 3.00s -- 100,000/s achieved (target 100,000/s)
+  measured path  client -> gateway -> cluster consensus -> engine -> gateway -> client
+  band           99.90..100.10  qty 1..10  participants 20..23  warmup 30000
+  offers         ok=300,000  backpressure-retries=0  dropped=0
+  reports        647,190   new=299,997 trade=296,798 canceled=50,395 expired=0 rejected=0
+  fills          930,024 qty traded, 135,948 orders filled on arrival (45.3%)
+  unanswered     3 orders never saw a report
+  pacing         lateness n=270,000  p50=0.0 p90=0.0 p99=0.2 p99.9=7.7 max=98.2 (µs)
+  ack  response  n=269,997  p50=46.8 p90=77.0 p99=592.9 p99.9=1839.1 max=2689.0 (µs)
+  ack  service   n=269,997  p50=46.8 p90=76.9 p99=592.9 p99.9=1839.1 max=2689.0 (µs)
+  fill service   n=135,948  p50=47.8 p90=79.1 p99=630.8 p99.9=1890.3 max=2680.8 (µs)
+```
+
+### Reading it
+
+**`ack response` versus `ack service`.** Service time is measured from when the order was actually
+sent; response time from when it was *due* to be sent. While the generator keeps up they agree.
+When it cannot, response time includes the queueing the client would really have suffered, and it is
+the honest number — reporting only service time is the coordinated-omission mistake. `pacing
+lateness` says which case you are in: while it stays in single-digit microseconds the generator is
+not the bottleneck.
+
+**`canceled`** with no cancel requests sent is self-match prevention. With `--participants 4` roughly
+one aggressor in four meets its own resting order and is cancelled under the default
+`CANCEL_AGGRESSOR`. Raise `--participants` to reduce it.
+
+**`unanswered`** counts orders that never saw any report. The gateway no longer drops orders on
+cluster backpressure — it leaves them unconsumed and retries, which its `clusterBackpressure` counter
+records — so unanswered orders now mean **execution reports** were lost on the way back, which the
+gateway's `droppedToClient` counter confirms. That leg has no back-channel: a subscriber that falls
+behind loses reports.
+
+### Finding the knee
+
+Sweep the delay and watch where response time stops tracking service time and `unanswered` climbs:
+
+```sh
+for delay in 100 20 10 5 3; do
+  most load --symbol AAPL --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+    --count 300000 --delay-us $delay --participant 20 --participants 4 --interval-ms 0 $CONN
+done
+```
+
+On one development machine (single node, IPC, everything on one host) that gives roughly:
+
+| Rate | ack p50 | ack p99 | unanswered |
+| --- | --- | --- | --- |
+| 50k/s | 39 µs | 291 µs | 2 |
+| 100k/s | 47 µs | 593 µs | 3 |
+| 200k/s | 61 µs | 1.1 ms | 3 |
+| 333k/s | 35 ms | 53 ms | 134,271 |
+
+The knee is between 200k and 333k orders/sec, so the design's 100k/s/security target has headroom on
+this path. Numbers from a laptop are not a capacity plan — the point of the sweep is the shape, and
+the shape says the collapse is abrupt rather than gradual.
+
+Use `--seed` to repeat a run exactly, `--histogram FILE` to write the distribution for plotting, and
+`--rate` instead of `--delay-us` when it reads better. `--delay-us 0` sends unpaced, which finds the
+drop-off point quickly but has no schedule, so it reports no response time.
+
+---
+
+## 10. Shut down
 
 Stop in reverse start order, with `SIGTERM` so each process prints its counters:
 
@@ -469,3 +553,6 @@ own.
 | `REJECTED ... SELF_MATCH_PREVENTED` | Both sides used the same `--participant`. Use different ids. |
 | Fingerprints differ between processes | They are reading different security files. |
 | `most send` prints no execution report | Increase `--follow`; or the gateway lost its cluster session — check `gateway.log`. |
+| `most load` reports every order `BOOK_CAPACITY` | `maxOrders` is too small for the rate, or the band is too wide to cross so nothing ever leaves the book. |
+| `most load` reports many `unanswered` | The rate is past what the client subscriber sustains; check the gateway's `droppedToClient` counter at shutdown. Orders are not lost — `clusterBackpressure` shows those being retried. |
+| `REJECTED ... GATEWAY_UNAVAILABLE` | The gateway's cluster session is gone. Check `gateway.log`; the order never reached the engine. |

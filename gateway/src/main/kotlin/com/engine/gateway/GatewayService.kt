@@ -13,10 +13,38 @@ import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
 import org.agrona.concurrent.UnsafeBuffer
 
+/** What became of an offer to the cluster. */
+enum class ClusterOffer {
+    SENT,
+
+    /**
+     * Transient — backpressure, or an admin action such as a term rotation. The message has not
+     * been sent and the same bytes must be offered again.
+     */
+    RETRY,
+
+    /** Terminal: the cluster session is gone, and offering these bytes again will not help. */
+    FAILED,
+}
+
+/**
+ * What the poller should do with the fragment it just handed over.
+ *
+ * A gateway that consumed a fragment it could not forward would lose a client's order with no
+ * acknowledgement and no rejection, which is the one outcome a client cannot recover from.
+ */
+enum class ClientMessageAction {
+    /** Dealt with: forwarded to the cluster, or rejected back to the client. */
+    CONSUME,
+
+    /** Not sent. Leave the fragment unconsumed so the next poll offers it again. */
+    RETRY,
+}
+
 /** Where the gateway sends things. An interface so the logic is testable without Aeron. */
 interface GatewaySink {
     /** To the cluster, unchanged. */
-    fun toCluster(buffer: DirectBuffer, offset: Int, length: Int)
+    fun toCluster(buffer: DirectBuffer, offset: Int, length: Int): ClusterOffer
 
     /** To the client, enriched. */
     fun toClient(buffer: DirectBuffer, offset: Int, length: Int)
@@ -53,13 +81,29 @@ class GatewayService(
     var untrackedReports = 0L
         private set
 
+    /** Client messages rejected because the cluster session could not take them. */
+    var unreachableRejects = 0L
+        private set
+
+    /** Operator commands lost the same way. They have no client to reject to. */
+    var undeliverableCommands = 0L
+        private set
+
     val liveOrders: Int get() = state.liveOrders
 
     // ------------------------------------------------------------- inbound
 
-    /** Client to cluster. Returns true when the message was forwarded. */
-    fun onClientMessage(buffer: DirectBuffer, offset: Int, length: Int): Boolean {
-        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return false
+    /**
+     * Client to cluster. The return value says whether the fragment may be consumed: on cluster
+     * backpressure the message is left unsent and unconsumed, so the poller offers it again
+     * rather than dropping an order the client believes it has placed.
+     */
+    fun onClientMessage(
+        buffer: DirectBuffer,
+        offset: Int,
+        length: Int,
+    ): ClientMessageAction {
+        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return ClientMessageAction.CONSUME
         header.wrap(buffer, offset)
         val body = offset + MessageHeaderDecoder.ENCODED_LENGTH
         val blockLength = header.blockLength()
@@ -77,15 +121,24 @@ class GatewayService(
             }
 
             // Session transitions, purges and security definitions are operator commands and
-            // pass through untouched.
-            else -> {
-                sink.toCluster(buffer, offset, length)
-                true
+            // pass through untouched. There is no client session to reject to, so a lost one is
+            // counted; the poller is about to stop anyway, since only a dead session fails here.
+            else -> when (sink.toCluster(buffer, offset, length)) {
+                ClusterOffer.SENT -> ClientMessageAction.CONSUME
+                ClusterOffer.RETRY -> ClientMessageAction.RETRY
+                ClusterOffer.FAILED -> {
+                    undeliverableCommands++
+                    ClientMessageAction.CONSUME
+                }
             }
         }
     }
 
-    private fun onNewOrder(buffer: DirectBuffer, offset: Int, length: Int): Boolean {
+    private fun onNewOrder(
+        buffer: DirectBuffer,
+        offset: Int,
+        length: Int,
+    ): ClientMessageAction {
         val participantId = newOrder.participantId()
         val clOrdId = newOrder.clOrdId()
         val securityId = newOrder.securityId()
@@ -101,16 +154,38 @@ class GatewayService(
                 price = price, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = qty,
                 rejectReason = reason,
             )
-            return false
+            return ClientMessageAction.CONSUME
         }
 
         // Recorded before forwarding: the acknowledgement can come back before this returns.
+        // An offer that does not send therefore has to unwind it, or a retried order would be
+        // recorded twice and a failed one would leak a pending entry that nothing ever releases.
         state.recordPending(participantId, clOrdId, qty)
-        sink.toCluster(buffer, offset, length)
-        return true
+        return when (sink.toCluster(buffer, offset, length)) {
+            ClusterOffer.SENT -> ClientMessageAction.CONSUME
+            ClusterOffer.RETRY -> {
+                state.discardPending(participantId, clOrdId)
+                ClientMessageAction.RETRY
+            }
+
+            ClusterOffer.FAILED -> {
+                state.discardPending(participantId, clOrdId)
+                unreachableRejects++
+                emitClientReport(
+                    participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
+                    price = price, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = qty,
+                    rejectReason = RejectReason.GATEWAY_UNAVAILABLE,
+                )
+                ClientMessageAction.CONSUME
+            }
+        }
     }
 
-    private fun onCancel(buffer: DirectBuffer, offset: Int, length: Int): Boolean {
+    private fun onCancel(
+        buffer: DirectBuffer,
+        offset: Int,
+        length: Int,
+    ): ClientMessageAction {
         val securityId = cancel.securityId()
         if (indexOf(securityId) < 0) {
             rejectedLocally++
@@ -120,10 +195,22 @@ class GatewayService(
                 price = 0L, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = 0L,
                 rejectReason = RejectReason.UNKNOWN_SECURITY,
             )
-            return false
+            return ClientMessageAction.CONSUME
         }
-        sink.toCluster(buffer, offset, length)
-        return true
+        return when (sink.toCluster(buffer, offset, length)) {
+            ClusterOffer.SENT -> ClientMessageAction.CONSUME
+            ClusterOffer.RETRY -> ClientMessageAction.RETRY
+            ClusterOffer.FAILED -> {
+                unreachableRejects++
+                emitClientReport(
+                    cancel.participantId(), cancel.clOrdId(), cancel.exchangeOrderId(), securityId,
+                    ExecType.REJECTED, cancel.side(),
+                    price = 0L, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = 0L,
+                    rejectReason = RejectReason.GATEWAY_UNAVAILABLE,
+                )
+                ClientMessageAction.CONSUME
+            }
+        }
     }
 
     /**

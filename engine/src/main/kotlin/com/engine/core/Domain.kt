@@ -89,6 +89,9 @@ object RejectReason {
     const val PRICE_OUT_OF_LADDER = 8
     const val SELF_MATCH_PREVENTED = 9
     const val VOLATILITY_HALT = 10
+
+    /** Emitted only by the gateway; kept here so this stays a faithful mirror of the wire. */
+    const val GATEWAY_UNAVAILABLE = 11
 }
 
 object RemoveReason {

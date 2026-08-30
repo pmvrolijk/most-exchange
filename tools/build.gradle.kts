@@ -5,6 +5,7 @@ dependencies {
     implementation(project(":sbe"))
     implementation(libs.aeron.all)
     implementation(libs.agrona)
+    implementation(libs.hdrhistogram)
 }
 
 application {

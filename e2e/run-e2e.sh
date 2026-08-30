@@ -197,7 +197,22 @@ cat "$RUN/cancel.out"
 grep -q "CANCELED" "$RUN/cancel.out" || fail "no cancel confirmation"
 
 echo
-echo "== 8. no process died"
+echo "== 8. drive load through the shard and measure it"
+# Its own participant range and clOrdId base, so nothing collides with the orders above. Small
+# enough not to slow the suite, but it exercises tryClaim encoding, correlation and the drain --
+# every part of the harness that could silently report zeros.
+$MOST load --symbol AAPL --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+  --count 5000 --delay-us 200 --warmup 500 --participant 20 --participants 4 \
+  --clordid-base 100000 --drain-ms 3000 $CONN > "$RUN/load.out" 2>&1 || fail "load"
+cat "$RUN/load.out"
+grep -q "5,000 orders in" "$RUN/load.out" || fail "load did not send every order"
+grep -qE "unanswered +0 orders" "$RUN/load.out" || fail "some load orders never saw a report"
+grep -qE "fills +0 qty traded" "$RUN/load.out" && fail "the load generated no trades at all"
+grep -q "REJECTED" "$RUN/load.out" && fail "the load was rejected -- band or phase is wrong"
+grep -qE "ack  service .*p50=" "$RUN/load.out" || fail "no latency percentiles reported"
+
+echo
+echo "== 9. no process died"
 for name in cluster engine gateway market-data discovery; do
   grep -qiE "exception|error" "$LOGS/$name.log" && {
     echo "--- suspicious output in $name.log ---"; grep -iE "exception|error" "$LOGS/$name.log" | head -5; }

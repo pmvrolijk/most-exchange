@@ -70,6 +70,9 @@
       <validValue name="PRICE_OUT_OF_LADDER">8</validValue>
       <validValue name="SELF_MATCH_PREVENTED">9</validValue>
       <validValue name="VOLATILITY_HALT">10</validValue>
+      <!-- Gateway-only: the cluster session could not accept the message. The engine
+           never emits it, since a message it never saw cannot be rejected by it. -->
+      <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
     </enum>
   </types>
 

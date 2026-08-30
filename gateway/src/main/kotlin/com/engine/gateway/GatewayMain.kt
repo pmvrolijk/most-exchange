@@ -2,9 +2,11 @@ package com.engine.gateway
 
 import com.engine.reference.ShardSpec
 import io.aeron.Aeron
-import io.aeron.FragmentAssembler
+import io.aeron.Publication
+import io.aeron.ControlledFragmentAssembler
 import io.aeron.cluster.client.AeronCluster
 import io.aeron.cluster.client.EgressListener
+import io.aeron.logbuffer.ControlledFragmentHandler
 import org.agrona.DirectBuffer
 import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.ShutdownSignalBarrier
@@ -81,15 +83,50 @@ fun main(args: Array<String>) {
             // nothing came back" -- the two look identical from order state alone.
             val sink = object : GatewaySink {
                 var forwardedToCluster = 0L
-                var droppedToCluster = 0L
+                var clusterBackpressure = 0L
                 var sentToClient = 0L
                 var droppedToClient = 0L
 
-                override fun toCluster(buffer: DirectBuffer, offset: Int, length: Int) {
-                    if (cluster.offer(buffer, offset, length) < 0) droppedToCluster++
-                    else forwardedToCluster++
+                /**
+                 * Backpressure is transient and is reported as such, never as a drop. The caller
+                 * leaves the fragment unconsumed and offers the same bytes on the next poll, so
+                 * congestion propagates back to the client's publication instead of quietly
+                 * swallowing an order.
+                 */
+                override fun toCluster(
+                    buffer: DirectBuffer,
+                    offset: Int,
+                    length: Int,
+                ): ClusterOffer {
+                    val result = cluster.offer(buffer, offset, length)
+                    return when {
+                        result >= 0L -> {
+                            forwardedToCluster++
+                            ClusterOffer.SENT
+                        }
+
+                        result == Publication.BACK_PRESSURED ||
+                            result == Publication.ADMIN_ACTION -> {
+                            clusterBackpressure++
+                            ClusterOffer.RETRY
+                        }
+
+                        else -> {
+                            System.err.println("gateway: cluster offer failed with $result")
+                            ClusterOffer.FAILED
+                        }
+                    }
                 }
 
+                /**
+                 * One attempt, never a retry loop. Egress cannot be left unconsumed the way
+                 * ingress can -- there is no back-channel, and stalling here would stall the
+                 * cluster session -- so a subscriber that has fallen behind loses reports whatever
+                 * this does. Spinning was measured and made things worse: it burned the poller
+                 * thread that also drives ingress and keepalives, pushing the round-trip p99 from
+                 * 0.3 ms to 4 ms while still dropping. droppedToClient is a real loss, and the fix
+                 * for it is a larger term buffer or a faster subscriber, not a busier gateway.
+                 */
                 override fun toClient(buffer: DirectBuffer, offset: Int, length: Int) {
                     if (outbound.offer(buffer, offset, length) < 0) droppedToClient++
                     else sentToClient++
@@ -97,8 +134,16 @@ fun main(args: Array<String>) {
             }
             service = GatewayService(config.shard.securityIds, sink)
 
-            val assembler = FragmentAssembler { buffer, offset, length, _ ->
-                service.onClientMessage(buffer, offset, length)
+            // Controlled, so a message the cluster cannot take right now is left in the
+            // subscription rather than consumed and lost. COMMIT rather than CONTINUE on the
+            // handled path is what makes that safe: CONTINUE only commits the position at the end
+            // of the whole poll, so a later ABORT would rewind past fragments already forwarded
+            // and send them a second time.
+            val assembler = ControlledFragmentAssembler { buffer, offset, length, _ ->
+                when (service.onClientMessage(buffer, offset, length)) {
+                    ClientMessageAction.CONSUME -> ControlledFragmentHandler.Action.COMMIT
+                    ClientMessageAction.RETRY -> ControlledFragmentHandler.Action.ABORT
+                }
             }
 
             val idle = BusySpinIdleStrategy()
@@ -108,7 +153,7 @@ fun main(args: Array<String>) {
             val worker = Thread({
                 var lastKeepAliveNs = System.nanoTime()
                 while (!Thread.currentThread().isInterrupted) {
-                    var work = inbound.poll(assembler, FRAGMENT_LIMIT)
+                    var work = inbound.controlledPoll(assembler, FRAGMENT_LIMIT)
                     work += cluster.pollEgress()
 
                     // A cluster session that sends nothing is closed by the consensus module
@@ -137,11 +182,13 @@ fun main(args: Array<String>) {
                 // Inside the barrier: closing it releases the signal and the JVM exits at once.
                 println(
                     "gateway: stopped. forwardedToCluster=${sink.forwardedToCluster} " +
-                        "droppedToCluster=${sink.droppedToCluster} " +
+                        "clusterBackpressure=${sink.clusterBackpressure} " +
                         "sentToClient=${sink.sentToClient} " +
                         "droppedToClient=${sink.droppedToClient} " +
                         "liveOrders=${service.liveOrders} " +
                         "rejectedLocally=${service.rejectedLocally} " +
+                        "unreachableRejects=${service.unreachableRejects} " +
+                        "undeliverableCommands=${service.undeliverableCommands} " +
                         "untrackedReports=${service.untrackedReports}"
                 )
                 System.out.flush()
@@ -156,6 +203,7 @@ private const val FRAGMENT_LIMIT = 64
 /** Comfortably inside the consensus module's session timeout, which defaults to 10 seconds. */
 private val KEEP_ALIVE_INTERVAL_NS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1)
 private const val SHUTDOWN_TIMEOUT_MS = 5_000L
+
 
 data class GatewayConfig(
     val shard: ShardSpec,

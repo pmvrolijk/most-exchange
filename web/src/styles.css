@@ -1,0 +1,159 @@
+/*
+ * One stylesheet, no framework.
+ *
+ * An operator console reads tables of numbers under pressure; the whole design problem is
+ * legibility of dense data, which is a font stack, a grid and consistent alignment rather than a
+ * component library.
+ */
+:root {
+  --bg: #12151a;
+  --panel: #191d24;
+  --panel-2: #1f242c;
+  --line: #2b323c;
+  --text: #dde3ea;
+  --muted: #8a94a3;
+  --accent: #62a0ea;
+  --good: #57c48a;
+  --warn: #e0b341;
+  --bad: #e06c68;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 var(--sans);
+}
+
+a { color: var(--accent); text-decoration: none; }
+
+.shell { display: flex; min-height: 100vh; }
+
+.sidebar {
+  width: 200px;
+  flex: 0 0 200px;
+  background: var(--panel);
+  border-right: 1px solid var(--line);
+  padding: 20px 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.brand {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  padding: 0 20px 18px;
+  color: var(--text);
+}
+.brand small { display: block; color: var(--muted); font-weight: 400; letter-spacing: 0; }
+
+.nav a {
+  display: block;
+  padding: 8px 20px;
+  color: var(--muted);
+  border-left: 2px solid transparent;
+}
+.nav a:hover { color: var(--text); background: var(--panel-2); }
+.nav a.router-link-active {
+  color: var(--text);
+  border-left-color: var(--accent);
+  background: var(--panel-2);
+}
+
+.identity {
+  margin-top: auto;
+  padding: 16px 20px 0;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 13px;
+}
+
+.main { flex: 1; padding: 24px 28px; min-width: 0; }
+
+h1 { font-size: 20px; font-weight: 600; margin: 0 0 4px; }
+.lede { color: var(--muted); margin: 0 0 20px; max-width: 70ch; }
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.table-wrap { overflow-x: auto; }
+
+/*
+ * Sized to content, not to the card. A full-width table with four columns pushes the last one to
+ * the far right and leaves a number nearly a screen away from its own heading -- which is precisely
+ * the thing an operator misreads under pressure. Wide tables still overflow into .table-wrap and
+ * scroll; narrow ones now stay narrow.
+ */
+table { border-collapse: collapse; width: auto; font-size: 13px; }
+th {
+  text-align: left;
+  font-weight: 500;
+  color: var(--muted);
+  border-bottom: 1px solid var(--line);
+  padding: 8px 28px 8px 0;
+  white-space: nowrap;
+}
+td { padding: 7px 28px 7px 0; border-bottom: 1px solid var(--panel-2); white-space: nowrap; }
+tr > th:last-child, tr > td:last-child { padding-right: 0; }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; font-family: var(--mono); }
+td.mono { font-family: var(--mono); font-size: 12px; }
+
+.pill {
+  display: inline-block;
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 12px;
+  background: var(--panel-2);
+  color: var(--muted);
+}
+.pill.good { color: var(--good); }
+.pill.warn { color: var(--warn); }
+.pill.bad { color: var(--bad); }
+
+.problem { color: var(--warn); }
+.empty { color: var(--muted); padding: 12px 0; }
+.error { color: var(--bad); }
+
+/* Login */
+.login { display: grid; place-items: center; min-height: 100vh; }
+.login form { width: 320px; }
+label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 4px; }
+input {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+}
+input:focus { outline: none; border-color: var(--accent); }
+button {
+  margin-top: 16px;
+  padding: 8px 14px;
+  background: var(--accent);
+  color: #0d1117;
+  border: 0;
+  border-radius: 4px;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+}
+button:disabled { opacity: 0.5; cursor: default; }
+button.link {
+  background: none;
+  color: var(--muted);
+  font-weight: 400;
+  padding: 0;
+  margin: 0;
+}
+button.link:hover { color: var(--text); }

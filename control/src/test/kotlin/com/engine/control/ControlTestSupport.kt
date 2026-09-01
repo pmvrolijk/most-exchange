@@ -9,6 +9,10 @@ import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import java.nio.file.Files
 
+/** The operator every test authenticates as; seeded once into the shared context. */
+const val TEST_ADMIN_USER = "admin"
+const val TEST_ADMIN_PASSWORD = "correct-horse-battery-staple"
+
 /** Real ISINs, so the check-digit validator is exercised against genuine reference data. */
 const val ISIN_APPLE = "US0378331005"
 const val ISIN_MICROSOFT = "US5949181045"
@@ -40,9 +44,14 @@ abstract class PostgresTest {
     fun clean() {
         jdbc.execute(
             "TRUNCATE spec_release_shard, spec_release, security, participant, shard, " +
-                "session_schedule, session_schedule_entry, market_holiday, schedule_run " +
-                "RESTART IDENTITY CASCADE",
+                "session_schedule, session_schedule_entry, market_holiday, schedule_run, " +
+                "operator_audit RESTART IDENTITY CASCADE",
         )
+        // control_user is deliberately NOT truncated. The seeded operator is created once, by an
+        // ApplicationRunner at context startup, and the context outlives every test -- truncating
+        // it would leave the second test onwards with no account to authenticate as. Accounts a
+        // test created are removed instead.
+        jdbc.update("DELETE FROM control_user WHERE username <> ?", TEST_ADMIN_USER)
         // The Spring context is shared across test classes, so observed feed state outlives a
         // truncate. A halt left behind by one test would make the next one skip.
         clusterLink.state.clear()
@@ -70,6 +79,10 @@ abstract class PostgresTest {
             // The scheduler is driven explicitly through reconcile(instant) in tests: a background
             // tick reading the wall clock would make them depend on what time the suite runs.
             registry.add("control.scheduler.enabled") { "false" }
+            // A known operator, so a test can actually log in. Without this the seeder generates a
+            // password and prints it, which is right for a real boot and useless to a test.
+            registry.add("control.auth.adminUser") { TEST_ADMIN_USER }
+            registry.add("control.auth.adminPassword") { TEST_ADMIN_PASSWORD }
         }
     }
 }

@@ -3,6 +3,7 @@ package com.engine.control
 import com.engine.reference.OperatorCommands
 import org.springframework.http.HttpStatus
 import org.springframework.http.ResponseEntity
+import jakarta.servlet.http.HttpServletRequest
 import org.springframework.web.bind.annotation.GetMapping
 import org.springframework.web.bind.annotation.PathVariable
 import org.springframework.web.bind.annotation.PostMapping
@@ -47,6 +48,7 @@ data class ReopenRequest(
 class OperationsApi(
     private val operations: OperationsService,
     private val link: ClusterLink,
+    private val audit: OperatorAudit,
 ) {
 
     /** What the exchange is actually doing, as opposed to what the database says it should be. */
@@ -57,6 +59,7 @@ class OperationsApi(
     fun define(
         @PathVariable securityId: Int,
         @RequestBody(required = false) request: DefinitionRequest?,
+        http: HttpServletRequest,
     ): ResponseEntity<CommandResult> = accepted(
         operations.define(
             securityId = securityId,
@@ -64,6 +67,9 @@ class OperationsApi(
             staticCollarBps = request?.staticCollarBps,
             dynamicCollarBps = request?.dynamicCollarBps,
         ),
+        action = "define",
+        target = "security:$securityId",
+        http = http,
     )
 
     /**
@@ -74,23 +80,25 @@ class OperationsApi(
     fun session(
         @PathVariable shardId: Int,
         @RequestBody request: SessionRequest,
+        http: HttpServletRequest,
     ): ResponseEntity<CommandResult> {
         val phase = OperatorCommands.parsePhase(request.phase)
         val result = request.tradingDate
             ?.let { operations.session(shardId, phase, it) }
             ?: operations.session(shardId, phase)
-        return accepted(result)
+        return accepted(result, "session", "shard:$shardId", http)
     }
 
     @PostMapping("/shards/{shardId}/purge")
     fun purge(
         @PathVariable shardId: Int,
         @RequestBody(required = false) request: PurgeRequest?,
+        http: HttpServletRequest,
     ): ResponseEntity<CommandResult> {
         val result = request?.tradingDate
             ?.let { operations.purge(shardId, it) }
             ?: operations.purge(shardId)
-        return accepted(result)
+        return accepted(result, "purge", "shard:$shardId", http)
     }
 
     /**
@@ -106,6 +114,7 @@ class OperationsApi(
     fun reopen(
         @PathVariable shardId: Int,
         @RequestBody(required = false) request: ReopenRequest?,
+        http: HttpServletRequest,
     ): ResponseEntity<ReopenResult> {
         val result = operations.reopen(
             shardId = shardId,
@@ -116,6 +125,13 @@ class OperationsApi(
             tradingDate = request?.tradingDate
                 ?: OperatorCommands.tradingDateOf(java.time.LocalDate.now()),
         )
+        audit.record(
+            action = "reopen",
+            target = "shard:$shardId",
+            detail = result.steps.joinToString("; ") { it.command },
+            sent = result.succeeded,
+            request = http,
+        )
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(result)
     }
 
@@ -123,10 +139,19 @@ class OperationsApi(
      * 502 when the bytes never left: the control plane is reachable but the exchange is not, which
      * is a different problem from a malformed request and should not read as one.
      */
-    private fun accepted(result: CommandResult): ResponseEntity<CommandResult> =
-        if (result.sent) {
+    private fun accepted(
+        result: CommandResult,
+        action: String,
+        target: String,
+        http: HttpServletRequest,
+    ): ResponseEntity<CommandResult> {
+        // Recorded whether or not the bytes left, and `sent` says which. A command the control
+        // plane could not deliver is exactly as interesting to an investigation as one it did.
+        audit.record(action, target, result.detail, result.sent, http)
+        return if (result.sent) {
             ResponseEntity.status(HttpStatus.ACCEPTED).body(result)
         } else {
             ResponseEntity.status(HttpStatus.BAD_GATEWAY).body(result)
         }
+    }
 }

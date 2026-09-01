@@ -15,8 +15,26 @@ spring:
 
 server:
   port: ${CONTROL_PORT:8080}
+  servlet:
+    session:
+      cookie:
+        http-only: true
+        # Lax, not Strict: the session cookie must survive a top-level navigation back into the SPA.
+        # It is a second line behind CSRF tokens, not the defence itself.
+        same-site: lax
+        # Off in development, since the Vite dev server and the API are both plain HTTP on
+        # localhost. Any real deployment terminates TLS and must set this true.
+        secure: ${CONTROL_COOKIE_SECURE:false}
 
 control:
+  # The first operator account, seeded once into an empty control_user table. With no password set
+  # the control plane generates one and prints it at WARN on first boot -- a known default password
+  # on something that can open a market would be worse than no authentication at all, because it
+  # would look protected.
+  auth:
+    adminUser: ${CONTROL_ADMIN_USER:admin}
+    adminPassword: ${CONTROL_ADMIN_PASSWORD:}
+
   # Where published releases are written. Each publish creates an immutable numbered subdirectory;
   # deployments point engine.securitiesFile and friends at one of them.
   releaseDir: ${CONTROL_RELEASE_DIR:./build/releases}

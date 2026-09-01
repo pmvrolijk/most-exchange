@@ -19,6 +19,10 @@ dependencies {
     implementation(libs.spring.boot.starter.web)
     implementation(libs.spring.boot.starter.jdbc)
     implementation(libs.spring.boot.starter.validation)
+    // Authentication for the REST API. The control plane can seed definitions, move sessions
+    // and run a schedule that opens a market unattended; it went from a reference-data editor
+    // to something that moves markets, and the security model had to move with it.
+    implementation(libs.spring.boot.starter.security)
     implementation(libs.jackson.module.kotlin)
     implementation(libs.flyway.core)
     runtimeOnly(libs.flyway.postgresql)
@@ -27,6 +31,7 @@ dependencies {
     testImplementation(libs.spring.boot.starter.test)
     testImplementation(libs.testcontainers.postgresql)
     testImplementation(libs.testcontainers.junit)
+    testImplementation(libs.spring.security.test)
 }
 
 application {

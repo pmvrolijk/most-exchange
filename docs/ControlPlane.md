@@ -100,7 +100,57 @@ are one `shard` row here, rendered into both files, so they cannot disagree.
 
 ## 4. REST surface
 
+### Authentication
+
+Everything under `/api` requires an authenticated operator, with the sole exception of
+`/api/auth/login` and `/api/auth/logout`. There is **one role, `ADMIN`, with full access**; the
+`role` column exists so that adding a read-only tier later is a data change rather than a migration.
+
+This module is the only one that needed authenticating, and the reason is worth stating: it is the
+only process that *decides* something. The engine, gateway, market-data and discovery processes
+apply a replicated log or forward bytes. This one seeds a `SecurityDefinition`, moves a shard's
+session, purges, reopens a halted security and runs a calendar that opens a market unattended —
+against an engine that acknowledges none of it. Nothing downstream will ever be able to say who sent
+a command, so the question has to be settled here.
+
+Two ways in, and they are for different callers:
+
+```sh
+# A browser (the Vue frontend). Session cookie, and a CSRF token on anything that mutates.
+curl -c jar localhost:8080/api/auth/me            # 401 -- and issues the XSRF-TOKEN cookie
+TOKEN=$(grep XSRF-TOKEN jar | awk '{print $7}')
+curl -b jar -c jar -X POST localhost:8080/api/auth/login \
+  -H "X-XSRF-TOKEN: $TOKEN" -H 'Content-Type: application/json' \
+  -d '{"username":"admin","password":"..."}'      # 200 {"username":"admin","roles":["ADMIN"]}
+
+# A script. HTTP Basic, exempt from CSRF, one call.
+curl -u admin:... localhost:8080/api/shards
 ```
+
+`/api/auth/login` is itself CSRF-protected, so a browser arriving with no cookie has to be *given* a
+token by an earlier response — which is why the anonymous 401 carries one, and why
+`SecurityConfig` opts out of Spring Security's deferred token resolution. Basic auth is exempt
+because a browser attaches cookies to a cross-site request automatically and an `Authorization`
+header never; a request carrying its own credentials is not a forgery risk.
+
+The first operator is seeded once into an empty table from `CONTROL_ADMIN_USER` /
+`CONTROL_ADMIN_PASSWORD`. **With no password configured it generates one and logs it at WARN.** A
+known default password on something that can open a market would be worse than the unauthenticated
+version it replaces, because that one at least did not look protected.
+
+### Who asked
+
+`operator_audit` records every market-moving command with the operator who issued it, and records
+**`sent`, not `applied`** — the same distinction §6 makes, for the same reason. A command the
+control plane could not deliver is recorded too, with `sent: false`; that is exactly as interesting
+to an investigation as one that went out. Unattended transitions are the scheduler's and stay in its
+own richer `schedule_run` log, which also records what it deliberately did *not* do.
+
+```
+GET  POST                 /api/auth/login       /api/auth/logout   GET /api/auth/me
+GET  POST                 /api/users            PUT /api/users/{u}/password, /enabled   DELETE
+GET                       /api/audit?limit=     who asked, what for, and whether it was even sent
+
 GET  POST                 /api/shards           GET PUT DELETE /api/shards/{id}
 GET  POST                 /api/securities       GET PUT DELETE /api/securities/{id}
 GET  POST                 /api/participants     GET PUT DELETE /api/participants/{id}
@@ -117,7 +167,7 @@ A refusal carries the domain's own sentence, because that is the same sentence a
 printed at boot:
 
 ```
-$ curl -X POST .../api/securities -d '{"securityId":1,"isin":"US0378331006",...}'
+$ curl -u admin:... -X POST .../api/securities -d '{"securityId":1,"isin":"US0378331006",...}'
 {"error":"invalid","message":"invalid ISIN for security 1: US0378331006"}
 ```
 
@@ -382,21 +432,26 @@ CONTROL_RELEASE_DIR=/var/lib/most/releases control/build/install/control/bin/con
 ```
 
 Flyway migrates on startup. Environment: `CONTROL_DB_URL`, `CONTROL_DB_USER`, `CONTROL_DB_PASSWORD`,
-`CONTROL_PORT`, `CONTROL_RELEASE_DIR`.
+`CONTROL_PORT`, `CONTROL_RELEASE_DIR`, `CONTROL_ADMIN_USER`, `CONTROL_ADMIN_PASSWORD`,
+`CONTROL_COOKIE_SECURE`.
+
+Set `CONTROL_ADMIN_PASSWORD` or read the generated one out of the first boot's log. Set
+`CONTROL_COOKIE_SECURE=true` anywhere TLS is terminated in front of this — it is off by default only
+so that the Vite dev server and the API can both be plain HTTP on localhost.
 
 Bootstrapping from what you already run — every deployment has hand-written files, and retyping them
 into an API is the obvious place to introduce the tick-size typo this module exists to prevent:
 
 ```sh
-curl -X POST localhost:8080/api/shards -H 'Content-Type: application/json' -d '{
+curl -u admin:... -X POST localhost:8080/api/shards -H 'Content-Type: application/json' -d '{
   "shardId": 0,
   "orderEntryChannel": "aeron:ipc", "orderEntryStreamId": 20,
   "executionReportChannel": "aeron:ipc", "executionReportStreamId": 21 }'
 
-curl -X POST localhost:8080/api/import -H 'Content-Type: text/plain' \
+curl -u admin:... -X POST localhost:8080/api/import -H 'Content-Type: text/plain' \
   --data-binary @/etc/most-exchange/shard-0-securities.properties
 
-curl -X POST 'localhost:8080/api/releases?note=imported'
+curl -u admin:... -X POST 'localhost:8080/api/releases?note=imported'
 ```
 
 The import parses through `ShardSpec.from`, so a file that would not have booted is not accepted,
@@ -411,6 +466,12 @@ A shard security file carries no endpoints, so the shard must exist before impor
 because half of what this module relies on is schema behaviour — `CHAR(12)` padding an ISIN on the
 way out, a unique constraint catching a reused symbol, a foreign key refusing to orphan a security —
 and none of that survives substitution.
+
+`AuthBootstrapTest` is the one test here that runs a real Tomcat rather than MockMvc, and it exists
+because MockMvc cannot see the defect it guards. `SecurityMockMvcRequestPostProcessors.csrf()` hands
+every test a token unconditionally, so a filter chain that never issued a token to *anybody* would
+pass the whole MockMvc suite while no real browser could ever log in. This is the project's recurring
+lesson in a new place: a test double easier than reality validates nothing.
 
 The test that carries the argument is in `SpecImporterTest`: it imports the shard security file
 checked into `reference`, publishes it back out, and asserts the fingerprint is unchanged. Since the

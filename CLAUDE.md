@@ -87,6 +87,19 @@ byte-identical state.
 - **Zero-copy publishing.** Use `Publication.tryClaim` and encode directly into the log buffer; do not
   encode into a scratch buffer and `offer` it.
 
+**The control plane is authenticated; nothing else is.** It is the only process that *decides*
+something — the others apply a replicated log or forward bytes. Everything under `/api` requires an
+`ADMIN` operator (one role, full access) held in `control_user` as a BCrypt hash, with a session
+cookie for the SPA and HTTP Basic for scripts. `operator_audit` records who asked for every
+market-moving command and, like the REST layer, records **`sent`, not `applied`** — the engine
+acknowledges nothing, so sent is all that can be claimed. `/api/auth/login` is itself CSRF-protected,
+so the anonymous 401 must carry the `XSRF-TOKEN` cookie or no browser can ever log in;
+`SecurityConfig` opts out of Spring Security's deferred token resolution for exactly that reason, and
+`AuthBootstrapTest` runs a real Tomcat over the sequence because MockMvc hands every test a token and
+so cannot distinguish this working from it being broken for every real browser. **`web/` is the Vue
+frontend**, deliberately outside the Gradle build so `./gradlew build` stays npm-free; it is served
+same-origin (Vite proxies `/api`) because the session and CSRF cookies are same-origin mechanisms.
+
 **The control plane authors reference data; it is never on a boot path.** `control` owns the
 Postgres schema for securities, shards and participants, and *publishes* immutable numbered releases
 of the same shard security files and discovery registry the four processes have always read. A node
@@ -99,8 +112,9 @@ one implementation; a second that drifted by a separator would report agreement 
 that disagree. `ShardSpec.render()`/`Universe.render()` are the inverses of the `from(Properties)`
 parsers and live beside them so drift fails a round-trip test. Releases are immutable — republishing
 allocates the next version — and carry topology only; Aeron dirs, cluster dirs and feed channels stay
-in each process's own config. `docs/ControlPlane.md` is the walkthrough. Its tests need Docker
-(Testcontainers Postgres), because most of what they assert is schema behaviour.
+in each process's own config. `docs/ControlPlane.md` is the walkthrough (§4 covers authentication), and `web/README.md` the
+frontend. Its tests need Docker (Testcontainers Postgres), because most of what they assert is
+schema behaviour.
 
 **Operator commands are unacknowledged, and that shapes the control plane.** `SecurityDefinition`,
 `SessionTransition` and `PurgeExpiredOrders` go to the gateway's client channel like any other

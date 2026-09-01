@@ -1,0 +1,83 @@
+# syntax=docker/dockerfile:1
+#
+# The four core services -- engine, gateway, market-data, discovery -- in one image, with the
+# compose file choosing which binary a container runs. One image rather than four because they are
+# built from one source tree and versioned together; a shard whose gateway and engine came from
+# different builds is a geometry mismatch waiting to happen.
+#
+# Two targets, and which one you get is a deliberate choice:
+#
+#   jvm     (default) copies the Gradle installDist trees from the host. Fast, and exactly what
+#           e2e/run-e2e.sh already exercises, so it is the proven path.
+#   native  builds with GraalVM inside the image. This is the production intent (Design.md §7) and
+#           it has never been run -- expect reflection-config gaps around Aeron and Agrona the
+#           first time. It is opt-in for that reason, not because JVM is the goal.
+#
+# The media driver is deliberately NOT here. It allocates, so it stays out of these processes and
+# lives in the tools image, which is always JVM.
+
+# ---------------------------------------------------------------------------- jvm
+FROM eclipse-temurin:21-jre-jammy AS jvm
+
+# Requires ./gradlew installDist on the host first. Copying a host build rather than running Gradle
+# in the image keeps the edit-run loop in seconds, which matters when the thing being iterated on
+# is Aeron channel configuration.
+COPY engine/build/install/engine           /opt/most/engine
+COPY gateway/build/install/gateway         /opt/most/gateway
+COPY market-data/build/install/market-data /opt/most/market-data
+COPY discovery/build/install/discovery     /opt/most/discovery
+
+# The start scripts carry the --add-opens flags Agrona 2.x and the Aeron driver need on JDK 17+.
+ENV PATH="/opt/most/engine/bin:/opt/most/gateway/bin:/opt/most/market-data/bin:/opt/most/discovery/bin:${PATH}"
+
+# Same uid as Dockerfile.tools: these containers share the aeron and cluster volumes, so they must
+# agree on who owns them.
+RUN useradd --system --uid 10001 most \
+ && mkdir -p /aeron /cluster \
+ && chown most /aeron /cluster
+USER most
+
+# --------------------------------------------------------------------- native build
+FROM ghcr.io/graalvm/native-image-community:21 AS native-build
+
+WORKDIR /src
+COPY gradlew settings.gradle.kts build.gradle.kts gradle.properties ./
+COPY gradle gradle
+COPY sbe sbe
+COPY reference reference
+COPY engine engine
+COPY gateway gateway
+COPY market-data market-data
+COPY discovery discovery
+
+# -march must be pinned explicitly rather than left at native: a -march=native binary SIGILLs when
+# the build host's CPU differs from the machine that runs it, and a container image is precisely a
+# binary built somewhere else (Design.md §7).
+ARG ENGINE_MARCH=x86-64-v3
+
+RUN --mount=type=cache,target=/root/.gradle \
+    ./gradlew --no-daemon -Pengine.march=${ENGINE_MARCH} \
+      :engine:nativeCompile :gateway:nativeCompile \
+      :market-data:nativeCompile :discovery:nativeCompile
+
+# ------------------------------------------------------------------------- native
+FROM debian:12-slim AS native
+
+RUN apt-get update && apt-get install -y --no-install-recommends libstdc++6 zlib1g \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=native-build /src/engine/build/native/nativeCompile/matching-engine /opt/most/bin/
+COPY --from=native-build /src/gateway/build/native/nativeCompile/order-gateway  /opt/most/bin/
+COPY --from=native-build /src/market-data/build/native/nativeCompile/market-data /opt/most/bin/
+COPY --from=native-build /src/discovery/build/native/nativeCompile/discovery    /opt/most/bin/
+
+# The same names the jvm target exposes, so the compose file does not change between targets.
+RUN ln -s /opt/most/bin/matching-engine /opt/most/bin/engine \
+ && ln -s /opt/most/bin/order-gateway   /opt/most/bin/gateway
+
+ENV PATH="/opt/most/bin:${PATH}"
+
+RUN useradd --system --uid 10001 most \
+ && mkdir -p /aeron /cluster \
+ && chown most /aeron /cluster
+USER most

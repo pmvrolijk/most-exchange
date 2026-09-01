@@ -1,0 +1,31 @@
+# syntax=docker/dockerfile:1
+#
+# The `most` operator CLI, and -- from the same distribution's classpath -- the Aeron media driver
+# and the single-node cluster host.
+#
+# Always JVM, never native, and that is a design decision rather than an omission. The media driver
+# allocates by design, which is exactly why it is kept out of the engine process (Design.md §7);
+# compiling it with the engine's constraints would be solving a problem it does not have. The CLI
+# is an operator tool where startup latency does not matter.
+
+FROM eclipse-temurin:21-jre-jammy
+
+COPY tools/build/install/most /opt/most/tools
+
+ENV PATH="/opt/most/tools/bin:${PATH}"
+
+# The driver and the cluster host are launched by class name off the same lib directory, so there
+# is one copy of aeron-all in this image rather than three.
+ENV MOST_CLASSPATH="/opt/most/tools/lib/*"
+ENV JAVA_OPTS="--add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED"
+
+# The mount points are created here, owned by this user, so the named volumes mounted over them
+# inherit that ownership. A volume mounted onto a path that does not exist in the image lands
+# root-owned, and a non-root process then cannot write to its own working directory.
+# The uid is fixed and identical in Dockerfile.core, because the same volumes are shared.
+RUN useradd --system --uid 10001 most \
+ && mkdir -p /aeron /cluster \
+ && chown most /aeron /cluster
+USER most
+
+ENTRYPOINT ["most"]

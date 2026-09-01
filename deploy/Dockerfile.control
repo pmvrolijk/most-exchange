@@ -1,0 +1,19 @@
+# syntax=docker/dockerfile:1
+#
+# The control plane. Spring Boot, and staying on the JVM: it is an authoring and orchestration
+# service, not on any matching path, and it holds a Postgres connection pool and a Flyway migration
+# runner -- neither of which wants to meet native-image reflection.
+
+FROM eclipse-temurin:21-jre-jammy
+
+COPY control/build/install/control /opt/most/control
+
+# It embeds an Aeron client of its own -- operator commands out, L3 book events in -- so it needs
+# the same --add-opens the other processes do. The start script already carries them.
+ENV PATH="/opt/most/control/bin:${PATH}"
+
+RUN useradd --system --uid 10001 most && mkdir -p /aeron /releases && chown most /aeron /releases
+USER most
+
+EXPOSE 8080
+ENTRYPOINT ["control"]

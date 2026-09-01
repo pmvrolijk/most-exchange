@@ -1,0 +1,13 @@
+.git
+.gitignore
+web/node_modules
+web/dist
+**/build/classes
+**/build/tmp
+**/build/reports
+**/build/test-results
+**/build/generated
+**/build/e2e
+**/build/releases
+**/build/native
+docs

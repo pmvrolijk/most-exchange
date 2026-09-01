@@ -15,9 +15,15 @@ export function price(value: number | null | undefined): string {
   })
 }
 
+/**
+ * Quantities are NOT scaled, whatever the blanket statement about "prices and quantities" in the
+ * design notes says. `PriceCodec.format` is applied to prices throughout the Kotlin, and the CLI
+ * prints `last <price> x <qty>` with the quantity raw -- an order for 10 lots matches 4 lots and
+ * the engine reports 4, not 4e-8. Dividing here rendered a trade of 4 as 0.00000004.
+ */
 export function qty(value: number | null | undefined): string {
   if (value === null || value === undefined) return '—'
-  return (value / SCALE).toLocaleString(undefined, { maximumFractionDigits: IMPLIED_DECIMALS })
+  return value.toLocaleString()
 }
 
 /** Server timestamps are ISO-8601 strings; the operator wants them in their own zone. */

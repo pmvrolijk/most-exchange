@@ -117,7 +117,32 @@ Boot config carries **only geometry and capacity**; reference prices and collar 
 engine prints a fingerprint of it at startup so nodes can be compared at a glance rather than by
 diffing files.
 
-## Control plane and admin UI
+## Docker: the whole thing at once
+
+[`deploy/`](deploy/README.md) runs everything on one machine — control plane, Postgres, admin UI and
+one complete shard — and leaves you with an open market:
+
+```sh
+./gradlew installDist
+cd deploy && docker compose up -d      # ~40s
+
+./most send --symbol AAPL --side sell --price 100.00 --qty 10 --clordid 1 --participant 7 --follow 2
+./most send --symbol AAPL --side buy  --price 100.00 --qty 4  --clordid 2 --participant 8 --follow 2
+```
+
+The admin UI is on <http://localhost:8081> and the control API on <http://localhost:8080>, both
+`admin` / `most-dev-password`.
+
+The network layout is the part worth reading about: `aeron` and `data` are internal networks with no
+route in or out, the five shard processes share one media driver the way processes on one node share
+`/dev/shm`, and everything outside the shard — the control plane today, a FIX adapter tomorrow —
+reaches it over UDP with a driver of its own. [`deploy/README.md`](deploy/README.md) explains that
+seam, why one media driver means one network identity, and what is dev-only.
+
+The core services are built JVM by default; the native target exists and is opt-in, because
+**no native image of this system has ever been built**.
+
+## Control plane and admin UI, without Docker
 
 The control plane authors reference data and publishes the release artifacts every other process
 boots from. It is a normal Spring Boot service with a Postgres behind it, and it is the only process

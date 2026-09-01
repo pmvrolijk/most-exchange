@@ -1,0 +1,237 @@
+# A full dev stack: the control plane and its database and UI, plus one complete shard.
+#
+# The network layout is the point of this file, and it is drawn for what comes next. FIX<->SBE
+# adapters are not here yet; everything they will need is:
+#
+#   edge      the only network with published ports. The SPA today; the FIX listener tomorrow.
+#   aeron     the exchange's inside. internal: true, so nothing on it can reach or be reached from
+#             outside the host. An adapter joins THIS and edge, and is the only thing that bridges
+#             them -- which is exactly the role a protocol gateway should have.
+#   data      the control plane and its database, also internal.
+#
+# Within the shard, the five processes share one media driver through a tmpfs volume, the way five
+# processes on one node share /dev/shm. Everything outside the shard -- the control plane today,
+# an adapter tomorrow -- reaches it over UDP with a driver of its own, and never touches that
+# shared memory. That seam is what the compose file exists to prove before anything is built on it.
+
+name: most-exchange
+
+x-core-build: &core-build
+  context: ..
+  dockerfile: deploy/Dockerfile.core
+  # `native` builds the four services with GraalVM inside the image. It is the production intent
+  # and has never been run; `jvm` is the proven path. CORE_TARGET=native docker compose build
+  target: ${CORE_TARGET:-jvm}
+
+networks:
+  edge:
+    name: most-edge
+  aeron:
+    name: most-aeron
+    internal: true
+  data:
+    name: most-data
+    internal: true
+
+volumes:
+  pgdata:
+  releases:
+  cluster-data:
+  # Aeron's control-and-buffers directory is memory-mapped files. tmpfs so it behaves like the
+  # /dev/shm a real deployment uses, and a named volume so every process on the "node" maps the
+  # same files. Two of them, deliberately: the shard's driver and the client side's driver are
+  # different machines in production and must not be one here either.
+  shard-aeron:
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=1g" }
+  client-aeron:
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=256m" }
+
+services:
+
+  # ------------------------------------------------------------------ control plane
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: most_control
+      POSTGRES_USER: most
+      POSTGRES_PASSWORD: most
+    volumes: [pgdata:/var/lib/postgresql/data]
+    networks: [data]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U most -d most_control"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # The control plane's own media driver. It exists so control talks to the shard the way an
+  # adapter will -- over the network, with its own shared memory -- rather than by mounting the
+  # engine's. A control plane that shared the engine's /dev/shm would be a control plane that could
+  # only ever run on the engine's host.
+  control-driver:
+    build: { context: .., dockerfile: deploy/Dockerfile.tools }
+    entrypoint: ["java"]
+    command:
+      - "--add-opens=java.base/jdk.internal.misc=ALL-UNNAMED"
+      - "--add-opens=java.base/sun.nio.ch=ALL-UNNAMED"
+      - "-Daeron.dir=/aeron/driver"
+      - "-Daeron.dir.delete.on.start=true"
+      - "-cp"
+      - "/opt/most/tools/lib/*"
+      - "io.aeron.driver.MediaDriver"
+    volumes: [client-aeron:/aeron]
+    networks: [aeron]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /aeron/driver/cnc.dat"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  control:
+    build: { context: .., dockerfile: deploy/Dockerfile.control }
+    depends_on:
+      postgres: { condition: service_healthy }
+      control-driver: { condition: service_healthy }
+    environment:
+      CONTROL_DB_URL: jdbc:postgresql://postgres:5432/most_control
+      CONTROL_DB_USER: most
+      CONTROL_DB_PASSWORD: most
+      CONTROL_RELEASE_DIR: /releases
+      # A fixed dev password so the seed script and the docs can both use it. Leave it unset in
+      # anything that is not this file and the control plane generates one and logs it instead.
+      CONTROL_ADMIN_USER: ${CONTROL_ADMIN_USER:-admin}
+      CONTROL_ADMIN_PASSWORD: ${CONTROL_ADMIN_PASSWORD:-most-dev-password}
+      CONTROL_AERON_ENABLED: "true"
+      CONTROL_AERON_DIR: /aeron/driver
+      # Subscriber-form channels: the control address of each publisher, plus an endpoint of our
+      # own that Aeron picks and announces.
+      CONTROL_DISCOVERY_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40000|control-mode=dynamic"
+      CONTROL_DISCOVERY_STREAM: "100"
+      # L3, not L1 or L2: a volatility halt is visible on the raw book event stream and nowhere else.
+      CONTROL_L3_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40003|control-mode=dynamic"
+      CONTROL_L3_STREAM: "3"
+      # The calendar is off by default here. It opens markets unattended, which is a surprising
+      # thing for a dev stack to do while you are reading its logs.
+      CONTROL_SCHEDULER_ENABLED: ${CONTROL_SCHEDULER_ENABLED:-false}
+    volumes:
+      - client-aeron:/aeron
+      - releases:/releases
+    networks: [data, aeron, edge]
+    ports: ["8080:8080"]
+    healthcheck:
+      # 401 is a healthy control plane: the endpoint answered and refused an anonymous caller.
+      # bash explicitly: /bin/sh on this image is dash, which has no /dev/tcp.
+      test: ["CMD", "bash", "-c", "</dev/tcp/127.0.0.1/8080"]
+      interval: 3s
+      timeout: 3s
+      retries: 30
+
+  web:
+    build: { context: .., dockerfile: deploy/Dockerfile.web }
+    depends_on:
+      control: { condition: service_started }
+    networks: [edge]
+    ports: ["8081:80"]
+
+  # ----------------------------------------------------------------------- the shard
+  # Media driver, archive and consensus module in one process, which is what the engine's service
+  # container attaches to. Production runs three or five of these on separate machines.
+  cluster-host:
+    build: { context: .., dockerfile: deploy/Dockerfile.tools }
+    command:
+      - "cluster"
+      - "--dir"
+      - "/cluster"
+      - "--aeron-dir"
+      - "/aeron/driver"
+      # Not localhost: the members string is what the gateway dials, so it must be an address the
+      # other containers can resolve.
+      - "--host"
+      - "shard0"
+    volumes:
+      - shard-aeron:/aeron
+      - cluster-data:/cluster
+    networks:
+      aeron:
+        # The whole shard's Aeron identity. Every UDP endpoint the shard exposes is bound by the
+        # media driver, which lives in this container, so `shard0` is the address of all of them --
+        # order entry, the execution report feed, L1/L2/L3 and the directory alike.
+        aliases: [shard0]
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /aeron/driver/cnc.dat"]
+      interval: 2s
+      timeout: 2s
+      retries: 30
+
+  engine:
+    build: *core-build
+    entrypoint: ["engine"]
+    command: ["/config/engine.properties"]
+    depends_on:
+      cluster-host: { condition: service_healthy }
+    volumes:
+      - shard-aeron:/aeron
+      - cluster-data:/cluster
+      - ./config:/config:ro
+    networks: [aeron]
+
+  market-data:
+    build: *core-build
+    entrypoint: ["market-data"]
+    command: ["/config/market-data.properties"]
+    depends_on:
+      cluster-host: { condition: service_healthy }
+    volumes:
+      - shard-aeron:/aeron
+      - ./config:/config:ro
+    networks: [aeron]
+
+  gateway:
+    build: *core-build
+    entrypoint: ["gateway"]
+    command: ["/config/gateway.properties"]
+    depends_on:
+      cluster-host: { condition: service_healthy }
+      engine: { condition: service_started }
+    volumes:
+      - shard-aeron:/aeron
+      - ./config:/config:ro
+    networks: [aeron]
+
+  discovery:
+    build: *core-build
+    entrypoint: ["discovery"]
+    command: ["/config/discovery.properties"]
+    depends_on:
+      cluster-host: { condition: service_healthy }
+    volumes:
+      - shard-aeron:/aeron
+      - ./config:/config:ro
+    networks: [aeron]
+
+  # -------------------------------------------------------------------------- seeding
+  # One shot: teach the control plane the topology, publish a release, seed the definitions the
+  # engine needs, and open the market. Everything it does goes through the REST API, so this file
+  # doubles as a worked example of driving the exchange from the control plane.
+  seed:
+    image: curlimages/curl:8.11.1
+    depends_on:
+      control: { condition: service_healthy }
+      gateway: { condition: service_started }
+      discovery: { condition: service_started }
+    environment:
+      CONTROL_URL: http://control:8080
+      CONTROL_ADMIN_USER: ${CONTROL_ADMIN_USER:-admin}
+      CONTROL_ADMIN_PASSWORD: ${CONTROL_ADMIN_PASSWORD:-most-dev-password}
+    volumes:
+      - ./init:/init:ro
+      - ./config:/config:ro
+    networks: [data, edge]
+    entrypoint: ["sh", "/init/seed.sh"]
+
+  # --------------------------------------------------------------------------- the CLI
+  # Not started by `up`: run it. deploy/most wraps this with the connection flags.
+  most:
+    build: { context: .., dockerfile: deploy/Dockerfile.tools }
+    profiles: [cli]
+    volumes: [client-aeron:/aeron]
+    networks: [aeron]

@@ -112,8 +112,8 @@ one implementation; a second that drifted by a separator would report agreement 
 that disagree. `ShardSpec.render()`/`Universe.render()` are the inverses of the `from(Properties)`
 parsers and live beside them so drift fails a round-trip test. Releases are immutable — republishing
 allocates the next version — and carry topology only; Aeron dirs, cluster dirs and feed channels stay
-in each process's own config. `docs/ControlPlane.md` is the walkthrough (§4 covers authentication), and `web/README.md` the
-frontend. Its tests need Docker (Testcontainers Postgres), because most of what they assert is
+in each process's own config. `docs/ControlPlane.md` is the walkthrough (§4 covers authentication), `web/README.md` the frontend,
+and `deploy/README.md` the Docker dev stack. Its tests need Docker (Testcontainers Postgres), because most of what they assert is
 schema behaviour.
 
 **Operator commands are unacknowledged, and that shapes the control plane.** `SecurityDefinition`,
@@ -146,6 +146,15 @@ collar rejects the very orders needed to reopen), then walk `PRE_OPEN → OPEN_A
 in full (the uncross runs only on the last transition; jumping to `CONTINUOUS` silently skips the
 auction). **A session transition is shard-wide** — there is no per-security session command, so
 reopening one halted security reopens every book on the shard.
+
+**In Docker, one media driver is one network identity.** The five shard processes share a media
+driver through a tmpfs volume, and that driver runs in the `cluster-host` container — so every UDP
+endpoint the shard exposes is bound there and must name `shard0` (an alias on that container), never
+the individual process's container. `control=gateway:20002` fails with "Cannot assign requested
+address". The dev stack also swaps multicast for **dynamic MDC**, because a Docker bridge does not
+route multicast: a publication says `control=shard0:PORT|control-mode=dynamic` with no endpoint, and
+what discovery hands a *subscriber* additionally carries `endpoint=0.0.0.0:0`. That asymmetry is
+correct, not a typo. `deploy/README.md` has the rest.
 
 **One security list per shard.** `reference`'s `ShardSpec` is read by the engine, gateway,
 market-data and discovery alike — do not reintroduce per-process security lists. It carries identity

@@ -67,8 +67,14 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
 
     fun state(securityId: Int): SyncState = states[securityId]?.state ?: SyncState.WAITING
 
-    /** Every security seen on the feed, synchronised or not, in the order first seen. */
+    /** Every security seen on the feed, synchronised or not. */
     fun securities(): List<Int> = states.keys.sorted()
+
+    /**
+     * The shard a security's depth arrived from, learned from the messages themselves rather than
+     * from configuration — which is what lets one subscriber follow several shards on one group.
+     */
+    fun shardOf(securityId: Int): Int? = states[securityId]?.shardId
 
     fun onDepthUpdate(
         securityId: Int,

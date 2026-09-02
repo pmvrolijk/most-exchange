@@ -48,10 +48,38 @@ class ClusterLink(
     @Value("\${control.l3.channel:aeron:udp?endpoint=239.10.1.3:40003}")
     private val l3Channel: String,
     @Value("\${control.l3.streamId:3}") private val l3StreamId: Int,
+    @Value("\${control.l2.channel:aeron:udp?endpoint=239.10.1.2:40002}")
+    private val l2Channel: String,
+    @Value("\${control.l2.streamId:2}") private val l2StreamId: Int,
+    @Value("\${control.l1.channel:aeron:udp?endpoint=239.10.1.1:40001}")
+    private val l1Channel: String,
+    @Value("\${control.l1.streamId:1}") private val l1StreamId: Int,
+    @Value("\${control.snapshot.channel:aeron:udp?endpoint=239.10.1.4:40004}")
+    private val snapshotChannel: String,
+    @Value("\${control.snapshot.streamId:4}") private val snapshotStreamId: Int,
+    @Value("\${control.depth.publishMs:250}") private val depthPublishMs: Long,
+    @Value("\${control.depth.maxLevels:25}") private val depthMaxLevels: Int,
 ) {
     private val log = LoggerFactory.getLogger(ClusterLink::class.java)
 
     val state = ExchangeState()
+
+    /**
+     * The books, rebuilt from L2 and the recovery feed.
+     *
+     * A separate concern from [state], which is derived from L3: a halt is visible only on the raw
+     * book event stream, and depth is not derivable from it without shadowing the engine's order
+     * pool. The two feeds answer different questions and the control plane subscribes to both.
+     */
+    val depth = DepthMonitor(maxLevels = depthMaxLevels) { securityId ->
+        val observed = state.securityState(securityId)
+        BookContext(
+            symbol = topology.security(securityId)?.symbol,
+            phase = observed?.phase,
+            // A halt is visible only on L3, and only until an operator clears it by reopening.
+            halted = observed?.halt?.clearedAt == null && observed?.halt != null,
+        )
+    }
 
     private val directoryClient = DirectoryClient()
     private val sequences = FeedSequenceTracker()
@@ -87,7 +115,12 @@ class ClusterLink(
             isDaemon = true
             start()
         }
-        log.info("cluster link: discovery={}:{} l3={}:{}", discoveryChannel, discoveryStreamId, l3Channel, l3StreamId)
+        log.info(
+            "cluster link: discovery={}:{} l3={}:{} l2={}:{} l1={}:{} snapshot={}:{} images every {}ms",
+            discoveryChannel, discoveryStreamId, l3Channel, l3StreamId,
+            l2Channel, l2StreamId, l1Channel, l1StreamId,
+            snapshotChannel, snapshotStreamId, depthPublishMs,
+        )
     }
 
     @PreDestroy
@@ -182,6 +215,17 @@ class ClusterLink(
     private fun poll(link: Aeron) {
         val directory = link.addSubscription(discoveryChannel, discoveryStreamId)
         val events = link.addSubscription(l3Channel, l3StreamId)
+        // L2 for the increments and the recovery stream for the images that make them applicable.
+        // Subscribing to one without the other gives a subscriber that can never synchronise.
+        val depthUpdates = link.addSubscription(l2Channel, l2StreamId)
+        val snapshots = link.addSubscription(snapshotChannel, snapshotStreamId)
+        // L1 carries LastTrade, and depth alone never will: a snapshot's last trade only reaches a
+        // subscriber that is still joining, because a synchronised one ignores snapshots. Without
+        // this the console would show a book that trades and a last price that stays empty.
+        val topOfBook = link.addSubscription(l1Channel, l1StreamId)
+        val depthHandler = FragmentAssembler { buffer, offset, length, _ ->
+            depth.onMessage(buffer, offset, length)
+        }
 
         val directoryHandler = FragmentAssembler { buffer, offset, length, _ ->
             directoryClient.onDirectoryMessage(buffer, offset, length)
@@ -206,9 +250,23 @@ class ClusterLink(
         }
 
         val idle = SleepingIdleStrategy(POLL_IDLE.toNanos())
+        // Wall clock. This process is a feed subscriber and holds no replicated state, so the
+        // engine's ban on reading a clock is not in play here.
+        var nextImage = System.currentTimeMillis() + depthPublishMs
         while (!Thread.currentThread().isInterrupted) {
             var work = directory.poll(directoryHandler, FRAGMENT_LIMIT)
             work += events.poll(eventHandler, FRAGMENT_LIMIT)
+            work += depthUpdates.poll(depthHandler, DEPTH_FRAGMENT_LIMIT)
+            work += snapshots.poll(depthHandler, DEPTH_FRAGMENT_LIMIT)
+            work += topOfBook.poll(depthHandler, FRAGMENT_LIMIT)
+
+            // On this thread, between messages: an image assembled while updates are landing is a
+            // book that never existed. Everything since the last one is folded into this one.
+            val now = System.currentTimeMillis()
+            if (now >= nextImage) {
+                nextImage = now + depthPublishMs
+                depth.publishImages()
+            }
             idle.idle(work)
         }
     }
@@ -286,6 +344,13 @@ class ClusterLink(
 
     private companion object {
         const val FRAGMENT_LIMIT = 64
+
+        /**
+         * Depth runs at orders of magnitude the volume of L3, and a snapshot cycle arrives as a
+         * burst of one message per level. A larger drain per poll keeps a cycle from being spread
+         * across so many iterations that the images fall behind the increments.
+         */
+        const val DEPTH_FRAGMENT_LIMIT = 256
         const val COMMAND_BUFFER = 512
         val POLL_IDLE: Duration = Duration.ofMillis(1)
         val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(5)

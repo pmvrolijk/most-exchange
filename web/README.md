@@ -45,6 +45,12 @@ are IEEE 754 doubles in every browser: parsed as a number, `9181280125937456696`
 types it as `string`, so what the console displays is what the exchange produced. Nothing in Kotlin
 would ever notice this, which is why the test that guards it asserts on the JSON text.
 
+**Waiting for a book and having an empty book never render the same way.** The Books screen draws a
+ladder only when the control plane reports `synchronised`. Otherwise it says so and draws nothing:
+depth that is stale or partial looks exactly like depth that is current, and a console that showed
+the last good ladder after a gap would be lying in the one place it matters most. This is the same
+rule as the one below, applied to a live feed instead of a request.
+
 **Empty and failed never render the same way.** `AsyncTable` has three states on purpose. A control
 plane that showed "no securities" when it meant "the request was refused" would be lying about the
 state of the exchange, which is the one thing this UI exists not to do.
@@ -55,6 +61,7 @@ state of the exchange, which is the one thing this UI exists not to do.
 | --- | --- |
 | Status | The exchange as the L3 feed reports it, plus the draft topology's readiness to publish. |
 | Operations | Definition, session, purge, reopen. The only screen that touches a running market. |
+| Books | Live depth per security, streamed over SSE. A book that is not synchronised shows no ladder — see below. |
 | Shards / Securities / Participants | The draft topology. Nothing here reaches a node until a release is published and the processes restart. |
 | Releases | Publish an immutable numbered release, import an existing shard security file, read the exact bytes of any artifact. |
 | Schedules | The trading calendar, holidays, which shard runs which schedule, and what the reconciler did or refused to do. |
@@ -70,6 +77,7 @@ Deliberately. `./gradlew build` stays npm-free and this stays a normal frontend 
 
 ```
 src/api/client.ts     fetch wrapper: session cookie, X-XSRF-TOKEN, typed ApiError, text bodies
+src/api/books.ts      the live book feed: EventSource, with a polling fallback
 src/api/collection.ts useCollection / useResource / useMutation -- loading, error, reload
 src/api/session.ts    the one piece of global state -- who is signed in
 src/api/types.ts      hand-written mirrors of the Kotlin DTOs (the Kotlin is authoritative)

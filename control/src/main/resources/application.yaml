@@ -52,6 +52,26 @@ control:
   l3:
     channel: ${CONTROL_L3_CHANNEL:aeron:udp?endpoint=239.10.1.3:40003}
     streamId: ${CONTROL_L3_STREAM:3}
+  # L2 and the recovery feed, which the console's books are rebuilt from. Both or neither: the
+  # increments cannot be applied without an image, and an image goes stale without the increments.
+  l2:
+    channel: ${CONTROL_L2_CHANNEL:aeron:udp?endpoint=239.10.1.2:40002}
+    streamId: ${CONTROL_L2_STREAM:2}
+  snapshot:
+    channel: ${CONTROL_SNAPSHOT_CHANNEL:aeron:udp?endpoint=239.10.1.4:40004}
+    streamId: ${CONTROL_SNAPSHOT_STREAM:4}
+  # L1 for LastTrade. A snapshot carries the last trade only for a subscriber that is still
+  # joining -- a synchronised one ignores snapshots -- so without L1 a book would trade on screen
+  # while its last price stayed empty.
+  l1:
+    channel: ${CONTROL_L1_CHANNEL:aeron:udp?endpoint=239.10.1.1:40001}
+    streamId: ${CONTROL_L1_STREAM:1}
+  # How often a book image is built and pushed. Conflation, not streaming: the feed can carry 100k
+  # updates a second and an operator can read about four, so everything in between folds into the
+  # next image. It also keeps a browser off the feed's critical path entirely.
+  depth:
+    publishMs: ${CONTROL_DEPTH_PUBLISH_MS:250}
+    maxLevels: ${CONTROL_DEPTH_MAX_LEVELS:25}
 
   # Session scheduling. Every tick reconciles the phase the calendar says a shard should be in
   # against the phase L3 says it is in, and sends the difference -- so it is idempotent, recovers

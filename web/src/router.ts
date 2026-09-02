@@ -6,6 +6,7 @@ const routes = [
   { path: '/', redirect: '/status' },
   { path: '/status', name: 'status', component: () => import('./views/StatusView.vue') },
   { path: '/operations', name: 'operations', component: () => import('./views/OperationsView.vue') },
+  { path: '/books', name: 'books', component: () => import('./views/BooksView.vue') },
   { path: '/shards', name: 'shards', component: () => import('./views/ShardsView.vue') },
   { path: '/securities', name: 'securities', component: () => import('./views/SecuritiesView.vue') },
   { path: '/participants', name: 'participants', component: () => import('./views/ParticipantsView.vue') },

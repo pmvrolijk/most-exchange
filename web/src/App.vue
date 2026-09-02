@@ -26,6 +26,7 @@ async function signOut() {
       <div class="nav">
         <router-link to="/status">Status</router-link>
         <router-link to="/operations">Operations</router-link>
+        <router-link to="/books">Books</router-link>
         <div class="nav-gap"></div>
         <router-link to="/shards">Shards</router-link>
         <router-link to="/securities">Securities</router-link>

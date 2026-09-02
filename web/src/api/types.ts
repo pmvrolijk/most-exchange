@@ -207,3 +207,54 @@ export interface ScheduleDecision {
   actions: CommandResult[]
   skipped: string | null
 }
+
+export interface BookLevel {
+  /** Fixed point, 8 implied decimals. Safe as a JS number up to ~90 million; format, never compute. */
+  price: number
+  qty: number
+  orders: number
+}
+
+/**
+ * One book at one instant, conflated by the control plane.
+ *
+ * `synchronised` is the field that matters: false means the depth here is **not** the book — no
+ * snapshot has arrived yet, or a gap invalidated it — and the levels are empty for that reason
+ * rather than because there is no liquidity. The two must never render the same way.
+ */
+export interface BookImage {
+  securityId: number
+  symbol: string | null
+  shardId: number | null
+  version: number
+  at: string
+  synchronised: boolean
+  state: 'WAITING' | 'BUILDING' | 'SYNCHRONISED'
+  bids: BookLevel[]
+  asks: BookLevel[]
+  bestBid: number | null
+  bestAsk: number | null
+  spread: number | null
+  lastTradePrice: number | null
+  lastTradeQty: number
+  bidLevelsTotal: number
+  askLevelsTotal: number
+  /** From L3, joined on by the control plane: depth alone cannot say the market is shut. */
+  phase: string | null
+  halted: boolean
+}
+
+export interface DepthFeedStatus {
+  subscribed: boolean
+  detail: string
+  messagesSeen: number
+  /** Milliseconds since the last feed message. Subscribed and silent is a real, reachable state. */
+  silentMs: number | null
+  securities: number[]
+  synchronised: number
+  snapshotsApplied: number
+  snapshotsDiscarded: number
+  desynchronisations: number
+  gapsDetected: number
+  messagesMissed: number
+}

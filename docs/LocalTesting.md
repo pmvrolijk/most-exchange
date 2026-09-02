@@ -441,6 +441,26 @@ load: AAPL  300,000 orders in 3.00s -- 100,000/s achieved (target 100,000/s)
   fill service   n=135,948  p50=47.8 p90=79.1 p99=630.8 p99.9=1890.3 max=2680.8 (µs)
 ```
 
+### The Docker stack measures the VM, not the engine
+
+The same sweep against `deploy/`'s container stack sustains its target rate to **200,000 orders/s**
+into one book with nothing dropped and nothing unanswered, and `pacing lateness` p50 at 0.0 µs
+throughout — so throughput is not what a VM costs. Latency is: p50 ack sits in the milliseconds
+against the 47 µs above, and is *lower* at 100k/s than at 3k/s, which is the shape of a fixed
+per-wakeup cost being amortised by batching rather than of queueing. Quote container numbers as
+container numbers.
+
+Two things that stack needs before a run like that is meaningful:
+
+* **`/aeron` must be big enough for every subscription image.** Each is a log buffer of three terms.
+  At 256 MB the client-side driver ran out of space at 100k/s and died with
+  `InternalError: a fault occurred in an unsafe memory access operation` — SIGBUS on a mapped file,
+  not a JVM bug. It is 1 GB now.
+* **The control plane will fall behind and resynchronise, and that is correct.** Through 1.35M
+  orders its depth subscriber took 9 gaps and rebuilt its books 15 times from snapshots, while the
+  exchange stayed at rate. A dashboard taking a gap instead of throttling the publisher is the whole
+  point of `MaxMulticastFlowControl`.
+
 ### Reading it
 
 **`ack response` versus `ack service`.** Service time is measured from when the order was actually

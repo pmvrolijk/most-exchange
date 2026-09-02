@@ -43,8 +43,15 @@ volumes:
   # different machines in production and must not be one here either.
   shard-aeron:
     driver_opts: { type: tmpfs, device: tmpfs, o: "size=1g" }
+  # Sized like the shard's, and it has to be. Every subscription image is a log buffer of three
+  # terms, and the client side now holds five of them -- discovery, L3, L2, L1 and the snapshot
+  # stream -- before the CLI adds a publication and a subscription of its own. At 256m a `most
+  # load` run at 100k/s exhausted it, and an Aeron driver that cannot map a buffer does not fail
+  # politely: it takes SIGBUS on the next page touch and dies with
+  # "InternalError: a fault occurred in an unsafe memory access operation", which reads like a JVM
+  # bug rather than a full disk.
   client-aeron:
-    driver_opts: { type: tmpfs, device: tmpfs, o: "size=256m" }
+    driver_opts: { type: tmpfs, device: tmpfs, o: "size=1g" }
 
 services:
 
@@ -109,6 +116,16 @@ services:
       # L3, not L1 or L2: a volatility halt is visible on the raw book event stream and nowhere else.
       CONTROL_L3_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40003|control-mode=dynamic"
       CONTROL_L3_STREAM: "3"
+      # L2 and the recovery feed, for the books the console draws. Both, always: the increments are
+      # unusable without an image to apply them to, and an image goes stale without the increments.
+      CONTROL_L2_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40002|control-mode=dynamic"
+      CONTROL_L2_STREAM: "2"
+      CONTROL_SNAPSHOT_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40004|control-mode=dynamic"
+      CONTROL_SNAPSHOT_STREAM: "4"
+      # L1 carries LastTrade. A synchronised subscriber ignores snapshots, so this is the only way
+      # a last price keeps up once a book is established.
+      CONTROL_L1_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40001|control-mode=dynamic"
+      CONTROL_L1_STREAM: "1"
       # The calendar is off by default here. It opens markets unattended, which is a surprising
       # thing for a dev stack to do while you are reading its logs.
       CONTROL_SCHEDULER_ENABLED: ${CONTROL_SCHEDULER_ENABLED:-false}

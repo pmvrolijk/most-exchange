@@ -330,6 +330,49 @@ shard. The response says so every time, not only when it bites:
 | `CONTROL_DISCOVERY_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.0.1:40000` / `100` | |
 | `CONTROL_L3_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.1.3:40003` / `3` | L3, not L1 |
 
+## 6a. Books: the depth feed, terminated here
+
+The console shows live order books, and the control plane is an ordinary L2 subscriber to get them.
+It uses `reference`'s `DepthFeedAssembler` — the same code the operator CLI uses, and the same code a
+FIX market data adapter would — so a book on the screen cannot disagree with a book anywhere else.
+Nothing about depth is re-derived in this module.
+
+```
+GET /api/books              every book the feed is carrying
+GET /api/books/{id}         one book; 404 means the feed has never carried it
+GET /api/books/status       feed health: snapshots applied, gaps, books dropped and rebuilt
+GET /api/books/stream       the live feed, as server-sent events
+```
+
+**Three subscriptions, not one.** L2 carries the increments, the snapshot stream carries the images
+that make them applicable, and L1 carries `LastTrade`. Take L2 without the snapshot and a subscriber
+can never synchronise; take the snapshot without L1 and the book trades on screen while its last
+price stays empty, because a *synchronised* subscriber ignores snapshots and the last trade rides
+only on L1.
+
+**The browser gets a conflated image, never the protocol.** The feed can carry 100k updates a second
+and an operator can read about four. Images are built on the feed thread at a fixed interval with
+everything in between folded in, which is what a person wants and what keeps a browser off the feed's
+critical path: there is no back-pressure path from a console to the market data thread, by
+construction. A slow console costs a dropped image and nothing else.
+
+Two consequences worth stating:
+
+* **The browser holds no sequence numbers, no gap detection and no snapshot splicing.** Decoding SBE
+  in TypeScript would mean a second `DepthFeedAssembler` and a second `FeedSequenceTracker` in a
+  language where neither can be tested against the publisher. A real consumer takes the SBE feed and
+  uses the same assembler this backend does; **this endpoint is for the operator console, not a
+  client-facing market data product.**
+* **An unsynchronised book publishes no depth at all** — not the last good ladder. `synchronised` says
+  which, and the console renders "waiting for a snapshot" rather than an empty book, because waiting
+  and having no liquidity are different answers.
+
+**Server-sent events rather than a WebSocket.** The traffic is one-way; the browser has nothing to
+say back that a URL cannot carry. `EventSource` brings its own reconnection, needs no dependency and
+no protocol upgrade, and is authenticated by the same session cookie as everything else — it cannot
+set headers, which is one more reason the SPA and the API sit behind one origin. A version on each
+image changes only when that book's content changes, so an idle book is sent once and then not again.
+
 ## 7. Scheduling
 
 A schedule is a named trading day — local times mapped to phases, plus a purge time — that a shard

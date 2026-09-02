@@ -228,3 +228,61 @@ button.small { padding: 4px 10px; font-size: 12px; font-weight: 500; }
 .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
 
 .nav-gap { height: 12px; }
+
+/*
+ * The ladder.
+ *
+ * Bid and ask at the same rank on one line, prices meeting in the middle, because that is how a
+ * book is read: the touch is the centre and depth falls away from it. The bars are drawn to one
+ * scale across both sides -- scaling each side to its own maximum would make a thin side look as
+ * deep as a heavy one, which is the opposite of what the picture is for.
+ */
+table.ladder { width: 100%; }
+/* A deep book is scrolled, and a ladder whose headings have gone off the top is a grid of
+   unlabelled numbers -- with bid and ask columns that are easy to read the wrong way round. */
+table.ladder thead th {
+  position: sticky;
+  top: 0;
+  background: var(--panel);
+  z-index: 1;
+}
+table.ladder td { position: relative; }
+.bid-cell, .ask-cell { min-width: 120px; }
+.depth {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  display: block;
+  border-radius: 2px;
+  opacity: 0.22;
+}
+.depth.bid { right: 0; background: var(--good); }
+.depth.ask { left: 0; background: var(--bad); }
+.bid-cell .value, .ask-cell .value { position: relative; }
+.bid-price { color: var(--good); }
+.ask-price { color: var(--bad); }
+td.muted { color: var(--muted); }
+
+.book-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+.book-symbol { font-size: 16px; font-weight: 600; margin-right: 8px; }
+.book-stats { display: flex; gap: 20px; font-family: var(--mono); font-size: 13px; }
+.book-stats label { display: inline; color: var(--muted); margin: 0 6px 0 0; font-size: 12px; }
+
+/* On a tab: something is wrong with this book and it is worth seeing without selecting it. */
+.dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  margin-left: 6px;
+  vertical-align: middle;
+}
+.dot.warn { background: var(--warn); }
+.dot.bad { background: var(--bad); }

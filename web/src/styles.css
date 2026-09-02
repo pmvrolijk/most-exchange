@@ -126,6 +126,7 @@ td.mono { font-family: var(--mono); font-size: 12px; }
 /* Login */
 .login { display: grid; place-items: center; min-height: 100vh; }
 .login form { width: 320px; }
+.login button { margin-top: 16px; width: 100%; }
 label { display: block; color: var(--muted); font-size: 13px; margin: 12px 0 4px; }
 input {
   width: 100%;
@@ -138,7 +139,6 @@ input {
 }
 input:focus { outline: none; border-color: var(--accent); }
 button {
-  margin-top: 16px;
   padding: 8px 14px;
   background: var(--accent);
   color: #0d1117;
@@ -157,3 +157,74 @@ button.link {
   margin: 0;
 }
 button.link:hover { color: var(--text); }
+
+/*
+ * The write half.
+ *
+ * Buttons are graded by consequence, not by prominence in the layout: `.danger` is for the four
+ * commands that move a market and nothing else, so an operator can tell at a glance whether a
+ * click edits a row in a database or reprices a book on a live exchange.
+ */
+select, textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  color: var(--text);
+  font: inherit;
+}
+select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+textarea { font-family: var(--mono); font-size: 12px; resize: vertical; }
+input[type='checkbox'] { width: auto; }
+.hint { color: var(--muted); font-size: 12px; margin: 4px 0 0; }
+
+button.ghost { background: var(--panel-2); color: var(--text); border: 1px solid var(--line); }
+button.ghost:hover:enabled { border-color: var(--accent); }
+button.danger { background: var(--bad); color: #1a0e0e; }
+button.small { padding: 4px 10px; font-size: 12px; font-weight: 500; }
+
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 16px; flex-wrap: wrap; }
+.toolbar .spacer { flex: 1; }
+.row-actions { display: flex; gap: 6px; }
+
+.modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: rgba(8, 10, 13, 0.72);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 10;
+}
+.modal {
+  width: min(680px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 20px 22px;
+}
+.modal h2 { font-size: 16px; font-weight: 600; margin: 0 0 4px; }
+.modal .actions { display: flex; gap: 8px; justify-content: flex-end; margin-top: 20px; }
+
+/* Two columns of fields; anything that needs the width says so rather than the grid guessing. */
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; }
+.form-grid .wide { grid-column: 1 / -1; }
+.form-grid label:first-child, .form-grid .wide:first-child label { margin-top: 4px; }
+
+/*
+ * A command's outcome, kept on screen. These are not toasts: `sent` without `confirmed` is a real
+ * state an operator has to reason about, and it must not disappear after four seconds.
+ */
+.outcome { border-left: 2px solid var(--line); padding: 8px 0 8px 12px; margin-bottom: 10px; }
+.outcome.ok { border-left-color: var(--good); }
+.outcome.pending { border-left-color: var(--warn); }
+.outcome.failed { border-left-color: var(--bad); }
+.outcome .command { font-family: var(--mono); font-size: 12px; }
+.outcome .detail { color: var(--muted); font-size: 13px; margin: 4px 0 0; }
+
+.grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+
+.nav-gap { height: 12px; }

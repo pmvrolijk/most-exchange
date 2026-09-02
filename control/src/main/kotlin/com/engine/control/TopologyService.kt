@@ -1,5 +1,7 @@
 package com.engine.control
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
 import com.engine.reference.ShardSpec
 import com.engine.reference.Universe
 import com.engine.reference.UniverseEntry
@@ -22,6 +24,8 @@ data class ShardView(
  */
 data class TopologyView(
     val shards: List<ShardView>,
+    // A 64-bit identity, so it goes out as a JSON string; see DirectoryState.version.
+    @get:JsonSerialize(using = ToStringSerializer::class)
     val universeVersion: Long?,
     val problems: List<String>,
 )

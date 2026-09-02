@@ -1,41 +1,26 @@
 <script setup lang="ts" generic="T">
-import { onMounted, ref } from 'vue'
-import { api, ApiError } from '../api/client'
+import DataState from './DataState.vue'
+import { useCollection } from '../api/collection'
 
 /**
- * Fetch a list, and be honest about the three states it can be in.
+ * Fetch a list and render it in whichever of its states it is actually in.
  *
- * Empty and failed are not the same thing and must never render the same way. A control plane that
- * showed "no securities" when it meant "the request was refused" would be lying about the state of
- * the exchange, which is the one thing this UI exists not to do.
+ * Kept for the read-only views, where a table needs nothing but its own data. Views that mutate
+ * use `useCollection` directly — they need the reload handle, which is the only thing this wrapper
+ * hides.
  */
 const props = defineProps<{ path: string }>()
 
-const rows = ref<T[]>([])
-const error = ref<string | null>(null)
-const loading = ref(true)
+const { rows, loading, error, reload } = useCollection<T>(props.path)
 
-async function load() {
-  loading.value = true
-  error.value = null
-  try {
-    rows.value = await api.get<T[]>(props.path)
-  } catch (e) {
-    error.value = e instanceof ApiError ? `${e.code}: ${e.message}` : String(e)
-  } finally {
-    loading.value = false
-  }
-}
-
-onMounted(load)
-defineExpose({ reload: load })
+defineExpose({ reload })
 </script>
 
 <template>
   <div class="card">
-    <p v-if="loading" class="empty">Loading…</p>
-    <p v-else-if="error" class="error">{{ error }}</p>
-    <p v-else-if="rows.length === 0" class="empty"><slot name="empty">Nothing here yet.</slot></p>
-    <div v-else class="table-wrap"><slot :rows="rows" /></div>
+    <DataState :loading="loading" :error="error" :empty="rows.length === 0">
+      <template #empty><slot name="empty">Nothing here yet.</slot></template>
+      <slot :rows="rows" />
+    </DataState>
   </div>
 </template>

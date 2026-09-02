@@ -32,9 +32,22 @@ function csrfToken(): string | undefined {
     ?.slice('XSRF-TOKEN='.length)
 }
 
-async function request<T>(method: string, path: string, body?: unknown): Promise<T> {
+/**
+ * `text` covers the two endpoints that are not JSON in either direction: importing a shard security
+ * file, which is posted verbatim so the parser that boots one is what validates it, and reading a
+ * published artifact, which is served as the exact bytes a process will boot from.
+ */
+type Wire = 'json' | 'text'
+
+async function request<T>(
+  method: string,
+  path: string,
+  body?: unknown,
+  wire: Wire = 'json',
+): Promise<T> {
   const headers: Record<string, string> = {}
-  if (body !== undefined) headers['Content-Type'] = 'application/json'
+  if (body !== undefined) headers['Content-Type'] = wire === 'json' ? 'application/json' : 'text/plain'
+  if (wire === 'text') headers['Accept'] = 'text/plain'
 
   if (method !== 'GET') {
     const token = csrfToken()
@@ -51,7 +64,7 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
     method,
     headers,
     credentials: 'same-origin',
-    body: body === undefined ? undefined : JSON.stringify(body),
+    body: body === undefined ? undefined : wire === 'json' ? JSON.stringify(body) : (body as string),
   })
 
   if (!response.ok) {
@@ -66,12 +79,16 @@ async function request<T>(method: string, path: string, body?: unknown): Promise
   }
 
   if (response.status === 204) return undefined as T
+  if (wire === 'text') return (await response.text()) as T
   return (await response.json()) as T
 }
 
 export const api = {
   get: <T>(path: string) => request<T>('GET', path),
+  /** A published release artifact, as text rather than as a description of one. */
+  getText: (path: string) => request<string>('GET', path, undefined, 'text'),
   post: <T>(path: string, body?: unknown) => request<T>('POST', path, body),
+  postText: <T>(path: string, body: string) => request<T>('POST', path, body, 'text'),
   put: <T>(path: string, body?: unknown) => request<T>('PUT', path, body),
   del: <T>(path: string) => request<T>('DELETE', path),
 }

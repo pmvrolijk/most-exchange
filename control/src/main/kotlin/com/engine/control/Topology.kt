@@ -1,5 +1,7 @@
 package com.engine.control
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
 import com.engine.reference.SecuritySpec
 import com.engine.reference.ShardRoute
 
@@ -110,6 +112,8 @@ data class ParticipantRow(
 data class ReleaseRow(
     val version: Long,
     val createdAt: String,
+    // A 64-bit identity, so it goes out as a JSON string; see DirectoryState.version.
+    @get:JsonSerialize(using = ToStringSerializer::class)
     val universeVersion: Long,
     val directory: String,
     val note: String?,

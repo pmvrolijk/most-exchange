@@ -5,10 +5,13 @@ const routes = [
   { path: '/login', name: 'login', component: () => import('./views/LoginView.vue') },
   { path: '/', redirect: '/status' },
   { path: '/status', name: 'status', component: () => import('./views/StatusView.vue') },
+  { path: '/operations', name: 'operations', component: () => import('./views/OperationsView.vue') },
   { path: '/shards', name: 'shards', component: () => import('./views/ShardsView.vue') },
   { path: '/securities', name: 'securities', component: () => import('./views/SecuritiesView.vue') },
   { path: '/participants', name: 'participants', component: () => import('./views/ParticipantsView.vue') },
   { path: '/releases', name: 'releases', component: () => import('./views/ReleasesView.vue') },
+  { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue') },
+  { path: '/operators', name: 'operators', component: () => import('./views/UsersView.vue') },
   { path: '/audit', name: 'audit', component: () => import('./views/AuditView.vue') },
 ]
 

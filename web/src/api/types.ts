@@ -54,7 +54,12 @@ export interface ShardView {
 
 export interface TopologyView {
   shards: ShardView[]
-  universeVersion: number | null
+  /**
+   * A string, not a number, and it must stay one. The universe version is a 64-bit hash, and JSON
+   * numbers are doubles here: parsed as a number it loses its low digits, so a console would show
+   * an identity the exchange never produced. Compared and displayed, never arithmetic.
+   */
+  universeVersion: string | null
   /** Empty is exactly the condition for publishing, so this list is both diagnosis and gate. */
   problems: string[]
 }
@@ -62,7 +67,8 @@ export interface TopologyView {
 export interface Release {
   version: number
   createdAt: string
-  universeVersion: number
+  /** A string for the reason on TopologyView.universeVersion. */
+  universeVersion: string
   directory: string
   note: string | null
   fingerprints: Record<string, string>
@@ -92,7 +98,8 @@ export interface SecurityState {
 }
 
 export interface DirectoryState {
-  version: number
+  /** A string for the reason on TopologyView.universeVersion. */
+  version: string
   securities: number
   shards: number[]
   lastSeenAt: string
@@ -126,4 +133,77 @@ export interface ControlUser {
   username: string
   role: string
   enabled: boolean
+}
+
+/**
+ * The outcome of one operator command.
+ *
+ * `sent` and `confirmed` are separate in the Kotlin and stay separate here. Operator commands are
+ * unacknowledged — the engine applies or rejects them without replying — so `sent` claims only
+ * that the bytes left, and `confirmed` means the control plane afterwards saw the effect on the L3
+ * feed. A definition can never be confirmed; nothing acknowledges one.
+ */
+export interface CommandResult {
+  command: string
+  sent: boolean
+  confirmed: boolean
+  detail: string
+}
+
+export interface ReopenResult {
+  shardId: number
+  securities: string[]
+  steps: CommandResult[]
+  succeeded: boolean
+  /** Said every time: a session transition is shard-wide, so a reopen moves every book on it. */
+  warning: string | null
+}
+
+export interface ImportResult {
+  shardId: number
+  fingerprint: string
+  inserted: string[]
+  updated: string[]
+}
+
+export interface ScheduleEntry {
+  at: string
+  phase: string
+}
+
+export interface Holiday {
+  date: string
+  description?: string | null
+}
+
+export interface Schedule {
+  name: string
+  zone: string
+  weekdays: string[]
+  entries: ScheduleEntry[]
+  purgeTime: string | null
+  enabled: boolean
+  holidays: Holiday[]
+}
+
+export interface ScheduleRun {
+  id: number
+  at: string
+  shardId: number
+  action: string
+  phase: string | null
+  tradingDate: number | null
+  sent: boolean
+  confirmed: boolean
+  detail: string | null
+}
+
+/** What one reconciliation tick decided for one shard, including what it refused to do. */
+export interface ScheduleDecision {
+  shardId: number
+  schedule: string
+  expectedPhase: string
+  observedPhase: string | null
+  actions: CommandResult[]
+  skipped: string | null
 }

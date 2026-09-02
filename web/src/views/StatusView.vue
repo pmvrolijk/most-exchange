@@ -75,7 +75,7 @@ onUnmounted(() => window.clearInterval(timer))
     <table>
       <tbody>
         <tr>
-          <th>Universe version</th><td class="num">{{ status.directory.version }}</td>
+          <th>Universe version</th><td class="mono">{{ status.directory.version }}</td>
           <th>Securities</th><td class="num">{{ status.directory.securities }}</td>
           <th>Shards</th><td class="mono">{{ status.directory.shards.join(', ') }}</td>
           <th>Last seen</th><td>{{ at(status.directory.lastSeenAt) }}</td>

@@ -32,3 +32,42 @@ export function at(value: string | null | undefined): string {
   const parsed = new Date(value)
   return Number.isNaN(parsed.getTime()) ? value : parsed.toLocaleString()
 }
+
+/**
+ * A decimal an operator typed, as the int64 the API expects.
+ *
+ * Scaled by string manipulation, not by multiplying a float: `1.1 * 1e8` is 110000000.00000001 in
+ * IEEE 754, and a tick size one unit out is the kind of thing that is never noticed until a book
+ * misprices. Digits beyond the eighth are refused rather than rounded — silently discarding what
+ * someone typed into a price field is not a service.
+ */
+export function parsePrice(text: string): number {
+  const trimmed = text.trim()
+  if (!/^\d+(\.\d+)?$/.test(trimmed)) throw new Error(`not a price: "${text}"`)
+  const [whole, fraction = ''] = trimmed.split('.')
+  if (fraction.length > IMPLIED_DECIMALS) {
+    throw new Error(`a price carries at most ${IMPLIED_DECIMALS} decimals: "${text}"`)
+  }
+  const scaled = Number(whole + fraction.padEnd(IMPLIED_DECIMALS, '0'))
+  if (!Number.isSafeInteger(scaled)) throw new Error(`price out of range: "${text}"`)
+  return scaled
+}
+
+/**
+ * The inverse, for putting an existing value back into an input. Plain digits and a point: a
+ * locale-formatted string with thousands separators is not something `parsePrice` accepts back.
+ */
+export function priceInput(value: number | null | undefined): string {
+  if (value === null || value === undefined) return ''
+  const negative = value < 0
+  const digits = String(Math.abs(value)).padStart(IMPLIED_DECIMALS + 1, '0')
+  const whole = digits.slice(0, -IMPLIED_DECIMALS)
+  const fraction = digits.slice(-IMPLIED_DECIMALS).replace(/0+$/, '')
+  return `${negative ? '-' : ''}${whole}${fraction ? `.${fraction}` : ''}`
+}
+
+/** Trading dates are YYYYMMDD int32 on the wire, and 0 means GTC. Today, in the operator's zone. */
+export function todayTradingDate(): number {
+  const now = new Date()
+  return now.getFullYear() * 10000 + (now.getMonth() + 1) * 100 + now.getDate()
+}

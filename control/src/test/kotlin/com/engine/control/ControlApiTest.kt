@@ -31,6 +31,9 @@ class ControlApiTest : PostgresTest() {
     @Autowired
     private lateinit var json: ObjectMapper
 
+    @Autowired
+    private lateinit var topology: TopologyService
+
     @Test
     fun `a shard and a security can be created and read back`() {
         mvc.perform(
@@ -151,5 +154,37 @@ class ControlApiTest : PostgresTest() {
         mvc.perform(get("/api/releases/$version/files/discovery.properties"))
             .andExpect(status().isOk)
             .andExpect(content().string(org.hamcrest.Matchers.containsString("discovery.shards=1")))
+    }
+
+    /**
+     * A universe version survives the round trip through a browser, digit for digit.
+     *
+     * It is a 64-bit hash, and JSON numbers are IEEE 754 doubles in every browser: parsed as a
+     * number, `9181280125937456696` comes back as `9181280125937457000`. Nothing in Kotlin would
+     * ever notice — this is asserted on the JSON text, because that is the only place the defect
+     * exists. The console compares this value against what discovery broadcasts, so digits the
+     * exchange never produced are exactly the silent divergence the fingerprint exists to catch.
+     */
+    @Test
+    fun `a universe version crosses the wire as a string, not a rounded double`() {
+        mvc.perform(
+            post("/api/shards").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(shardRow(0))),
+        ).andExpect(status().isCreated)
+        mvc.perform(
+            post("/api/securities").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(securityRow(1, 0))),
+        ).andExpect(status().isCreated)
+
+        val expected = topology.universe().version.toString()
+
+        mvc.perform(get("/api/topology"))
+            .andExpect(jsonPath("$.universeVersion").isString)
+            .andExpect(jsonPath("$.universeVersion").value(expected))
+
+        mvc.perform(post("/api/releases").with(csrf()))
+            .andExpect(status().isCreated)
+            .andExpect(jsonPath("$.universeVersion").isString)
+            .andExpect(jsonPath("$.universeVersion").value(expected))
     }
 }

@@ -1,5 +1,7 @@
 package com.engine.control
 
+import com.fasterxml.jackson.databind.annotation.JsonSerialize
+import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicLong
@@ -35,8 +37,20 @@ data class HaltState(
     val clearedAt: String? = null,
 )
 
-/** What discovery last broadcast, and whether it agrees with the database. */
+/**
+ * What discovery last broadcast, and whether it agrees with the database.
+ *
+ * A universe version is a 64-bit hash, and it is serialized as a JSON *string*.
+ *
+ * Not a style choice: JSON numbers are IEEE 754 doubles in every browser, so a value above 2^53
+ * loses its low digits on the way through `JSON.parse` — `9181280125937456696` renders as
+ * `9181280125937457000`. This value is an identity and never arithmetic: it is compared against
+ * what discovery broadcasts and against a published manifest, and a console that displayed digits
+ * the exchange never produced would be the exact failure the fingerprint exists to prevent. The
+ * Kotlin stays a Long; only the wire representation changes.
+ */
 data class DirectoryState(
+    @get:JsonSerialize(using = ToStringSerializer::class)
     val version: Long,
     val securities: Int,
     val shards: List<Int>,

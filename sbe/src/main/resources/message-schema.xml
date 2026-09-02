@@ -240,6 +240,47 @@
     <field name="aggressorSide" id="6" type="Side"/>
   </sbe:message>
 
+  <!-- The L2 recovery feed, on its own stream so a subscriber that does not want it pays nothing
+       and a snapshot burst never delays the incremental feed.
+
+       `l2SeqNum` is the DepthUpdate sequence the image is valid at, and it is what lets a late
+       joiner splice the two feeds: install the image, discard buffered updates at or below it,
+       replay the rest. Begin and End repeat it and the level count so a truncated cycle is
+       discarded rather than installed: the staging discipline discovery already uses for the
+       universe. One message per level rather than a repeating group: a full book exceeds the
+       largest message a term buffer will carry. -->
+
+  <sbe:message name="DepthSnapshotBegin" id="43" blockLength="48">
+    <field name="seqNum"         id="1" type="SeqNum"/>
+    <field name="l2SeqNum"       id="2" type="SeqNum"     description="The DepthUpdate sequence this image is valid at"/>
+    <field name="lastTradePrice" id="3" type="Price"      description="Long.MIN_VALUE if nothing has traded"/>
+    <field name="lastTradeQty"   id="4" type="Quantity"/>
+    <field name="securityId"     id="5" type="SecurityId"/>
+    <field name="shardId"        id="6" type="ShardId"/>
+    <field name="levelCount"     id="7" type="OrderCount" description="DepthSnapshotLevel messages that follow"/>
+  </sbe:message>
+
+  <!-- Deliberately the same shape as DepthUpdate: a consumer applies a snapshot level and an
+       incremental update through one code path, so an image cannot be assembled by rules the
+       increments do not follow. -->
+  <sbe:message name="DepthSnapshotLevel" id="44" blockLength="40">
+    <field name="seqNum"       id="1" type="SeqNum"/>
+    <field name="price"        id="2" type="Price"/>
+    <field name="aggregateQty" id="3" type="Quantity"/>
+    <field name="securityId"   id="4" type="SecurityId"/>
+    <field name="shardId"      id="5" type="ShardId"/>
+    <field name="orderCount"   id="6" type="OrderCount"/>
+    <field name="side"         id="7" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="DepthSnapshotEnd" id="45" blockLength="32">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="l2SeqNum"   id="2" type="SeqNum"/>
+    <field name="securityId" id="3" type="SecurityId"/>
+    <field name="shardId"    id="4" type="ShardId"/>
+    <field name="levelCount" id="5" type="OrderCount"/>
+  </sbe:message>
+
   <!-- ================= Client-facing, published by the Gateway =================== -->
 
   <!-- The engine omits cumQty and origQty (no room in a 64-byte order slot); the gateway

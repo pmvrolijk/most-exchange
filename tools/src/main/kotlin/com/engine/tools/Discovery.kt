@@ -16,6 +16,8 @@ data class ToolsConfig(
     val l1StreamId: Int,
     val l2Channel: String,
     val l2StreamId: Int,
+    val snapshotChannel: String,
+    val snapshotStreamId: Int,
     val participantId: Long,
 ) {
     companion object {
@@ -28,6 +30,11 @@ data class ToolsConfig(
             l1StreamId = args.int("l1-stream", 1),
             l2Channel = args.optional("l2-channel") ?: "aeron:udp?endpoint=239.10.1.2:40002",
             l2StreamId = args.int("l2-stream", 2),
+            // The recovery feed. Without it a book can only be built by having been listening
+            // since the security opened, which is not a thing an operator running a CLI has done.
+            snapshotChannel = args.optional("snapshot-channel")
+                ?: "aeron:udp?endpoint=239.10.1.4:40004",
+            snapshotStreamId = args.int("snapshot-stream", 4),
             participantId = args.long("participant", 1L),
         )
     }

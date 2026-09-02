@@ -20,4 +20,6 @@ exec docker compose run --rm most "$@" \
   --l1-channel "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40001|control-mode=dynamic" \
   --l1-stream 1 \
   --l2-channel "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40002|control-mode=dynamic" \
-  --l2-stream 2
+  --l2-stream 2 \
+  --snapshot-channel "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40004|control-mode=dynamic" \
+  --snapshot-stream 4

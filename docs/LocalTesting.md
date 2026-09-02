@@ -135,7 +135,15 @@ md.l2.channel=aeron:ipc
 md.l2.streamId=32
 md.l3.channel=aeron:ipc
 md.l3.streamId=33
+md.snapshot.channel=aeron:ipc
+md.snapshot.streamId=34
+md.snapshot.cycleMs=1000
 ```
+
+`md.snapshot.*` is the L2 recovery feed: a full image of one book per slice, rotating, so a
+subscriber that starts after trading began has something to apply increments to. A whole pass takes
+`cycleMs` however many securities the shard hosts, and that pass is the longest a joining consumer
+waits before its book is trustworthy.
 
 `$RUN/discovery.properties`
 
@@ -234,7 +242,8 @@ rather than the multicast defaults, pass the channels each time:
 CONN="--aeron-dir $RUN/aeron
       --discovery-channel aeron:ipc --discovery-stream 100
       --l1-channel aeron:ipc --l1-stream 31
-      --l2-channel aeron:ipc --l2-stream 32"
+      --l2-channel aeron:ipc --l2-stream 32
+      --snapshot-channel aeron:ipc --snapshot-stream 34"
 ```
 
 ### Check the universe is discoverable

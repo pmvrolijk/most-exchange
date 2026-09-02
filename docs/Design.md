@@ -699,6 +699,42 @@ and recovery a **subscriber** responsibility: consumers must detect a gap and re
 snapshot rather than assume a continuous stream. Unicast fallback subscribers do get per-channel
 backpressure, but each has its own publication, so a stalled one affects only itself.
 
+### The L2 recovery feed
+
+The snapshot that paragraph calls for is a fourth stream, published by the Market Data process on a
+repeating cycle: `DepthSnapshotBegin`, one `DepthSnapshotLevel` per occupied level, `DepthSnapshotEnd`.
+One security per slice, so a full pass takes the configured cycle however many books the shard hosts,
+and that pass is the worst case a subscriber waits before it can trust a book.
+
+**A late joiner and a gapped subscriber are the same problem.** Neither has a book it is entitled to
+apply an increment to, and the fix for both is an image plus everything published after it.
+
+**The splice is `l2SeqNum`** — the incremental sequence the image was taken at, carried on both ends
+of the cycle. A subscriber buffers the increments that arrive while the image is in flight, installs
+the image, discards the buffered updates at or below that sequence, and replays the rest.
+`DepthFeedAssembler` in `reference` is the one implementation of that, shared by the operator CLI,
+the control plane and anything else that rebuilds a book; a consumer that wrote its own would be a
+second implementation of a rule with no way to detect that it disagreed.
+
+Three properties the design depends on:
+
+* **The image is taken on the poll thread**, between two book events, never on a timer. The sequence
+  stamped on it and the levels walked for it are consistent only because nothing can be applied in
+  between. A torn image is undetectable downstream: every message in it is individually valid and
+  the book they describe simply never existed.
+* **Begin and End repeat the sequence and the level count**, so a cycle that lost messages in the
+  middle is discarded rather than installed — the staging discipline `discovery` already applies to
+  the universe broadcast. A dropped snapshot message is never retried for the same reason: the cycle
+  it belonged to is already void, and the next one is along within the interval.
+* **A snapshot is ignored while a subscriber is synchronised.** Increments past the image's sequence
+  have already been applied straight to the book and were never buffered, so installing it would
+  silently rewind the book to an older state.
+
+Only *occupied* levels are sent, walked through the depth ladder's occupancy bitset — the same rule
+as the engine's cluster snapshot, which walks the ladders rather than the 1M-slot pool. An empty book
+still sends a bracketed, zero-level cycle: "no liquidity" and "I cannot yet know" are different
+answers, and a consumer must not render the first when it means the second.
+
 ### `message-schema.xml`
 
 ```xml
@@ -942,6 +978,47 @@ backpressure, but each has its own publication, so a stalled one affects only it
     <field name="securityId"    id="4" type="SecurityId"/>
     <field name="shardId"       id="5" type="ShardId"/>
     <field name="aggressorSide" id="6" type="Side"/>
+  </sbe:message>
+
+  <!-- The L2 recovery feed, on its own stream so a subscriber that does not want it pays nothing
+       and a snapshot burst never delays the incremental feed.
+
+       `l2SeqNum` is the DepthUpdate sequence the image is valid at, and it is what lets a late
+       joiner splice the two feeds: install the image, discard buffered updates at or below it,
+       replay the rest. Begin and End repeat it and the level count so a truncated cycle is
+       discarded rather than installed: the staging discipline discovery already uses for the
+       universe. One message per level rather than a repeating group: a full book exceeds the
+       largest message a term buffer will carry. -->
+
+  <sbe:message name="DepthSnapshotBegin" id="43" blockLength="48">
+    <field name="seqNum"         id="1" type="SeqNum"/>
+    <field name="l2SeqNum"       id="2" type="SeqNum"     description="The DepthUpdate sequence this image is valid at"/>
+    <field name="lastTradePrice" id="3" type="Price"      description="Long.MIN_VALUE if nothing has traded"/>
+    <field name="lastTradeQty"   id="4" type="Quantity"/>
+    <field name="securityId"     id="5" type="SecurityId"/>
+    <field name="shardId"        id="6" type="ShardId"/>
+    <field name="levelCount"     id="7" type="OrderCount" description="DepthSnapshotLevel messages that follow"/>
+  </sbe:message>
+
+  <!-- Deliberately the same shape as DepthUpdate: a consumer applies a snapshot level and an
+       incremental update through one code path, so an image cannot be assembled by rules the
+       increments do not follow. -->
+  <sbe:message name="DepthSnapshotLevel" id="44" blockLength="40">
+    <field name="seqNum"       id="1" type="SeqNum"/>
+    <field name="price"        id="2" type="Price"/>
+    <field name="aggregateQty" id="3" type="Quantity"/>
+    <field name="securityId"   id="4" type="SecurityId"/>
+    <field name="shardId"      id="5" type="ShardId"/>
+    <field name="orderCount"   id="6" type="OrderCount"/>
+    <field name="side"         id="7" type="Side"/>
+  </sbe:message>
+
+  <sbe:message name="DepthSnapshotEnd" id="45" blockLength="32">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="l2SeqNum"   id="2" type="SeqNum"/>
+    <field name="securityId" id="3" type="SecurityId"/>
+    <field name="shardId"    id="4" type="ShardId"/>
+    <field name="levelCount" id="5" type="OrderCount"/>
   </sbe:message>
 
   <!-- ================= Client-facing, published by the Gateway =================== -->
@@ -1990,11 +2067,13 @@ It found three defects that unit tests could not:
 
 ## 8. Open Items
 
-* **No market data snapshot for late joiners.** A subscriber that joins after trading starts sees
-  only subsequent updates, and §5 tells a consumer to "resynchronise from a snapshot" that does not
-  exist. The e2e test works around it by starting the inspector before any depth is published. A
-  periodic L2 snapshot, or a request-response recovery channel, is needed before a real consumer can
-  join mid-session.
+* ~~**No market data snapshot for late joiners.**~~ **Done.** The Market Data process publishes a
+  periodic per-security image on its own stream, and `DepthFeedAssembler` splices it onto the
+  incremental feed (§5, "The L2 recovery feed"). The e2e test no longer starts its inspector before
+  the depth exists; it starts it afterwards, which is the case a real consumer is always in.
+  What is *not* covered: a request-response recovery channel for a subscriber that cannot wait a
+  cycle, and any snapshot of L1 — top of book is derivable from the L2 image, but a consumer that
+  takes only L1 still has nothing to join to.
 * **Halt-recovery authorisation.** The *procedure* is now executable —
   `POST /api/shards/{id}/reopen` in the control plane re-seeds the definition and walks
   `PRE_OPEN → OPEN_AUCTION → CONTINUOUS` in that order (`docs/ControlPlane.md`). Who is authorised to

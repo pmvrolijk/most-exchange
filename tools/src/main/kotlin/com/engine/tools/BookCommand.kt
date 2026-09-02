@@ -1,13 +1,9 @@
 package com.engine.tools
 
+import com.engine.reference.DepthFeedAssembler
+import com.engine.reference.DepthFeedDecoder
 import com.engine.reference.DirectoryClient
-import com.engine.reference.FeedSequenceTracker
-import com.engine.sbe.DepthUpdateDecoder
-import com.engine.sbe.LastTradeDecoder
-import com.engine.sbe.MessageHeaderDecoder
-import com.engine.sbe.Side
 import io.aeron.FragmentAssembler
-import org.agrona.DirectBuffer
 import org.agrona.concurrent.ShutdownSignalBarrier
 import org.agrona.concurrent.SleepingIdleStrategy
 import java.time.Duration
@@ -18,67 +14,54 @@ private val ESC = 27.toChar()
 private val CLEAR_SCREEN = "$ESC[H$ESC[2J"
 
 /**
- * Rebuilds books from the L2 depth feed and renders them.
+ * Rebuilds books from the depth feed and renders them.
  *
- * Kept free of Aeron so the aggregation and the display can be tested directly. The tool needs
- * discovery for one thing the feed does not carry: a security's symbol, so the operator reads
- * `AAPL` rather than `securityId=1`.
+ * The assembly is `reference`'s [DepthFeedAssembler] — the incremental feed spliced onto the
+ * periodic snapshot — so this tool recovers exactly as any other consumer does, and shows a book
+ * only once it is entitled to. What is left here is the two things the feed does not carry: a
+ * symbol, which comes from discovery, and a watch list.
  */
 class BookInspector(
     private val symbols: Map<Int, String>,
     private val watch: Set<Int>,
 ) {
-    private val books = LinkedHashMap<Int, BookView>()
-    private val sequences = FeedSequenceTracker()
+    val assembler = DepthFeedAssembler()
+    private val views = LinkedHashMap<Int, BookView>()
 
-    val gapsDetected: Long get() = sequences.gapsDetected
-    val messagesMissed: Long get() = sequences.messagesMissed
+    val gapsDetected: Long get() = assembler.gapsDetected
+    val messagesMissed: Long get() = assembler.messagesMissed
 
     var unknownSecurities = 0L
         private set
 
-    fun onDepth(
-        securityId: Int,
-        shardId: Int,
-        seqNum: Long,
-        side: Byte,
-        price: Long,
-        qty: Long,
-        orders: Int,
-    ) {
-        sequences.accept(shardId, seqNum)
-        bookFor(securityId)?.applyDepth(side == Side.BUY.value(), price, qty, orders)
-    }
-
-    fun onTrade(securityId: Int, shardId: Int, seqNum: Long, price: Long, qty: Long) {
-        sequences.accept(shardId, seqNum)
-        bookFor(securityId)?.applyTrade(price, qty)
-    }
-
-    fun bookOf(securityId: Int): BookView? = books[securityId]
-
-    private fun bookFor(securityId: Int): BookView? {
-        if (watch.isNotEmpty() && securityId !in watch) return null
+    /** Registers a security for display. Depth itself goes into the assembler, not through here. */
+    fun observe(securityId: Int) {
+        if (watch.isNotEmpty() && securityId !in watch) return
         val symbol = symbols[securityId]
         if (symbol == null) {
             // On the feed but absent from the directory: this tool holds a stale universe.
             unknownSecurities++
-            return null
+            return
         }
-        return books.getOrPut(securityId) { BookView(securityId, symbol) }
+        views.getOrPut(securityId) { BookView(securityId, symbol) }
     }
 
     fun render(depth: Int): String = buildString {
-        val active = books.values.filter { !it.isEmpty() || it.updates > 0 }
-        if (active.isEmpty()) {
-            append("waiting for depth updates...\n")
+        for (securityId in assembler.securities()) observe(securityId)
+
+        if (views.isEmpty()) {
+            append("waiting for the depth feed...\n")
         }
-        active.sortedBy { it.symbol }.forEach { append(it.render(depth)).append('\n') }
+        views.values.sortedBy { it.symbol }.forEach { view ->
+            append(view.render(assembler.book(view.securityId), assembler.state(view.securityId), depth))
+            append('\n')
+        }
         // Warnings are printed even with nothing to draw: a tool receiving updates it cannot
         // name must say so rather than sit there claiming to be waiting.
         if (gapsDetected > 0) {
             append("!! $gapsDetected gaps, $messagesMissed messages missed -- ")
-            append("depth shown may be stale; resubscribe to resynchronise\n")
+            append("books resynchronise from the next snapshot; ")
+            append("${assembler.snapshotsApplied} applied, ${assembler.desynchronisations} dropped\n")
         }
         if (unknownSecurities > 0) {
             append("!! $unknownSecurities updates for securities absent from the directory\n")
@@ -111,43 +94,21 @@ fun runBook(args: Args) {
 
         val scope = if (watch.isEmpty()) "all ${symbols.size} securities"
         else requested!!.joinToString(",")
-        println("watching $scope on ${config.l2Channel}:${config.l2StreamId}")
+        println(
+            "watching $scope on ${config.l2Channel}:${config.l2StreamId} " +
+                "(snapshots ${config.snapshotChannel}:${config.snapshotStreamId})",
+        )
 
         val inspector = BookInspector(symbols, watch)
-        val header = MessageHeaderDecoder()
-        val depthDecoder = DepthUpdateDecoder()
-        val tradeDecoder = LastTradeDecoder()
+        val decoder = DepthFeedDecoder(inspector.assembler)
 
-        val handler = FragmentAssembler { buffer: DirectBuffer, offset: Int, length: Int, _ ->
-            if (length >= MessageHeaderDecoder.ENCODED_LENGTH) {
-                header.wrap(buffer, offset)
-                val body = offset + MessageHeaderDecoder.ENCODED_LENGTH
-                when (header.templateId()) {
-                    DepthUpdateDecoder.TEMPLATE_ID -> {
-                        depthDecoder.wrap(buffer, body, header.blockLength(), header.version())
-                        inspector.onDepth(
-                            depthDecoder.securityId(), depthDecoder.shardId(),
-                            depthDecoder.seqNum(), depthDecoder.side().value(),
-                            depthDecoder.price(), depthDecoder.aggregateQty(),
-                            depthDecoder.orderCount(),
-                        )
-                    }
-
-                    LastTradeDecoder.TEMPLATE_ID -> {
-                        tradeDecoder.wrap(buffer, body, header.blockLength(), header.version())
-                        inspector.onTrade(
-                            tradeDecoder.securityId(), tradeDecoder.shardId(),
-                            tradeDecoder.seqNum(), tradeDecoder.price(), tradeDecoder.qty(),
-                        )
-                    }
-
-                    else -> Unit
-                }
-            }
+        val handler = FragmentAssembler { buffer, offset, length, _ ->
+            decoder.onMessage(buffer, offset, length)
         }
 
         val l2 = aeron.addSubscription(config.l2Channel, config.l2StreamId)
         val l1 = aeron.addSubscription(config.l1Channel, config.l1StreamId)
+        val snapshots = aeron.addSubscription(config.snapshotChannel, config.snapshotStreamId)
         val idle = SleepingIdleStrategy(Duration.ofMillis(1).toNanos())
         val barrier = ShutdownSignalBarrier()
 
@@ -156,6 +117,7 @@ fun runBook(args: Args) {
             while (!Thread.currentThread().isInterrupted) {
                 var work = l2.poll(handler, FRAGMENT_LIMIT)
                 work += l1.poll(handler, FRAGMENT_LIMIT)
+                work += snapshots.poll(handler, FRAGMENT_LIMIT)
                 idle.idle(work)
                 val now = System.currentTimeMillis()
                 if (now >= nextRender) {

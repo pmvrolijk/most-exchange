@@ -193,6 +193,16 @@ muted explicitly via `onRoleChange` since it is a plain publication, not egress)
 Data Process** consumes stream 12 and derives L1/L2/L3, published as **SBE over UDP multicast**
 (unicast as a bounded fallback) — the engine never formats market data.
 
+**The L2 snapshot is taken on the poll thread, and a synchronised subscriber ignores one.** The
+recovery feed (`DepthSnapshotBegin`/`Level`/`End` on its own stream) is what lets a consumer join
+mid-session or recover from a gap. Two rules carry it: the image and the `l2SeqNum` stamped on it are
+consistent only because no book event can land between reading the sequence and walking the ladders —
+moving it to a timer thread produces a torn image no consumer could detect; and installing an image
+over an already-synchronised book **rewinds** it, because increments past that sequence were applied
+directly and never buffered. Consumers use `DepthFeedAssembler` in `reference` — do not write a second
+one. `market-data` walks only occupied levels via the occupancy bitset, and an empty book still sends
+a bracketed zero-level cycle, because "no liquidity" and "I cannot yet know" are different answers.
+
 **Do not change Aeron's multicast flow control.** It defaults to `MaxMulticastFlowControl` (fastest
 receiver governs), which is correct here; `MinMulticastFlowControl` would let the slowest subscriber
 throttle the publisher and reintroduce exactly the coupling that moving market data out of the engine

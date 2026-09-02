@@ -1,7 +1,10 @@
 package com.engine.tools
 
+import com.engine.reference.AggregatedBook
+import com.engine.reference.DepthFeedAssembler
 import com.engine.reference.PriceCodec
 import com.engine.reference.RoutedSecurity
+import com.engine.reference.SyncState
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import kotlin.test.Test
@@ -144,133 +147,131 @@ class OrderParserTest {
     }
 }
 
+/**
+ * Rendering only. The book's own semantics -- an aggregate replaces rather than accumulates, a
+ * zero quantity removes a level -- moved to `reference`'s AggregatedBookTest along with the book,
+ * so they are asserted once, next to the single implementation every consumer shares.
+ */
 class BookViewTest {
 
-    private fun book() = BookView(1, "AAPL")
+    private val view = BookView(1, "AAPL")
 
-    @Test
-    fun `depth updates build both sides`() {
-        val book = book()
-        book.applyDepth(isBid = true, price = PriceCodec.parse("99.00"), aggregateQty = 10, orderCount = 2)
-        book.applyDepth(isBid = false, price = PriceCodec.parse("101.00"), aggregateQty = 5, orderCount = 1)
-
-        assertEquals(PriceCodec.parse("99.00"), book.bestBid())
-        assertEquals(PriceCodec.parse("101.00"), book.bestAsk())
-        assertEquals(PriceCodec.parse("2.00"), book.spread())
+    private fun book(vararg levels: Triple<Boolean, String, Long>) = AggregatedBook(1).apply {
+        levels.forEach { (isBid, price, qty) ->
+            applyDepth(isBid, PriceCodec.parse(price), qty, 1)
+        }
     }
 
+    private fun render(book: AggregatedBook?, state: SyncState = SyncState.SYNCHRONISED, depth: Int = 5) =
+        view.render(book, state, depth)
+
     @Test
-    fun `bids sort high to low and asks low to high`() {
-        val book = book()
-        listOf("98.00", "99.00", "97.00").forEach {
-            book.applyDepth(true, PriceCodec.parse(it), 1, 1)
-        }
-        listOf("102.00", "101.00", "103.00").forEach {
-            book.applyDepth(false, PriceCodec.parse(it), 1, 1)
-        }
+    fun `bids print high to low and asks low to high`() {
+        val rendered = render(
+            book(
+                Triple(true, "98.00", 1L), Triple(true, "99.00", 1L), Triple(true, "97.00", 1L),
+                Triple(false, "102.00", 1L), Triple(false, "101.00", 1L), Triple(false, "103.00", 1L),
+            ),
+        )
 
-        assertEquals(PriceCodec.parse("99.00"), book.bestBid())
-        assertEquals(PriceCodec.parse("101.00"), book.bestAsk())
-
-        val rendered = book.render(3)
         assertTrue(rendered.indexOf("99.00") < rendered.indexOf("98.00"))
         assertTrue(rendered.indexOf("101.00") < rendered.indexOf("102.00"))
     }
 
     @Test
-    fun `a zero quantity removes the level`() {
-        val book = book()
-        val price = PriceCodec.parse("99.00")
-        book.applyDepth(true, price, 10, 1)
-        book.applyDepth(true, price, 0, 0)
-
-        assertNull(book.bestBid())
-        assertTrue(book.isEmpty())
+    fun `a synchronised but empty book says empty`() {
+        assertContains(render(book()), "(empty)")
     }
 
     @Test
-    fun `a level is replaced not accumulated`() {
-        // DepthUpdate carries the new aggregate, not a delta.
-        val book = book()
-        val price = PriceCodec.parse("99.00")
-        book.applyDepth(true, price, 10, 1)
-        book.applyDepth(true, price, 25, 3)
+    fun `an unsynchronised book says waiting, never empty`() {
+        // The distinction the snapshot feed exists to make: "no liquidity" and "I cannot yet know"
+        // are different answers, and drawing the first when the second is true is the lie this
+        // tool used to tell any operator who started it mid-session.
+        val rendered = render(null, SyncState.WAITING)
+        assertContains(rendered, "waiting for a snapshot")
+        assertFalse(rendered.contains("(empty)"))
+    }
 
-        assertContains(book.render(5), "25")
-        assertFalse(book.render(5).contains("35"))
+    @Test
+    fun `a snapshot in flight says so`() {
+        assertContains(render(null, SyncState.BUILDING), "receiving snapshot")
     }
 
     @Test
     fun `spread is absent when a side is empty`() {
-        val book = book()
-        book.applyDepth(true, PriceCodec.parse("99.00"), 10, 1)
-        assertNull(book.spread())
-        assertContains(book.render(5), "spread n/a")
-    }
-
-    @Test
-    fun `an empty book renders without crashing`() {
-        assertContains(book().render(5), "(empty)")
+        assertContains(render(book(Triple(true, "99.00", 10L))), "spread n/a")
     }
 
     @Test
     fun `the last trade is shown`() {
-        val book = book()
-        book.applyDepth(true, PriceCodec.parse("99.00"), 10, 1)
+        val book = book(Triple(true, "99.00", 10L))
         book.applyTrade(PriceCodec.parse("99.50"), 4)
-        assertContains(book.render(5), "last 99.50 x 4")
+        assertContains(render(book), "last 99.50 x 4")
     }
 }
 
 class BookInspectorTest {
 
     private val symbols = mapOf(1 to "AAPL", 2 to "MSFT")
+    private var seq = 0L
+
+    /** A complete snapshot cycle, which is what entitles a book to be displayed at all. */
+    private fun BookInspector.synchronise(securityId: Int, shardId: Int = 1, bid: Long? = null) {
+        val levels = if (bid == null) 0 else 1
+        assembler.onSnapshotBegin(securityId, shardId, ++seq, 0, DepthFeedAssembler.NO_PRICE, 0, levels)
+        if (bid != null) assembler.onSnapshotLevel(securityId, shardId, ++seq, true, bid, 10, 1)
+        assembler.onSnapshotEnd(securityId, shardId, ++seq, 0, levels)
+    }
 
     @Test
     fun `depth is aggregated per security`() {
         val inspector = BookInspector(symbols, emptySet())
-        inspector.onDepth(1, shardId = 1, seqNum = 1, side = Side.BUY.value(),
-            price = PriceCodec.parse("99.00"), qty = 10, orders = 1)
-        inspector.onDepth(2, shardId = 1, seqNum = 2, side = Side.BUY.value(),
-            price = PriceCodec.parse("50.00"), qty = 7, orders = 1)
+        inspector.synchronise(1, bid = PriceCodec.parse("99.00"))
+        inspector.synchronise(2, bid = PriceCodec.parse("50.00"))
 
         val rendered = inspector.render(5)
         assertContains(rendered, "AAPL")
         assertContains(rendered, "MSFT")
-        assertEquals(PriceCodec.parse("99.00"), inspector.bookOf(1)?.bestBid())
-        assertEquals(PriceCodec.parse("50.00"), inspector.bookOf(2)?.bestBid())
+        assertEquals(PriceCodec.parse("99.00"), inspector.assembler.book(1)?.bestBid())
+        assertEquals(PriceCodec.parse("50.00"), inspector.assembler.book(2)?.bestBid())
     }
 
     @Test
     fun `a watch list filters everything else out`() {
         val inspector = BookInspector(symbols, setOf(1))
-        inspector.onDepth(1, 1, 1, Side.BUY.value(), PriceCodec.parse("99.00"), 10, 1)
-        inspector.onDepth(2, 1, 2, Side.BUY.value(), PriceCodec.parse("50.00"), 7, 1)
+        inspector.synchronise(1, bid = PriceCodec.parse("99.00"))
+        inspector.synchronise(2, bid = PriceCodec.parse("50.00"))
 
-        assertNull(inspector.bookOf(2))
         assertFalse(inspector.render(5).contains("MSFT"))
     }
 
     @Test
-    fun `a gap is surfaced as a staleness warning`() {
-        // Under Max flow control a slow subscriber takes an unrecoverable gap, so the operator
-        // must be told the depth on screen can no longer be trusted.
+    fun `a gap is surfaced and the book stops being drawn`() {
+        // Under Max flow control a slow subscriber takes an unrecoverable gap. Before recovery
+        // existed the only honest thing to do was warn; now the book is withdrawn until the next
+        // snapshot restores it, and the warning says which.
         val inspector = BookInspector(symbols, emptySet())
-        inspector.onDepth(1, 1, 1, Side.BUY.value(), PriceCodec.parse("99.00"), 10, 1)
-        inspector.onDepth(1, 1, 9, Side.BUY.value(), PriceCodec.parse("98.00"), 10, 1)
+        inspector.synchronise(1, bid = PriceCodec.parse("99.00"))
+        inspector.assembler.onDepthUpdate(1, 1, 1, true, PriceCodec.parse("98.00"), 5, 1)
+        inspector.assembler.onDepthUpdate(1, 1, 9, true, PriceCodec.parse("97.00"), 5, 1)
 
         assertEquals(1L, inspector.gapsDetected)
         assertEquals(7L, inspector.messagesMissed)
-        assertContains(inspector.render(5), "may be stale")
+        val rendered = inspector.render(5)
+        assertContains(rendered, "resynchronise from the next snapshot")
+        assertContains(rendered, "waiting for a snapshot")
     }
 
     @Test
     fun `shards on one channel do not manufacture gaps`() {
         val inspector = BookInspector(symbols, emptySet())
-        inspector.onDepth(1, shardId = 1, seqNum = 1, side = Side.BUY.value(), price = 100, qty = 1, orders = 1)
-        inspector.onDepth(2, shardId = 2, seqNum = 1, side = Side.BUY.value(), price = 100, qty = 1, orders = 1)
-        inspector.onDepth(1, shardId = 1, seqNum = 2, side = Side.BUY.value(), price = 100, qty = 2, orders = 1)
-        inspector.onDepth(2, shardId = 2, seqNum = 2, side = Side.BUY.value(), price = 100, qty = 2, orders = 1)
+        inspector.synchronise(1, shardId = 1)
+        inspector.synchronise(2, shardId = 2)
+        inspector.assembler.onDepthUpdate(1, 1, 1, true, 100, 1, 1)
+        inspector.assembler.onDepthUpdate(2, 2, 1, true, 100, 1, 1)
+        inspector.assembler.onDepthUpdate(1, 1, 2, true, 100, 2, 1)
+        inspector.assembler.onDepthUpdate(2, 2, 2, true, 100, 2, 1)
 
         assertEquals(0L, inspector.gapsDetected)
     }
@@ -278,15 +279,15 @@ class BookInspectorTest {
     @Test
     fun `a security missing from the directory is counted`() {
         val inspector = BookInspector(symbols, emptySet())
-        inspector.onDepth(99, 1, 1, Side.BUY.value(), 100, 10, 1)
+        inspector.synchronise(99)
 
-        assertEquals(1L, inspector.unknownSecurities)
         assertContains(inspector.render(5), "absent from the directory")
+        assertEquals(1L, inspector.unknownSecurities)
     }
 
     @Test
     fun `an idle inspector says so`() {
-        assertContains(BookInspector(symbols, emptySet()).render(5), "waiting for depth updates")
+        assertContains(BookInspector(symbols, emptySet()).render(5), "waiting for the depth feed")
     }
 }
 

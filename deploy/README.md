@@ -83,6 +83,7 @@ separate containers.
 | 20002 | Execution reports (MDC control address). |
 | 40000 | The directory broadcast. |
 | 40001 / 40002 / 40003 | L1 / L2 / L3. |
+| 40004 | The L2 recovery feed: a periodic image per book, so `most book` can be started at any time. |
 | 20110 / 20220 / 20330 / 20440 / 8010 | Cluster ingress, consensus, log, catchup, archive control. |
 
 ### Dynamic MDC instead of multicast

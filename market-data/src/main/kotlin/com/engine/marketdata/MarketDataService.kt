@@ -31,6 +31,31 @@ interface FeedPublisher {
     )
 
     fun publishLastTrade(securityId: Int, price: Long, qty: Long, aggressorSide: Byte)
+
+    /**
+     * The L2 sequence last published, which is the point in the incremental stream a snapshot
+     * image is valid at. Read *before* any level is written and repeated on both ends of the
+     * cycle: it is the whole of the splice a late joiner performs.
+     */
+    val lastDepthSeqNum: Long
+
+    fun publishSnapshotBegin(
+        securityId: Int,
+        l2SeqNum: Long,
+        lastTradePrice: Long,
+        lastTradeQty: Long,
+        levelCount: Int,
+    )
+
+    fun publishSnapshotLevel(
+        securityId: Int,
+        side: Byte,
+        price: Long,
+        aggregateQty: Long,
+        orderCount: Int,
+    )
+
+    fun publishSnapshotEnd(securityId: Int, l2SeqNum: Long, levelCount: Int)
 }
 
 data class MarketDataSecurity(
@@ -63,6 +88,9 @@ class MarketDataService(
     private val books = Array(securities.size) {
         DepthBook(securities[it].levelCount, securities[it].priceFloor, securities[it].tickSize)
     }
+    private val lastTradePrice = LongArray(securities.size) { NO_PRICE }
+    private val lastTradeQty = LongArray(securities.size)
+    private var snapshotCursor = 0
     private val lastBidPrice = LongArray(securities.size)
     private val lastBidQty = LongArray(securities.size)
     private val lastAskPrice = LongArray(securities.size)
@@ -95,11 +123,26 @@ class MarketDataService(
     var foreignShardEvents = 0L
         private set
 
+    var snapshotsPublished = 0L
+        private set
+
     init {
         for (i in securities.indices) {
             lastBidPrice[i] = NO_PRICE
             lastAskPrice[i] = NO_PRICE
         }
+    }
+
+    /**
+     * The derived depth this process is holding for a security, or null if it hosts no such book.
+     *
+     * Read access to state this process already publishes: the snapshot cycle sends exactly this,
+     * so anything examining a book here is looking at what a subscriber is being told, not at a
+     * second copy that could disagree with it.
+     */
+    fun bookOf(securityId: Int): DepthBook? {
+        val index = indexOf(securityId)
+        return if (index < 0) null else books[index]
     }
 
     fun onBookEvent(buffer: DirectBuffer, offset: Int, length: Int) {
@@ -141,6 +184,7 @@ class MarketDataService(
             TradeExecutedDecoder.TEMPLATE_ID -> {
                 tradeExecuted.wrap(buffer, body, blockLength, version)
                 if (!accept(tradeExecuted.seqNum(), tradeExecuted.shardId())) return
+                rememberTrade(tradeExecuted.securityId(), tradeExecuted.price(), tradeExecuted.qty())
                 publisher.publishLastTrade(
                     tradeExecuted.securityId(), tradeExecuted.price(), tradeExecuted.qty(),
                     tradeExecuted.aggressorSide().value(),
@@ -250,6 +294,61 @@ class MarketDataService(
         lastAskPrice[index] = askPrice
         lastAskQty[index] = askQty
         publisher.publishTopOfBook(securityId, bidPrice, bidQty, askPrice, askQty)
+    }
+
+    /**
+     * Publishes a complete image of the next security's book, rotating one security per call.
+     *
+     * **Called from the same thread as `onBookEvent`, and it must stay that way.** The image and
+     * the `l2SeqNum` stamped on it are consistent only because no book event can be applied
+     * between reading the sequence and walking the ladders. Moving this to a timer thread would
+     * produce a torn image that no consumer could detect: every message would be individually
+     * valid and the book they assemble would never have existed.
+     *
+     * One security per call, rather than the whole shard, so the burst on the poll loop is bounded
+     * by one book rather than by ten.
+     *
+     * Returns the securityId snapshotted, or -1 when this shard hosts nothing.
+     */
+    fun publishNextSnapshot(): Int {
+        if (securityIds.isEmpty()) return -1
+        val index = snapshotCursor
+        snapshotCursor = (snapshotCursor + 1) % securityIds.size
+        publishSnapshot(index)
+        return securityIds[index]
+    }
+
+    private fun publishSnapshot(index: Int) {
+        val securityId = securityIds[index]
+        val book = books[index]
+        // Read before the first level is written: every DepthUpdate published after this point is
+        // one the consumer must replay on top of the image, and it decides that by comparing
+        // sequences. A value read afterwards would silently swallow the updates in between.
+        val seqNum = publisher.lastDepthSeqNum
+        val levels = book.occupiedLevels(isBid = true) + book.occupiedLevels(isBid = false)
+
+        publisher.publishSnapshotBegin(
+            securityId = securityId,
+            l2SeqNum = seqNum,
+            lastTradePrice = lastTradePrice[index],
+            lastTradeQty = lastTradeQty[index],
+            levelCount = levels,
+        )
+        book.forEachOccupied(isBid = true) { price, qty, orders ->
+            publisher.publishSnapshotLevel(securityId, Side.BUY.value(), price, qty, orders)
+        }
+        book.forEachOccupied(isBid = false) { price, qty, orders ->
+            publisher.publishSnapshotLevel(securityId, Side.SELL.value(), price, qty, orders)
+        }
+        publisher.publishSnapshotEnd(securityId, seqNum, levels)
+        snapshotsPublished++
+    }
+
+    private fun rememberTrade(securityId: Int, price: Long, qty: Long) {
+        val index = indexOf(securityId)
+        if (index < 0) return
+        lastTradePrice[index] = price
+        lastTradeQty[index] = qty
     }
 
     private fun indexOf(securityId: Int): Int {

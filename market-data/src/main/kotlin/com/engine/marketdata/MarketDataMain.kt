@@ -32,7 +32,8 @@ fun main(args: Array<String>) {
         "market-data: shard=${config.shard.shardId} fingerprint=${config.shard.fingerprint()} " +
             "securities=${config.shard.securities.map { it.symbol }} " +
             "in=${config.bookEventChannel}:${config.bookEventStreamId} " +
-            "l1=${config.l1Channel} l2=${config.l2Channel} l3=${config.l3Channel}"
+            "l1=${config.l1Channel} l2=${config.l2Channel} l3=${config.l3Channel} " +
+            "snapshot=${config.snapshotChannel} every ${config.snapshotCycleMs}ms"
     )
 
     val aeronContext = Aeron.Context()
@@ -53,9 +54,19 @@ fun main(args: Array<String>) {
         val l3 = aeron.addPublication(config.l3Channel, config.l3StreamId)
         val l2 = aeron.addPublication(config.l2Channel, config.l2StreamId)
         val l1 = aeron.addPublication(config.l1Channel, config.l1StreamId)
+        val snapshot = aeron.addPublication(config.snapshotChannel, config.snapshotStreamId)
 
-        val publisher =
-            AeronFeedPublisher(config.shard.shardId, l3, l2, l1, UnsafeBuffer(ByteArray(1024)))
+        // The one place Aeron and the encoders meet. `offer` returning a negative value is a
+        // drop for every feed here -- there is no back-channel to a multicast group and blocking
+        // would be the coupling this process exists to avoid.
+        val publisher = SbeFeedPublisher(
+            shardId = config.shard.shardId,
+            l3 = FeedSink { buffer, offset, length -> l3.offer(buffer, offset, length) >= 0 },
+            l2 = FeedSink { buffer, offset, length -> l2.offer(buffer, offset, length) >= 0 },
+            l1 = FeedSink { buffer, offset, length -> l1.offer(buffer, offset, length) >= 0 },
+            snapshot = FeedSink { buffer, offset, length -> snapshot.offer(buffer, offset, length) >= 0 },
+            buffer = UnsafeBuffer(ByteArray(1024)),
+        )
         val service = MarketDataService(config.shard.shardId, config.securities(), publisher)
         val assembler = FragmentAssembler { buffer, offset, length, _ ->
             service.onBookEvent(buffer, offset, length)
@@ -65,9 +76,25 @@ fun main(args: Array<String>) {
         val barrier = ShutdownSignalBarrier()
         println("market-data: started")
 
+        // One security per slice, so a full cycle takes `snapshotCycleMs` however many securities
+        // the shard hosts: what a late joiner waits is one cycle, not one cycle per book.
+        val sliceMs = (config.snapshotCycleMs / maxOf(1, config.securities().size)).coerceAtLeast(1L)
+
         val worker = Thread({
+            // Wall clock, deliberately. This process is not the deterministic state machine -- it
+            // derives a feed and holds no replicated state -- so a clock here costs nothing the
+            // engine's ban on one is protecting.
+            var nextSnapshot = System.currentTimeMillis() + sliceMs
             while (!Thread.currentThread().isInterrupted) {
-                idle.idle(subscription.poll(assembler, FRAGMENT_LIMIT))
+                var work = subscription.poll(assembler, FRAGMENT_LIMIT)
+                val now = System.currentTimeMillis()
+                if (now >= nextSnapshot) {
+                    nextSnapshot = now + sliceMs
+                    // On the poll thread by design: the image and the sequence stamped on it are
+                    // consistent only while no book event can land between them.
+                    if (service.publishNextSnapshot() >= 0) work++
+                }
+                idle.idle(work)
             }
         }, "market-data-poller")
         worker.start()
@@ -81,7 +108,9 @@ fun main(args: Array<String>) {
                     "missed=${service.eventsMissed} " +
                     "foreignShard=${service.foreignShardEvents} " +
                     "droppedL1=${publisher.droppedL1} droppedL2=${publisher.droppedL2} " +
-                    "droppedL3=${publisher.droppedL3}"
+                    "droppedL3=${publisher.droppedL3} " +
+                    "snapshots=${service.snapshotsPublished} " +
+                    "droppedSnapshot=${publisher.droppedSnapshot}"
             )
             System.out.flush()
         }
@@ -103,6 +132,13 @@ data class MarketDataConfig(
     val l2StreamId: Int,
     val l3Channel: String,
     val l3StreamId: Int,
+    val snapshotChannel: String,
+    val snapshotStreamId: Int,
+    /**
+     * How long a full pass over this shard's books takes. It is the worst case a joining
+     * subscriber waits before it can trust a book, and the interval over which a gap is repaired.
+     */
+    val snapshotCycleMs: Long,
 ) {
     /**
      * Depth geometry comes from the shard's own security file, so the price that becomes ladder
@@ -129,6 +165,10 @@ data class MarketDataConfig(
             l3Channel = properties.getProperty("md.l3.channel")
                 ?: "aeron:udp?endpoint=239.10.1.3:40003",
             l3StreamId = properties.getProperty("md.l3.streamId")?.toInt() ?: 3,
+            snapshotChannel = properties.getProperty("md.snapshot.channel")
+                ?: "aeron:udp?endpoint=239.10.1.4:40004",
+            snapshotStreamId = properties.getProperty("md.snapshot.streamId")?.toInt() ?: 4,
+            snapshotCycleMs = properties.getProperty("md.snapshot.cycleMs")?.toLong() ?: 1_000L,
         )
 
         fun load(path: String?): MarketDataConfig {

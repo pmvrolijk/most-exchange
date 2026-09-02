@@ -95,6 +95,10 @@ md.l2.channel=aeron:ipc
 md.l2.streamId=32
 md.l3.channel=aeron:ipc
 md.l3.streamId=33
+md.snapshot.channel=aeron:ipc
+md.snapshot.streamId=34
+# Short, because the whole point of the step below is to join late and not wait long for it.
+md.snapshot.cycleMs=500
 EOF
 
 cat > "$RUN/discovery.properties" <<EOF
@@ -111,7 +115,8 @@ discovery.intervalMs=1000
 EOF
 
 CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 100
-      --l1-channel aeron:ipc --l1-stream 31 --l2-channel aeron:ipc --l2-stream 32"
+      --l1-channel aeron:ipc --l1-stream 31 --l2-channel aeron:ipc --l2-stream 32
+      --snapshot-channel aeron:ipc --snapshot-stream 34"
 
 # -------------------------------------------------------------------- processes
 echo "== starting cluster host"
@@ -156,21 +161,14 @@ $MOST session --phase continuous --shard 0 $CONN || fail "session transition"
 sleep 1
 
 echo
-echo "== 3. start the book inspector before any depth exists"
-# A live feed has no replay: a subscriber that joins late sees only subsequent updates. This is
-# also how the tool is actually used -- left running while the market trades.
-( $MOST book --symbol AAPL --depth 5 --refresh 500 $CONN > "$RUN/book.out" 2>&1 & echo $! > "$RUN/book.pid" )
-sleep 3
-
-echo
-echo "== 4. rest a sell order"
+echo "== 3. rest a sell order"
 $MOST send --symbol AAPL --side sell --price 100.00 --qty 10 --clordid 1001 --participant 7 \
   --follow 3 $CONN > "$RUN/sell.out" 2>&1 || fail "send sell"
 cat "$RUN/sell.out"
 grep -q "NEW" "$RUN/sell.out" || fail "no NEW acknowledgement for the resting order"
 
 echo
-echo "== 5. cross it with a buy"
+echo "== 4. cross it with a buy"
 $MOST send --symbol AAPL --side buy --price 100.00 --qty 4 --clordid 2001 --participant 8 \
   --follow 3 $CONN > "$RUN/buy.out" 2>&1 || fail "send buy"
 cat "$RUN/buy.out"
@@ -178,6 +176,14 @@ grep -q "TRADE" "$RUN/buy.out" || fail "the crossing order did not trade"
 grep -q "cum 4" "$RUN/buy.out" || fail "gateway did not reconstruct cumQty"
 
 echo
+echo "== 5. start the book inspector AFTER the depth exists"
+# The point of the recovery feed. Every increment that built this book was published before this
+# subscriber existed, and a live feed has no replay -- so what it draws can only have come from a
+# snapshot. Until the snapshot existed this step had to run before any depth, which meant the one
+# case a real operator is always in was the one case never tested.
+( $MOST book --symbol AAPL --depth 5 --refresh 500 $CONN > "$RUN/book.out" 2>&1 & echo $! > "$RUN/book.pid" )
+sleep 3
+
 echo "== 6. the book shows the remaining depth"
 sleep 2
 kill "$(cat "$RUN/book.pid")" 2>/dev/null

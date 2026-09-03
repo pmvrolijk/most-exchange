@@ -9,9 +9,10 @@
 #
 #   jvm     (default) copies the Gradle installDist trees from the host. Fast, and exactly what
 #           e2e/run-e2e.sh already exercises, so it is the proven path.
-#   native  builds with GraalVM inside the image. This is the production intent (Design.md §7) and
-#           it has never been run -- expect reflection-config gaps around Aeron and Agrona the
-#           first time. It is opt-in for that reason, not because JVM is the goal.
+#   native  builds with GraalVM inside the image. This is the production intent (Design.md §7).
+#           It builds, and the same four binaries built outside a container pass e2e/run-e2e.sh
+#           unchanged. What has not been done is trading through the native containers -- see
+#           deploy/README.md. Opt-in because it costs minutes where the jvm target costs seconds.
 #
 # The media driver is deliberately NOT here. It allocates, so it stays out of these processes and
 # lives in the tools image, which is always JVM.
@@ -40,6 +41,10 @@ USER most
 # --------------------------------------------------------------------- native build
 FROM ghcr.io/graalvm/native-image-community:21 AS native-build
 
+# The GraalVM image is Oracle Linux minimal and ships no findutils, so `xargs` is absent and the
+# Gradle wrapper script exits with "xargs is not available" before Gradle ever starts.
+RUN microdnf install -y findutils && microdnf clean all
+
 WORKDIR /src
 COPY gradlew settings.gradle.kts build.gradle.kts gradle.properties ./
 COPY gradle gradle
@@ -49,6 +54,11 @@ COPY engine engine
 COPY gateway gateway
 COPY market-data market-data
 COPY discovery discovery
+# Neither is built here, but settings.gradle.kts includes both and Gradle refuses to configure a
+# project whose directory is missing. Their build scripts alone are enough to configure them, and
+# are all that is copied: `control` carries ~227MB of build output that this stage has no use for.
+COPY tools/build.gradle.kts tools/
+COPY control/build.gradle.kts control/
 
 # -march must be pinned explicitly rather than left at native: a -march=native binary SIGILLs when
 # the build host's CPU differs from the machine that runs it, and a container image is precisely a

@@ -1743,15 +1743,46 @@ class MatchingEngineService(
 ### Build Configuration
 
 ```ini
-Args = -H:ReflectionConfigurationFiles=${buildDir}/resources/main/reflection-config.json \
-       --no-fallback \
+Args = --no-fallback \
        -O3 \
        -march=x86-64-v3 \
+       --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED \
+       --add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
+       -J--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED \
+       -J--add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
        --initialize-at-build-time=kotlin.DeprecationLevel \
+       --initialize-at-build-time=org.agrona.UnsafeApi \
        --initialize-at-run-time=io.aeron.driver.MediaDriver,org.agrona.concurrent.UnsafeBuffer
 ```
 
-`reflection-config.json` registers `sun.misc.Unsafe` and `org.agrona.concurrent.UnsafeBuffer`.
+These live in the **root** `build.gradle.kts`, applied to every module that carries the native
+plugin, because they are a property of the Aeron/Agrona dependency stack rather than of any one
+process. A module's own `graalvmNative` block sets only its image name, its main class, and (for
+`engine` alone) the staged Epsilon switch. Four copies of this list is how one of them drifts and
+fails at run time in the one process nobody rebuilt.
+
+**No `reflection-config.json` is needed.** Earlier drafts of this section assumed one registering
+`sun.misc.Unsafe` and `UnsafeBuffer`. Building the images proved otherwise: the analysis reaches
+everything Aeron and Agrona need on its own, and the reachability-metadata repository is switched
+off (`metadataRepository { enabled = false }`) because neither library appears in it and its schema
+demands a newer GraalVM than the build is pinned to.
+
+**The `--add-exports` flags are the load-bearing part, and both forms are required.** Agrona 2.x
+reaches `jdk.internal.misc.Unsafe` and the Aeron driver reaches `sun.nio.ch`. On the JVM these are
+`--add-opens` at *run* time; for a native image they must be exports at *image-build* time. Without
+them native-image does not fail — the analysis simply cannot see the class, silently omits it from
+the image, and the binary starts, prints its fingerprint, and dies with
+`NoClassDefFoundError: jdk.internal.misc.Unsafe` on the first `UnsafeBuffer`. That is only reached
+once a real Aeron CnC file exists, so a smoke test against a *missing* media driver passes and hides
+it. The bare form applies to the image; the `-J` form opens the package to the builder JVM, which is
+what actually loads the class during analysis.
+
+**`org.agrona.UnsafeApi` must be initialized at build time, and cannot be anything else.** It reaches
+`Unsafe` through an `invokedynamic` call site, and resolving that site during analysis runs its
+`<clinit>` — so leaving it to the default run-time policy fails the build with "unintentionally
+initialized at build time". SVM substitutes `jdk.internal.misc.Unsafe` with its own singleton, so
+nothing host-specific is baked into the image heap. Note this sits directly beside
+`--initialize-at-run-time=...UnsafeBuffer`: the buffer defers, the API holder cannot.
 
 **`-march` is pinned, not `native`.** A `native` build SIGILLs when the build host's CPU differs from
 production. Build in a container matching the production instance type.

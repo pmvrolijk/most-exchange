@@ -13,11 +13,14 @@ AERON_DIR="$RUN/aeron"
 
 rm -rf "$RUN"; mkdir -p "$LOGS"
 
-MOST="$ROOT/tools/build/install/most/bin/most"
-ENGINE="$ROOT/engine/build/install/engine/bin/engine"
-GATEWAY="$ROOT/gateway/build/install/gateway/bin/gateway"
-MARKETDATA="$ROOT/market-data/build/install/market-data/bin/market-data"
-DISCOVERY="$ROOT/discovery/build/install/discovery/bin/discovery"
+# Each binary is overridable so the same run can be driven against a native image instead of
+# the JVM start script -- e.g. ENGINE=engine/build/native/nativeCompile/matching-engine.
+# The processes are identical on the wire, so a native binary must pass this unchanged.
+MOST="${MOST:-$ROOT/tools/build/install/most/bin/most}"
+ENGINE="${ENGINE:-$ROOT/engine/build/install/engine/bin/engine}"
+GATEWAY="${GATEWAY:-$ROOT/gateway/build/install/gateway/bin/gateway}"
+MARKETDATA="${MARKETDATA:-$ROOT/market-data/build/install/market-data/bin/market-data}"
+DISCOVERY="${DISCOVERY:-$ROOT/discovery/build/install/discovery/bin/discovery}"
 
 PIDS=()
 cleanup() {

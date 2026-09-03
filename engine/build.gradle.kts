@@ -19,28 +19,17 @@ application {
     )
 }
 
+// Native image. The Aeron/Agrona flags, the -march pin and the metadata-repository opt-out are
+// shared by every native binary in this build and live in the root build.gradle.kts; only what is
+// specific to this process is set here.
 graalvmNative {
     binaries.named("main") {
         imageName.set("matching-engine")
         mainClass.set("com.engine.core.EngineMainKt")
 
-        buildArgs.addAll(
-            "--no-fallback",
-            "-O3",
-            // Aeron's driver and Agrona's buffers must initialise at run time.
-            "--initialize-at-run-time=io.aeron.driver.MediaDriver,org.agrona.concurrent.UnsafeBuffer",
-            "--initialize-at-build-time=kotlin.DeprecationLevel",
-        )
-
-        // Design.md §7: pin -march explicitly. A -march=native build SIGILLs when the build
-        // host's CPU differs from production, so CI sets engine.march; local builds on a
-        // different architecture leave it unset.
-        providers.gradleProperty("engine.march").orNull?.let {
-            buildArgs.add("-march=$it")
-        }
-
-        // Epsilon GC is staged, not the default (Design.md §7): ship on Serial GC, prove
-        // zero steady-state allocation, add the CI allocation assertion, then enable this.
+        // Epsilon GC is staged, not the default (Design.md §7): ship on Serial GC, prove zero
+        // steady-state allocation, add the CI allocation assertion, then enable this. The engine
+        // is the only process this applies to -- the others are not on the matching path.
         if (providers.gradleProperty("engine.useEpsilonGc").orNull == "true") {
             buildArgs.add("--gc=epsilon")
         }

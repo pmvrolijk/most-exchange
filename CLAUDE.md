@@ -64,6 +64,24 @@ this; keep it that way or the tests validate a layout the cluster rejects.
   warns it buys nothing.
 - Native build knobs live in `gradle.properties`: `engine.march` (CI/prod must set it) and
   `engine.useEpsilonGc` (off until zero-allocation is proven). Both are explained in README.md.
+- **The native-image flags live in the root `build.gradle.kts`, not per module.** All four native
+  binaries link Aeron and Agrona, so the flags are a property of the dependency stack; a module's own
+  `graalvmNative` block sets only its image name, main class and (engine alone) the Epsilon switch.
+  Two of those flags are non-obvious and Design.md §7 explains why: **a missing
+  `--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED` does not fail the build**, it silently
+  omits the class and the binary dies on its first `UnsafeBuffer` — and only once a real Aeron CnC
+  file exists, so a smoke test against a *missing* driver passes and hides it; and
+  `org.agrona.UnsafeApi` must be `--initialize-at-build-time` (it reaches `Unsafe` through an
+  `invokedynamic` site that runs its `<clinit>` during analysis) even though `UnsafeBuffer` beside it
+  is `--initialize-at-run-time`. Neither can be inferred from the JVM's `--add-opens`.
+  **To check an image you cannot run** (a cross-built container, say): `grep -c
+  'jdk.internal.misc.Unsafe' <binary>` returns 0 when the exports were missing and 3 when they were
+  not. Starting the binary without a media driver does *not* check this — it exits on the expected
+  `DriverTimeoutException` before the first `UnsafeBuffer` is ever wrapped, so it passes either way.
+- **`e2e/run-e2e.sh` takes each binary path from an environment variable** (`ENGINE`, `GATEWAY`,
+  `MARKETDATA`, `DISCOVERY`), so the same run drives native images instead of the JVM start scripts.
+  The processes are identical on the wire; a native binary must pass it unchanged, with the same
+  report and fill counts. That is the check, not that it started.
 
 ## Architecture (from docs/Design.md)
 

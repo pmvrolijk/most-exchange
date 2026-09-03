@@ -134,7 +134,7 @@ the validation and `cumQty` reconstruction the gateway exists to perform.
 
 | Image | Contents | Runtime |
 | --- | --- | --- |
-| `Dockerfile.core` | engine, gateway, market-data, discovery | JVM by default, native opt-in |
+| `Dockerfile.core` | engine, gateway, market-data, discovery | JVM by default, native opt-in (see below) |
 | `Dockerfile.tools` | the `most` CLI, the media driver, the cluster host | always JVM |
 | `Dockerfile.control` | the Spring Boot control plane | JVM |
 | `Dockerfile.web` | the SPA, built with Vite and served by nginx | nginx |
@@ -147,19 +147,61 @@ channel configuration.
 is kept out of the engine process (Design.md §7); compiling it under the engine's constraints would
 be solving a problem it does not have.
 
-### The native target has never been run
+### The native target, and why it is still opt-in
 
 ```sh
 CORE_TARGET=native docker compose build engine
 ```
 
-`Dockerfile.core` has a GraalVM builder stage and every core module now registers a `nativeCompile`
-task, but **no native image of this system has ever been built**, in Docker or out of it. Expect
-reflection-config gaps around Aeron and Agrona the first time, and expect it to be slow. It is
-opt-in for that reason — the dev stack should not be blocked on an unproven build.
+The four native binaries are proven: they build with `./gradlew nativeCompile` and `e2e/run-e2e.sh`
+passes with all four substituted for their JVM start scripts, with report and fill counts identical
+to the JVM run (Handover.md §2a). **This builder stage now works too** — it produces a 141 MB
+`linux/amd64` image carrying all four binaries at `-march=x86-64-v3`.
+
+It stays opt-in for the ordinary reason: it costs minutes per build (9 minutes under emulation on an
+M-series Mac) where copying a host `installDist` costs seconds, and the dev stack should not pay that
+to iterate on Aeron channel configuration.
+
+Three defects in this stage were found by building it:
+
+* The GraalVM image is Oracle Linux minimal and ships no `findutils`, so the Gradle wrapper exited
+  with `xargs is not available` before Gradle started.
+* `settings.gradle.kts` includes `:tools` and `:control`, and Gradle refuses to configure a project
+  whose directory is missing — so both are now copied in, even though neither is built here.
+* `--platform linux/arm64` is not buildable at all: `ghcr.io/graalvm/native-image-community:21` ships
+  an aarch64 JVM that SIGILLs in `System.registerNatives` under Docker Desktop, and `java -version`
+  alone crashes it before anything in this project is reached. Tags 22 and 23 do the same; only 24
+  runs, and the build is pinned to a 21 toolchain. Build `--platform linux/amd64`, which is the
+  production target anyway.
+
+**A `x86-64-v3` image will not run on an emulated amd64 host**, which is what Docker Desktop on
+Apple Silicon gives you. The binary refuses to start with
+
+```
+The current machine does not support all of the following CPU features that are required by
+the image: [... AVX, AVX2, BMI1, BMI2, FMA]. Please rebuild the executable with an appropriate
+setting of the -march option.
+```
+
+That is the failure Design.md §7 predicts, caught cleanly rather than as the SIGILL the doc expects —
+GraalVM emits a CPU feature check at startup. It is a property of the emulator, not of the image: to
+smoke-test the container locally, rebuild with `--build-arg ENGINE_MARCH=x86-64` and keep `x86-64-v3`
+for anything that ships. On that baseline image all four binaries start, validate their config and
+print the same `fingerprint=3e04cf2b9902f08a` as the JVM build.
+
+**Verify an image you cannot run** — which is the normal case for a `x86-64-v3` build — with
+
+```sh
+docker run --rm <image> grep -c 'jdk.internal.misc.Unsafe' /opt/most/bin/matching-engine
+```
+
+3 is correct; **0 means the `--add-exports` flags did not take** and every binary in the image will
+start, print its fingerprint, and then die on its first `UnsafeBuffer`. Starting the binary without a
+media driver does not catch this: it exits on the expected `DriverTimeoutException` first, and passes
+either way.
 
 `ENGINE_MARCH` is pinned to `x86-64-v3` rather than `native`: a container image is by definition a
-binary built somewhere else, and a `-march=native` build SIGILLs when the CPU differs.
+binary built somewhere else, and a `-march=native` build fails on a CPU that differs.
 
 ## What is dev-only
 

@@ -49,11 +49,28 @@ that is easy to mistake for a code problem.
 ## Native image
 
 ```sh
-./gradlew :engine:nativeCompile
+./gradlew :engine:nativeCompile :gateway:nativeCompile \
+          :market-data:nativeCompile :discovery:nativeCompile
 ```
 
-Requires a GraalVM toolchain with `native-image` on the path. Two build knobs, both in
-`gradle.properties` and both deliberate (Design.md §7):
+Requires a GraalVM toolchain with `native-image` on the path (`JAVA_HOME`/`GRAALVM_HOME` pointing at
+it). All four core processes build, and `e2e/run-e2e.sh` passes with every one of them substituted
+for its JVM start script — same trade, same report and fill counts as the JVM run:
+
+```sh
+ENGINE=$PWD/engine/build/native/nativeCompile/matching-engine \
+GATEWAY=$PWD/gateway/build/native/nativeCompile/order-gateway \
+MARKETDATA=$PWD/market-data/build/native/nativeCompile/market-data \
+DISCOVERY=$PWD/discovery/build/native/nativeCompile/discovery \
+  ./e2e/run-e2e.sh
+```
+
+The `--add-exports` and class-initialization flags Aeron and Agrona need live in the **root**
+`build.gradle.kts`, not per module — they belong to the dependency stack, and four copies is how one
+drifts. Design.md §7 explains each one; the short version is that a missing export does not fail the
+build, it produces a binary that starts and then dies on its first `UnsafeBuffer`.
+
+Two build knobs, both in `gradle.properties` and both deliberate (Design.md §7):
 
 - **`engine.march`** — pin the target architecture explicitly. Production and CI must set this
   (`x86-64-v3` or whatever matches the deployment instance type); a `-march=native` build SIGILLs
@@ -139,8 +156,10 @@ route in or out, the five shard processes share one media driver the way process
 reaches it over UDP with a driver of its own. [`deploy/README.md`](deploy/README.md) explains that
 seam, why one media driver means one network identity, and what is dev-only.
 
-The core services are built JVM by default; the native target exists and is opt-in, because
-**no native image of this system has ever been built**.
+The core services are built JVM by default. The native target (`CORE_TARGET=native`) now builds —
+a `linux/amd64` image with all four binaries at `-march=x86-64-v3` — and stays opt-in because it
+costs minutes per build where copying a host `installDist` costs seconds. It has not yet traded on
+an x86-64 host; `deploy/README.md` says why and what is left.
 
 ## Control plane and admin UI, without Docker
 

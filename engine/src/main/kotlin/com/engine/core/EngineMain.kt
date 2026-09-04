@@ -2,7 +2,9 @@ package com.engine.core
 
 import io.aeron.cluster.service.ClusteredServiceContainer
 import io.aeron.exceptions.DriverTimeoutException
+import com.engine.reference.LatencyHistogram
 import org.agrona.concurrent.BusySpinIdleStrategy
+import org.agrona.concurrent.SystemNanoClock
 import org.agrona.concurrent.ShutdownSignalBarrier
 
 /**
@@ -38,6 +40,9 @@ fun main(args: Array<String>) {
     }
 
     val books = config.newBooks()
+    val metrics =
+        if (config.metricsEnabled) EngineMetrics(SystemNanoClock.INSTANCE, config.metricsStages)
+        else null
     val service = MatchingEngineService(
         shardId = config.shard.shardId,
         books = books,
@@ -46,6 +51,7 @@ fun main(args: Array<String>) {
         levelCount = config.maxLevelCount(),
         auctionMaxPasses = config.auctionMaxPasses,
         backpressureAlertThreshold = config.backpressureAlertThreshold,
+        metrics = metrics,
     )
 
     // Every node must boot with identical configuration or the books diverge on the first order.
@@ -86,7 +92,35 @@ fun main(args: Array<String>) {
 
     container.use {
         println("matching-engine: started, awaiting shutdown signal")
-        ShutdownSignalBarrier().use { barrier -> barrier.await() }
-        println("matching-engine: shutdown signal received")
+        ShutdownSignalBarrier().use { barrier ->
+            barrier.await()
+            // Everything below is INSIDE the barrier block on purpose: closing the barrier
+            // releases the signal and the process exits at once, so anything printed after it is
+            // racing the exit (CLAUDE.md). The single line that used to live out here won that
+            // race; writing a histogram file does not.
+            println(
+                "matching-engine: shutdown signal received. " +
+                    "undeliverableReports=${service.undeliverableReports} " +
+                    "droppedBookEvents=${service.droppedBookEvents} " +
+                    "backpressureStalls=${service.backpressureStalls} " +
+                    "rejectedDefinitions=${service.rejectedDefinitions} " +
+                    "auctionPassLimitBreaches=${service.auctionPassLimitBreaches}"
+            )
+            if (metrics != null) {
+                println("matching-engine: latency${metrics.summary()}")
+                config.metricsFile?.let { path ->
+                    val written = LatencyHistogram.writeAll(
+                        path,
+                        "matching-engine shard=${config.shard.shardId} -- values in microseconds",
+                        metrics.all(),
+                    )
+                    println(
+                        if (written != null) "matching-engine: histograms written to $written"
+                        else "matching-engine: no samples recorded, nothing written to $path"
+                    )
+                }
+            }
+            System.out.flush()
+        }
     }
 }

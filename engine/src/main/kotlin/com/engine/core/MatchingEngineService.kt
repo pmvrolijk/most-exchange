@@ -70,6 +70,11 @@ class MatchingEngineService(
     private val levelCount: Int = 65_536,
     private val auctionMaxPasses: Int = 64,
     private val backpressureAlertThreshold: Int = 1_000_000,
+    /**
+     * Hot-path timing, or null to compile it out of the path entirely. Null is the default and the
+     * production posture; see [EngineMetrics] for why an engine may read a clock at all.
+     */
+    private val metrics: EngineMetrics? = null,
 ) : ClusteredService {
 
     /**
@@ -184,30 +189,39 @@ class MatchingEngineService(
         val blockLength = headerDecoder.blockLength()
         val version = headerDecoder.version()
 
+        // The clock is read only when metrics are on, and what it produces never re-enters the
+        // state machine (see EngineMetrics). Nothing below this line branches on `started`.
+        val started = if (metrics != null) metrics.nanoTime() else 0L
+
         when (headerDecoder.templateId()) {
             NewOrderSingleDecoder.TEMPLATE_ID -> {
                 newOrderDecoder.wrap(buffer, body, blockLength, version)
                 onNewOrder(session)
+                metrics?.newOrder?.record(metrics.nanoTime() - started)
             }
 
             OrderCancelRequestDecoder.TEMPLATE_ID -> {
                 cancelDecoder.wrap(buffer, body, blockLength, version)
                 onCancel(session)
+                metrics?.cancel?.record(metrics.nanoTime() - started)
             }
 
             SessionTransitionDecoder.TEMPLATE_ID -> {
                 sessionTransitionDecoder.wrap(buffer, body, blockLength, version)
                 onSessionTransition()
+                metrics?.sessionTransition?.record(metrics.nanoTime() - started)
             }
 
             PurgeExpiredOrdersDecoder.TEMPLATE_ID -> {
                 purgeDecoder.wrap(buffer, body, blockLength, version)
                 onPurge()
+                metrics?.purge?.record(metrics.nanoTime() - started)
             }
 
             SecurityDefinitionDecoder.TEMPLATE_ID -> {
                 securityDefinitionDecoder.wrap(buffer, body, blockLength, version)
                 onSecurityDefinition()
+                metrics?.securityDefinition?.record(metrics.nanoTime() - started)
             }
 
             else -> Unit // Unknown template: ignore rather than throw. See the class KDoc.
@@ -215,6 +229,11 @@ class MatchingEngineService(
     }
 
     private fun onNewOrder(session: ClientSession) {
+        // Stage timing. Every exit below records `admit`, so admit + match + settle account for
+        // the whole of this method on every path — a rejected order is admit only, an order booked
+        // outside continuous trading is admit + settle. Timestamps, never state (see EngineMetrics).
+        val stages = metrics != null && metrics.stages
+        val stageStart = if (stages) metrics.nanoTime() else 0L
         val participantId = newOrderDecoder.participantId()
         val clOrdId = newOrderDecoder.clOrdId()
         val price = newOrderDecoder.price()
@@ -230,6 +249,7 @@ class MatchingEngineService(
         val bookIndex = indexOfSecurity(securityId)
         if (bookIndex < 0) {
             reject(participantId, clOrdId, securityId, side, price, RejectReason.UNKNOWN_SECURITY)
+            if (stages) metrics.admit.record(metrics.nanoTime() - stageStart)
             return
         }
         val book = books[bookIndex]
@@ -237,6 +257,7 @@ class MatchingEngineService(
         val reason = validateNewOrder(book, qty, price, expireDate)
         if (reason != RejectReason.NONE) {
             reject(participantId, clOrdId, securityId, side, price, reason)
+            if (stages) metrics.admit.record(metrics.nanoTime() - stageStart)
             return
         }
 
@@ -248,10 +269,15 @@ class MatchingEngineService(
             price = price, lastQty = 0L, leavesQty = qty, rejectReason = RejectReason.NONE,
         )
 
+        val admitted = if (stages) metrics.nanoTime() else 0L
+        if (stages) metrics.admit.record(admitted - stageStart)
+
         if (book.phase != Phase.CONTINUOUS) {
             // Booked in every phase except CLOSED; only matching is gated (Design.md §4.1).
             book.book(orderId, participantId, smpId, clOrdId, price, qty, expireDate, side, smpStrategy)
             publishOrderAdded(securityId, orderId, price, qty, side)
+            // No matching happened, so this booking is the whole of the settle stage.
+            if (stages) metrics.settle.record(metrics.nanoTime() - admitted)
             return
         }
 
@@ -304,6 +330,9 @@ class MatchingEngineService(
             },
         )
 
+        val matched = if (stages) metrics.nanoTime() else 0L
+        if (stages) metrics.match.record(matched - admitted)
+
         when (matchOutcome.status) {
             MatchStatus.COMPLETE -> if (remaining > 0L) {
                 book.book(
@@ -330,6 +359,8 @@ class MatchingEngineService(
 
             else -> Unit
         }
+
+        if (stages) metrics.settle.record(metrics.nanoTime() - matched)
     }
 
     /** Validation order follows Design.md §6; the static collar precedes the ladder backstop. */

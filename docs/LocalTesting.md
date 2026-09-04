@@ -508,6 +508,60 @@ Use `--seed` to repeat a run exactly, `--histogram FILE` to write the distributi
 `--rate` instead of `--delay-us` when it reads better. `--delay-us 0` sends unpaced, which finds the
 drop-off point quickly but has no schedule, so it reports no response time.
 
+### 9a. Splitting the round trip by stage
+
+`most load` measures the whole client round trip and nothing smaller, so a p50 of 55 µs cannot tell
+you whether the engine is slow or the plumbing is. The engine and gateway can time their own hot
+paths (Design.md §7), and one script drives the whole thing:
+
+```sh
+./gradlew installDist
+./e2e/run-attribution.sh                 # 2M orders at 100k/s, then subtracts
+ORDERS=500000 DELAY_US=20 ./e2e/run-attribution.sh   # smaller and slower
+STAGES=false ./e2e/run-attribution.sh    # boundary timing only, ~1% instrument cost
+```
+
+It prints each process's percentiles and then the subtraction:
+
+```
+== attribution at the median
+  client round trip            55.4 us
+  gateway inbound               0.2 us
+  engine (whole message)        0.4 us
+  gateway outbound              0.2 us
+  ------------------------------------
+  in this shard's processes      0.8 us  (1.4%)
+  everything else              54.6 us  (98.6%)
+```
+
+**That is the headline: the exchange's own code is 1.4% of a round trip.** The other 98.6% is Raft
+consensus, the archive's disk write, the IPC hops and poller wake-ups — the cost of being a
+replicated log, not idle time. It is also why the throughput knee in the sweep above is where it is:
+tuning the matching engine would move almost none of it.
+
+To do this by hand instead — against a stack you already have running from §2 — put these in the
+engine and gateway property files before starting them, then stop the processes normally (§10) and
+read the summaries:
+
+```ini
+engine.metrics=true
+engine.metrics.stages=true
+engine.metrics.file=/tmp/engine-latency.hgrm
+
+gateway.metrics=true
+gateway.metrics.file=/tmp/gateway-latency.hgrm
+```
+
+The summaries appear **only on an orderly shutdown**, so use `SIGTERM` and not `kill -9`. The
+`.hgrm` files are the format `most load --histogram-file` writes, so a run recorded before a change
+to the core and one recorded after can be compared directly — which is the point of writing them at
+all.
+
+Two things to keep in mind when reading the numbers. The clock read is inside them: the summary
+prints its own measured cost (~10 ns here), which is ~1% of a 0.42 µs figure with boundary timing
+and ~5% with stages. And on the JVM the tail is the garbage collector — a p99.9 in the tens of
+microseconds and millisecond maxima are collection pauses, not matching.
+
 ---
 
 ## 10. Shut down

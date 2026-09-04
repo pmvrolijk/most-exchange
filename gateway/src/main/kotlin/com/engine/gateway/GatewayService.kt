@@ -65,6 +65,8 @@ class GatewayService(
     shardSecurityIds: IntArray,
     private val sink: GatewaySink,
     private val state: OrderStateStore = OrderStateStore(),
+    /** Hot-path timing, or null to keep the clock out of the path entirely. */
+    private val metrics: GatewayMetrics? = null,
 ) {
     private val securityIds = shardSecurityIds.copyOf()
 
@@ -109,7 +111,11 @@ class GatewayService(
         val blockLength = header.blockLength()
         val version = header.version()
 
-        return when (header.templateId()) {
+        val started = if (metrics != null) metrics.nanoTime() else 0L
+        // Measured on every outcome including RETRY: a fragment left unconsumed under cluster
+        // backpressure still cost this process the time, and dropping those samples would make the
+        // leg look fastest exactly when the cluster is struggling.
+        val action = when (header.templateId()) {
             NewOrderSingleDecoder.TEMPLATE_ID -> {
                 newOrder.wrap(buffer, body, blockLength, version)
                 onNewOrder(buffer, offset, length)
@@ -132,6 +138,8 @@ class GatewayService(
                 }
             }
         }
+        metrics?.inbound?.record(metrics.nanoTime() - started)
+        return action
     }
 
     private fun onNewOrder(
@@ -232,6 +240,9 @@ class GatewayService(
         if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
         header.wrap(buffer, offset)
         if (header.templateId() != ExecutionReportDecoder.TEMPLATE_ID) return
+        // Started after the template check, so a foreign fragment is not counted as a report the
+        // gateway handled quickly.
+        val started = if (metrics != null) metrics.nanoTime() else 0L
         execReport.wrap(
             buffer,
             offset + MessageHeaderDecoder.ENCODED_LENGTH,
@@ -275,6 +286,7 @@ class GatewayService(
         )
 
         if (isTerminal(execType, leavesQty)) state.release(exchangeOrderId)
+        metrics?.outbound?.record(metrics.nanoTime() - started)
     }
 
     /** Terminal states free the order's state; anything else may still see further fills. */

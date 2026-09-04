@@ -1,5 +1,6 @@
 package com.engine.core
 
+import org.agrona.concurrent.SystemNanoClock
 import java.lang.management.ManagementFactory
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -156,5 +157,41 @@ class AllocationTest {
             driver.purge(Alloc.TRADING_DATE)
         }
         assertEquals(0, driver.book.restingOrderCount(), "the purge must clear every expired order")
+    }
+
+    /**
+     * Instrumentation that allocates would be worse than none: it would cost the zero-allocation
+     * property on exactly the runs being measured, so every number it produced would describe a
+     * process behaving differently from the one that ships.
+     *
+     * `LatencyHistogram` writes into a `long[]` sized at construction with auto-resize off, which
+     * is the setting that would otherwise allocate on a large sample. This is what checks it.
+     */
+    @Test
+    fun `metrics allocate nothing when enabled`() {
+        val driver = Driver(metrics = EngineMetrics(SystemNanoClock.INSTANCE, stages = false))
+        var clOrdId = 0L
+
+        assertNoSteadyStateAllocation("matching with metrics on", opsPerRound = 2) {
+            driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE, 1L)
+            driver.newOrder(2L, clOrdId++, Side.SELL, Alloc.PRICE, 1L)
+        }
+        assertEquals(0, driver.book.restingOrderCount())
+    }
+
+    /** The same, with the admit/match/settle partition on: four clock reads and three records. */
+    @Test
+    fun `stage metrics allocate nothing when enabled`() {
+        val metrics = EngineMetrics(SystemNanoClock.INSTANCE, stages = true)
+        val driver = Driver(metrics = metrics)
+        var clOrdId = 0L
+
+        assertNoSteadyStateAllocation("matching with stage metrics on", opsPerRound = 2) {
+            driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE, 1L)
+            driver.newOrder(2L, clOrdId++, Side.SELL, Alloc.PRICE, 1L)
+        }
+        assertEquals(0, driver.book.restingOrderCount())
+        assertTrue(metrics.admit.count > 0, "sanity: the stage histograms actually recorded")
+        assertTrue(metrics.match.count > 0)
     }
 }

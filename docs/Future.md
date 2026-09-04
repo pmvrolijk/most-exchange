@@ -1,8 +1,10 @@
 # Roadmap
 
 ## Near term
-- [ ] Metrics — `most load` measures the client round trip and throughput; still no instrumentation
-      inside the gateway or engine, so a latency cannot yet be split by stage
+- [x] Metrics — the engine and gateway time their own hot paths, off by default and on in the dev
+      stack; `e2e/run-attribution.sh` splits a client round trip into gateway, engine and
+      everything else. First result: the engine owns 0.42 µs of a 55 µs round trip, and Design.md
+      §2's 0.5 µs estimate holds (Design.md §2 "Measured", §7 "Instrumentation")
 - [x] Referential data and topology in Postgres — the `control` module authors them and publishes
       the shard security files and discovery registry each process boots from (docs/ControlPlane.md)
 - [x] Single backend control plane (rest) — CRUD for shards, securities and participants, plus

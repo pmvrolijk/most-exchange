@@ -1,5 +1,6 @@
 package com.engine.gateway
 
+import com.engine.reference.LatencyHistogram
 import com.engine.reference.ShardSpec
 import io.aeron.Aeron
 import io.aeron.Publication
@@ -10,6 +11,7 @@ import io.aeron.logbuffer.ControlledFragmentHandler
 import org.agrona.DirectBuffer
 import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.ShutdownSignalBarrier
+import org.agrona.concurrent.SystemNanoClock
 import java.io.File
 import java.util.Properties
 
@@ -132,7 +134,8 @@ fun main(args: Array<String>) {
                     else sentToClient++
                 }
             }
-            service = GatewayService(config.shard.securityIds, sink)
+            val metrics = if (config.metricsEnabled) GatewayMetrics(SystemNanoClock.INSTANCE) else null
+            service = GatewayService(config.shard.securityIds, sink, metrics = metrics)
 
             // Controlled, so a message the cluster cannot take right now is left in the
             // subscription rather than consumed and lost. COMMIT rather than CONTINUE on the
@@ -191,6 +194,20 @@ fun main(args: Array<String>) {
                         "undeliverableCommands=${service.undeliverableCommands} " +
                         "untrackedReports=${service.untrackedReports}"
                 )
+                metrics?.let { m ->
+                    println("gateway: latency${m.summary()}")
+                    config.metricsFile?.let { path ->
+                        val written = LatencyHistogram.writeAll(
+                            path,
+                            "gateway shard=${config.shard.shardId} -- values in microseconds",
+                            m.all(),
+                        )
+                        println(
+                            if (written != null) "gateway: histograms written to $written"
+                            else "gateway: no samples recorded, nothing written to $path"
+                        )
+                    }
+                }
                 System.out.flush()
             }
             worker.join(SHUTDOWN_TIMEOUT_MS)
@@ -215,9 +232,15 @@ data class GatewayConfig(
     val clientInboundStreamId: Int,
     val clientOutboundChannel: String,
     val clientOutboundStreamId: Int,
+    /** Hot-path timing: two clock reads per message on each leg. Off unless asked for. */
+    val metricsEnabled: Boolean = false,
+    /** Where to write percentile distributions at shutdown, for diffing against a later run. */
+    val metricsFile: String? = null,
 ) {
     companion object {
         const val SECURITIES_FILE = "gateway.securitiesFile"
+        const val METRICS_ENABLED = "gateway.metrics"
+        const val METRICS_FILE = "gateway.metrics.file"
 
         fun from(properties: Properties, shard: ShardSpec): GatewayConfig = GatewayConfig(
             shard = shard,
@@ -234,6 +257,8 @@ data class GatewayConfig(
                 ?: "aeron:ipc",
             clientOutboundStreamId =
                 properties.getProperty("gateway.client.outbound.streamId")?.toInt() ?: 21,
+            metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
+            metricsFile = properties.getProperty(METRICS_FILE),
         )
 
         fun load(path: String?): GatewayConfig {

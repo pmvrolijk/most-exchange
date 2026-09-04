@@ -118,6 +118,8 @@ internal class Driver(
     aeron: Aeron? = null,
     bookEventChannel: String = "aeron:ipc",
     bookEventStreamId: Int = 12,
+    /** Hot-path timing, exactly as a node would run it. Null is the production default. */
+    metrics: EngineMetrics? = null,
 ) {
     val book = OrderBook(
         securityId = Alloc.SECURITY_ID,
@@ -135,6 +137,7 @@ internal class Driver(
         bookEventChannel = bookEventChannel,
         bookEventStreamId = bookEventStreamId,
         levelCount = Alloc.LEVELS,
+        metrics = metrics,
     )
     private val useRealAeron = aeron != null
 

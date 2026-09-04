@@ -354,6 +354,26 @@ actually exists before designing around it.
 **Prices and quantities** are fixed-point `int64` with 8 implied decimals. Never introduce floating
 point into pricing or matching arithmetic.
 
+**The engine and gateway time their own hot paths, and the engine reads `nanoTime` to do it.**
+That is allowed against §1's ban because the ban is on time *influencing replicated state*, not on
+observing it. The rule, and the test for any probe added later: **enabling metrics on one node and
+not another must be incapable of changing the log, the books, or a snapshot.** It holds only while
+the histograms stay write-only — never read by a branch, never snapshotted, never on a feed. Metrics
+are therefore excluded from `EngineConfig.fingerprint()` on purpose (they are node-local), and
+`MetricsDeterminismTest` compares an instrumented engine against an uninstrumented one report for
+report. Recording allocates nothing, and `AllocationTest` covers the instrumented path — instrumentation
+that allocated would break the zero-allocation property on exactly the runs being measured.
+`engine.metrics` / `engine.metrics.stages` / `gateway.metrics`, off by default, on in `deploy/` and
+`e2e/`. Summaries print at shutdown, so they need an **orderly** one: in `EngineMain` the prints must
+stay *inside* the `ShutdownSignalBarrier` block, because closing it releases the signal and the
+process exits at once.
+
+**`e2e/run-attribution.sh` splits a round trip by stage.** First result: the gateway and engine own
+**0.8 µs of a 55 µs** round trip (1.4%); the rest is consensus, the archive write and the wire. The
+engine's whole-message p50 of 0.42 µs is inside Design.md §2's 0.5 µs estimate, which had never been
+checked against a running binary. Re-run it either side of a change to the core; the `.hgrm` files
+exist to be diffed.
+
 **Measure with `most load`, and read both latencies.** It reports *service time* (from the actual
 send) and *response time* (from the scheduled send); quoting only the first is coordinated omission
 and hides exactly the queueing that appears at the rate one is trying to find. `pacing lateness` says

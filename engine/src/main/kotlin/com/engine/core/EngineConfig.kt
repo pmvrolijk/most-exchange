@@ -24,6 +24,16 @@ data class EngineConfig(
     val bookEventStreamId: Int,
     val auctionMaxPasses: Int,
     val backpressureAlertThreshold: Int,
+    /**
+     * Hot-path timing. Off by default: it costs two clock reads per message, and an engine that
+     * reads a clock at all needs a deliberate decision behind it (see [EngineMetrics]). The dev
+     * stack and `e2e/` turn it on; a production node opts in.
+     */
+    val metricsEnabled: Boolean = false,
+    /** Adds the admit/match/settle partition of a new order. Two more clock reads. */
+    val metricsStages: Boolean = false,
+    /** Where to write the percentile distributions at shutdown, for diffing against a later run. */
+    val metricsFile: String? = null,
 ) {
     init {
         require(auctionMaxPasses > 0) { "auctionMaxPasses must be positive" }
@@ -44,7 +54,14 @@ data class EngineConfig(
         )
     }
 
-    /** Every node and every process in the shard must print the same value. */
+    /**
+     * Every node and every process in the shard must print the same value.
+     *
+     * Metrics settings are deliberately absent from it. They are node-local by design — enabling
+     * them on one node and not another must be incapable of changing the log (see [EngineMetrics])
+     * — so folding them in would report a mismatch between nodes that agree on everything that
+     * matters.
+     */
     fun fingerprint(): String = shard.fingerprint()
 
     companion object {
@@ -56,6 +73,9 @@ data class EngineConfig(
         const val BOOK_EVENT_STREAM_ID = "engine.bookEvent.streamId"
         const val AUCTION_MAX_PASSES = "engine.auction.maxPasses"
         const val BACKPRESSURE_ALERT_THRESHOLD = "engine.backpressure.alertThreshold"
+        const val METRICS_ENABLED = "engine.metrics"
+        const val METRICS_STAGES = "engine.metrics.stages"
+        const val METRICS_FILE = "engine.metrics.file"
 
         fun from(properties: Properties, shard: ShardSpec): EngineConfig = EngineConfig(
             shard = shard,
@@ -67,6 +87,9 @@ data class EngineConfig(
             auctionMaxPasses = properties.getProperty(AUCTION_MAX_PASSES)?.toInt() ?: 64,
             backpressureAlertThreshold =
                 properties.getProperty(BACKPRESSURE_ALERT_THRESHOLD)?.toInt() ?: 1_000_000,
+            metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
+            metricsStages = properties.getProperty(METRICS_STAGES).toBoolean(),
+            metricsFile = properties.getProperty(METRICS_FILE),
         )
 
         /** Loads [path] if given, then lets `engine.*` system properties override individual keys. */

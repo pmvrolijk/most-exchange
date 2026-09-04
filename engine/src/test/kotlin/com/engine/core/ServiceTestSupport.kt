@@ -150,6 +150,7 @@ class Harness(
     val books: Array<OrderBook>,
     levelCount: Int = 1024,
     auctionMaxPasses: Int = 64,
+    metrics: EngineMetrics? = null,
 ) {
     val session = FakeSession(SESSION_ID)
     private val cluster = FakeCluster(mapOf(SESSION_ID to session))
@@ -160,6 +161,7 @@ class Harness(
         bookEventStreamId = 12,
         levelCount = levelCount,
         auctionMaxPasses = auctionMaxPasses,
+        metrics = metrics,
     )
 
     private val buffer = UnsafeBuffer(ByteArray(4096))

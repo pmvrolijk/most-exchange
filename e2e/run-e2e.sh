@@ -73,6 +73,9 @@ engine.aeronDir=$AERON_DIR
 engine.clusterDir=$RUN/cluster-host/cluster
 engine.bookEvent.channel=aeron:ipc
 engine.bookEvent.streamId=12
+engine.metrics=true
+engine.metrics.stages=true
+engine.metrics.file=$RUN/engine-latency.hgrm
 EOF
 
 cat > "$RUN/gateway.properties" <<EOF
@@ -85,6 +88,8 @@ gateway.client.inbound.channel=aeron:ipc
 gateway.client.inbound.streamId=20
 gateway.client.outbound.channel=aeron:ipc
 gateway.client.outbound.streamId=21
+gateway.metrics=true
+gateway.metrics.file=$RUN/gateway-latency.hgrm
 EOF
 
 cat > "$RUN/market-data.properties" <<EOF
@@ -221,11 +226,30 @@ grep -q "REJECTED" "$RUN/load.out" && fail "the load was rejected -- band or pha
 grep -qE "ack  service .*p50=" "$RUN/load.out" || fail "no latency percentiles reported"
 
 echo
-echo "== 9. no process died"
+echo "== 9. the stage timings came back"
+# The processes only print their latency summaries on an orderly shutdown, so this asks for one
+# and then reads it. It is also the only check in this script that the instrumentation is wired at
+# all: a metrics block that silently records nothing looks exactly like a fast engine.
+kill -TERM "${PIDS[1]}" "${PIDS[2]}" 2>/dev/null
+for _ in $(seq 1 40); do kill -0 "${PIDS[1]}" 2>/dev/null || break; sleep 0.25; done
+sleep 1
+grep -A12 "matching-engine: latency" "$LOGS/engine.log" | sed 's/^/  /'
+grep -A4 "gateway: latency" "$LOGS/gateway.log" | sed 's/^/  /'
+grep -q "matching-engine: latency" "$LOGS/engine.log" || fail "engine reported no latency summary"
+grep -qE "newOrder +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no newOrder samples"
+grep -qE "newOrder.admit +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no admit samples"
+grep -qE "newOrder.settle +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no settle samples"
+grep -qE "inbound +n=[1-9]" "$LOGS/gateway.log" || fail "gateway recorded no inbound samples"
+[ -s "$RUN/engine-latency.hgrm" ] || fail "engine wrote no histogram file"
+[ -s "$RUN/gateway-latency.hgrm" ] || fail "gateway wrote no histogram file"
+echo "  histograms: $RUN/engine-latency.hgrm, $RUN/gateway-latency.hgrm"
+
+echo
+echo "== 10. no process died"
 for name in cluster engine gateway market-data discovery; do
   grep -qiE "exception|error" "$LOGS/$name.log" && {
     echo "--- suspicious output in $name.log ---"; grep -iE "exception|error" "$LOGS/$name.log" | head -5; }
 done
 
 echo
-echo "PASS -- all processes ran and a trade completed end to end"
+echo "PASS -- all processes ran, a trade completed end to end, and the stages were measured"

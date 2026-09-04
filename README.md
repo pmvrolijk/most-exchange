@@ -119,6 +119,35 @@ All three are validated by mutation, not trust. Removing `inline` from `OrderBoo
 `offerToSnapshot` or `publishBookEvent` compiles cleanly and silently boxes a callback's captured
 state; each is caught by the test covering its path and by no other.
 
+## Where the latency goes
+
+`most load` measures a client round trip and nothing smaller. The engine and gateway can time their
+own hot paths (Design.md §7), and one script drives the load and does the subtraction:
+
+```sh
+./gradlew installDist && ./e2e/run-attribution.sh
+```
+
+```
+  client round trip            55.4 us
+  gateway inbound               0.2 us
+  engine (whole message)        0.4 us
+  gateway outbound              0.2 us
+  ------------------------------------
+  in this shard's processes      0.8 us  (1.4%)
+  everything else              54.6 us  (98.6%)
+```
+
+The exchange's own code is 1.4% of the round trip; the rest is Raft consensus, the archive's disk
+write and the IPC hops — the cost of being a replicated log. The engine's whole-message p50 of
+0.42 µs is inside the 0.5 µs estimate Design.md §2 has carried unverified since the beginning, and
+`engine.metrics.stages=true` splits it further into admit / match / settle.
+
+It is off by default and on in the dev stack. The engine reading a clock at all is a deliberate
+exception to the determinism rules, bounded by one invariant — enabling metrics on one node and not
+another must be incapable of changing the log — which `MetricsDeterminismTest` checks rather than
+asserts.
+
 ## End-to-end test
 
 ```sh

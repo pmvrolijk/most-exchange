@@ -180,6 +180,34 @@ This lands near **0.5 µs per order**, leaving roughly 2x headroom at the 10-sec
 adding shards, which is safe because no cross-instrument matching is specified — books are fully
 independent.
 
+#### Measured
+
+The estimate above stood unverified for the life of the project. It is now instrumented (§7), and
+`e2e/run-attribution.sh` reproduces this: one security, single node, IPC, JVM on Serial GC,
+2,000,000 orders at 100k/s with half filling on arrival.
+
+| | p50 | p90 | p99 |
+| --- | --- | --- | --- |
+| `onSessionMessage`, whole new order | **0.42 µs** | 0.79 µs | 2.17 µs |
+| ├ admit — decode, validate, collar, `NEW` report | 0.08 µs | 0.33 µs | 0.38 µs |
+| ├ match — `matchAggressive`, its fills and their reports | 0.04 µs | 0.46 µs | 1.25 µs |
+| └ settle — book the remainder, publish `OrderAdded` | 0.17 µs | 0.29 µs | 0.42 µs |
+
+**The 0.5 µs estimate holds.** A whole new order costs 0.42 µs at the median, inside the budget, and
+the shape is roughly as §2 guessed — though `settle` is dearer than `match`, which is the reverse of
+what the table implies, because half of these orders rest rather than trade and resting is what
+`settle` does.
+
+The stages sum to 0.29 µs against a whole-message 0.42 µs. The difference is real work the stages do
+not cover — the header decode and template dispatch happen before `onNewOrder` is entered — plus the
+two extra clock reads that measuring three stages costs. **The instrument is inside its own
+measurement**: a clock read costs ~10 ns here, so boundary timing adds ~1% to a 0.42 µs figure and
+stage timing about 5%. That is also why §2's finer rows are not timed individually; a 2 ns book
+lookup cannot be measured with a 10 ns clock.
+
+Read all of it as one security on one node, and remember the tail is a JVM on Serial GC: the p99.9
+of 10.96 µs and the millisecond maxima are collection pauses, not matching.
+
 ### Memory Footprint (per shard)
 
 | Structure | Size |
@@ -1869,6 +1897,45 @@ and the switch is one line once they are done.
 Run the Aeron `MediaDriver` as a **separate process** (the engine attaches via the CnC file). The
 driver allocates; keeping it out of the engine binary means the engine can credibly claim a
 zero-allocation steady state.
+
+### Instrumentation
+
+Both `engine` and `gateway` can time their own hot paths. Off by default in code, on in the dev
+stack and in `e2e/`; a production node opts in.
+
+```ini
+engine.metrics=true          # time each message: 2 clock reads
+engine.metrics.stages=true   # + admit/match/settle per order: 2 more
+engine.metrics.file=...      # percentile distributions at shutdown, for diffing runs
+
+gateway.metrics=true         # time both legs
+gateway.metrics.file=...
+```
+
+Percentile summaries print at shutdown beside the existing counters, which means an **orderly**
+shutdown: in a native image that needs `--install-exit-handlers`, and in `EngineMain` it needs the
+prints to live *inside* the `ShutdownSignalBarrier` block, since closing the barrier releases the
+signal and the process exits at once. The one-line counter print that used to sit outside it won
+that race; writing a histogram file does not.
+
+**The engine reads `System.nanoTime()`, which §1 bans.** That ban is on time *influencing replicated
+state*, not on observing it — a decision taken from a node-local clock is a decision two nodes can
+take differently. The rule this instrumentation obeys, and the test for any probe added later:
+
+> **Enabling metrics on one node and not another must be incapable of changing the log, the books,
+> or a snapshot.**
+
+It holds only while the histograms are write-only as far as the state machine is concerned: never
+read by a branch, never snapshotted, never on a feed a consumer acts on. Metrics settings are
+therefore deliberately excluded from `EngineConfig.fingerprint()` — they are node-local, and an
+operator may reasonably turn them on for one node of a cluster to diagnose it. `MetricsDeterminismTest`
+drives two engines through an identical command sequence, one instrumented and one not, and compares
+every execution report, every resting order and both sequence counters. It is the check; the
+paragraph above is only the argument.
+
+Recording allocates nothing (`engine`'s `AllocationTest` covers the instrumented path too), because
+instrumentation that allocated would cost the zero-allocation property on exactly the runs being
+measured, and every number it produced would then describe a process that does not ship.
 
 ### Process Layout
 

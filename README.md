@@ -90,6 +90,35 @@ book-event publication, and snapshot/restore. 76 tests.
 
 All eight modules are implemented. 314 tests, plus an end-to-end script.
 
+## Allocation and the Epsilon soak
+
+The engine claims no allocation on its hot path (Design.md §3.3), and under `--gc=epsilon` that
+claim is load-bearing rather than aspirational. Two measurements keep it honest, and both run
+against the shipped code:
+
+```sh
+./gradlew :engine:test --tests '*AllocationTest*'      # per-call, fakes only
+./gradlew :engine:test --tests '*AeronAllocationTest*' # book events and snapshots, real driver
+./e2e/run-epsilon-soak.sh                              # whole system, real cluster and archive
+```
+
+`AllocationTest` attributes precisely: it drives the service through allocation-free fakes and reads
+the thread's allocation counter across eight windows, requiring a strict majority to read exactly
+zero and under one byte per operation overall. A steady-state cost appears in every window, so this
+cannot admit a rate while still absorbing the late JIT blip that lands in one or two.
+
+`AeronAllocationTest` reaches the two paths a fake cannot — publishing book events, and
+`onTakeSnapshot` walking 2,000 resting orders — by launching an embedded media driver, because
+`ExclusivePublication` is a `final` class with no interface to implement.
+
+`run-epsilon-soak.sh` runs the Epsilon-built binary against a real media driver, cluster and archive
+twice at different order counts and reports the **slope**, so the ~95MB of pools allocated at startup
+cancels instead of swamping the figure. It currently reports **0 bytes per order across 1.9M orders**.
+
+All three are validated by mutation, not trust. Removing `inline` from `OrderBook.matchAggressive`,
+`offerToSnapshot` or `publishBookEvent` compiles cleanly and silently boxes a callback's captured
+state; each is caught by the test covering its path and by no other.
+
 ## End-to-end test
 
 ```sh

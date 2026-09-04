@@ -69,6 +69,14 @@ subprojects {
                     // nothing host-specific is baked into the image heap.
                     "--initialize-at-build-time=org.agrona.UnsafeApi",
                     "--initialize-at-build-time=kotlin.DeprecationLevel",
+                    // Without this a native image takes SIGTERM's default disposition and dies on
+                    // the spot: `ShutdownSignalBarrier` never releases, so the orderly shutdown
+                    // every one of these processes ends with -- closing the cluster service
+                    // container, the publications, the media driver attachment -- simply does not
+                    // run. The JVM start scripts have this behaviour for free, which is exactly
+                    // why its absence here is easy to miss: `e2e/run-e2e.sh` only checks that
+                    // nothing died *during* the run, so it passed all the way through.
+                    "--install-exit-handlers",
                 )
 
                 // Design.md §7: pin -march explicitly. A -march=native build SIGILLs when the

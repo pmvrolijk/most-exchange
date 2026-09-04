@@ -78,6 +78,29 @@ this; keep it that way or the tests validate a layout the cluster rejects.
   'jdk.internal.misc.Unsafe' <binary>` returns 0 when the exports were missing and 3 when they were
   not. Starting the binary without a media driver does *not* check this — it exits on the expected
   `DriverTimeoutException` before the first `UnsafeBuffer` is ever wrapped, so it passes either way.
+- **`--install-exit-handlers` is load-bearing in the native build.** Without it SIGTERM kills a
+  native image outright: `ShutdownSignalBarrier` never releases, the cluster service container is
+  never closed, and every process's shutdown counters (the gateway's `droppedToClient`,
+  market-data's `gaps`) are lost. The JVM start scripts get this for free, and `e2e/run-e2e.sh`
+  only checks nothing died *during* a run — so it passed throughout while this was broken.
+- **Zero allocation is proven, by three measurements that must all stay green.** `AllocationTest`
+  (fakes, fast) covers order entry, matching, cancel, reject, the uncross and the purge.
+  `AeronAllocationTest` launches an embedded media driver to reach the two paths a fake *cannot* —
+  book-event publication and `onTakeSnapshot` — because `ExclusivePublication` is `final` with no
+  interface. `e2e/run-epsilon-soak.sh` runs the real Epsilon binary against a real cluster.
+  - The criterion is **a strict majority of eight windows reading exactly zero**, plus under one
+    byte per operation overall. A rate produces *no* clean windows; a late JIT blip produces one or
+    two. **Do not widen this to make a failure go away** — if a workload is so light that a blip
+    dominates it, add rounds, not tolerance.
+  - The soak measures a **slope across two runs**, not a total: ~95MB of pools at startup would
+    otherwise swamp the per-order figure.
+  - All three are mutation-validated. Removing `inline` from `matchAggressive`, `offerToSnapshot`
+    or `publishBookEvent` compiles in silence — "warnings are errors" says nothing about it — and
+    each is caught by the test covering its path and no other. If you touch one of those keywords,
+    these tests are the only thing standing between you and Epsilon killing every node at once.
+  - `engine.useEpsilonGc` is still off, but no longer for want of a measured path: what is missing
+    is a CI to run the assertion in, and a soak measured in hours rather than seconds (the Aeron
+    client conductor shares this heap, and a per-duty-cycle allocation would be invisible in 20s).
 - **`e2e/run-e2e.sh` takes each binary path from an environment variable** (`ENGINE`, `GATEWAY`,
   `MARKETDATA`, `DISCOVERY`), so the same run drives native images instead of the JVM start scripts.
   The processes are identical on the wire; a native binary must pass it unchanged, with the same

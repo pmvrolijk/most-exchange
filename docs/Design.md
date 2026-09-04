@@ -1752,7 +1752,8 @@ Args = --no-fallback \
        -J--add-exports=java.base/sun.nio.ch=ALL-UNNAMED \
        --initialize-at-build-time=kotlin.DeprecationLevel \
        --initialize-at-build-time=org.agrona.UnsafeApi \
-       --initialize-at-run-time=io.aeron.driver.MediaDriver,org.agrona.concurrent.UnsafeBuffer
+       --initialize-at-run-time=io.aeron.driver.MediaDriver,org.agrona.concurrent.UnsafeBuffer \
+       --install-exit-handlers
 ```
 
 These live in the **root** `build.gradle.kts`, applied to every module that carries the native
@@ -1784,6 +1785,14 @@ initialized at build time". SVM substitutes `jdk.internal.misc.Unsafe` with its 
 nothing host-specific is baked into the image heap. Note this sits directly beside
 `--initialize-at-run-time=...UnsafeBuffer`: the buffer defers, the API holder cannot.
 
+**`--install-exit-handlers` is not optional here.** Without it a native image takes SIGTERM's
+default disposition and dies where it stands: `ShutdownSignalBarrier` never releases, so the orderly
+shutdown every one of these processes ends with — closing the cluster service container, the
+publications, the media driver attachment — does not run, and the counters each process prints on
+the way out (the gateway's `droppedToClient`, market-data's `gaps`) are lost with it. The JVM start
+scripts have this behaviour for free, which is why its absence in the native build is easy to miss:
+`e2e/run-e2e.sh` only checks that nothing died *during* the run, and passed throughout.
+
 **`-march` is pinned, not `native`.** A `native` build SIGILLs when the build host's CPU differs from
 production. Build in a container matching the production instance type.
 
@@ -1794,9 +1803,68 @@ benign, slow allocation leak into a hard crash, and — being deterministic — 
 node at the same log position. Sequence:
 
 1. Ship with Serial GC and a generously sized young generation.
-2. Prove zero steady-state allocation empirically under production-shaped load.
-3. Add an allocation assertion to CI so a regression fails the build, not the exchange.
-4. Then switch to `--gc=epsilon`.
+2. Prove zero steady-state allocation empirically under production-shaped load. **Done** — two
+   measurements, below.
+3. Add an allocation assertion to CI so a regression fails the build, not the exchange. **The
+   assertion exists** (`engine`'s `AllocationTest`, in the ordinary `./gradlew build`); the CI that
+   runs it does not yet.
+4. Then switch to `--gc=epsilon`. **Not yet** — see the gap at the end of this section.
+
+#### The two measurements
+
+`AllocationTest` measures precisely and attributes to a call. It drives `MatchingEngineService`
+through allocation-free fakes and reads `ThreadMXBean.getCurrentThreadAllocatedBytes` across eight
+successive windows, requiring a strict majority to read exactly zero and the total across all of
+them to stay under one byte per operation. The asymmetry is the point: a steady-state cost of even
+one byte per operation is tens of thousands of bytes per window, so it produces **no** clean windows
+at all — while a late JIT recompilation lands in one or two windows as a few hundred bytes and would
+otherwise read as a rate. Order entry, validation, continuous matching, partial fills, booking,
+cancellation, rejection, the opening uncross and the expiry purge all measure zero.
+
+`AeronAllocationTest` covers the two paths a fake cannot reach, because `ExclusivePublication` is a
+`final` class with no interface: **book-event publication** and **`onTakeSnapshot`**. It launches an
+embedded media driver and measures the shipped code writing real bytes through real `tryClaim` into
+a real term buffer, draining the streams on a separate thread so back-pressure does not become the
+thing being measured and the drainer's own allocation is not counted. Both measure zero — the
+snapshot at 2,000 resting orders per walk, which is the case where a per-order cost would be most
+visible and most expensive.
+
+`e2e/run-epsilon-soak.sh` measures the whole system, at the cost of precision. It runs the real
+Epsilon-built binary against a real media driver, a real Raft cluster and a real archive, twice, at
+two different order counts, and takes the **slope**: startup is identical in both runs and cancels,
+which matters because the order pool and id map are ~95MB before a single order arrives and would
+otherwise swamp any per-order figure. Result: **0 bytes per order across 1.9M orders**, and the
+resolution of SubstrateVM's summary bounds the true figure below 0.006 bytes/order.
+
+All of it was validated by mutation rather than trusted. Three `inline` keywords were removed in
+turn — from `OrderBook.matchAggressive`, from `offerToSnapshot`, and from `publishBookEvent` — each
+of which the compiler permits in silence, since "warnings are errors" has nothing to say about a
+function that is merely no longer inlined, and each of which then boxes the captured state of its
+callback. Every one is caught, by the test that covers its path and not by the others: 232 bytes an
+order on the match path, ~24 bytes per resting order on the snapshot walk, and 152 bytes an order in
+the soak. A measurement that has never been seen to fail is not a measurement.
+
+#### What is still not measured, and why Epsilon stays off
+
+Every steady-state path of the engine's own code is now covered, the snapshot walk included. Two
+things are not, and both are about **time** rather than about orders.
+
+The soak's slope is taken across runs of 1 second and 20 seconds. It therefore bounds allocation per
+order *and* per second over that range — a time-proportional leak would have landed in the 19-second
+difference and been misattributed to the extra orders, and it still came out at zero. But 20 seconds
+does not bound a trading day. The Aeron **client conductor** runs in this process on its own thread,
+and under Epsilon a heap is a heap: allocation by any thread counts. A conductor that allocated a
+little per duty cycle would be invisible here and fatal after some hours. A long-duration soak is
+what answers that, and it has not been run.
+
+Nor has **failover or log replay**: `loadSnapshot` on restore walks every order in the snapshot, and
+while it is a bounded one-off at startup, it has never been measured, and a follower catching up is
+not a state any of this exercises.
+
+So `engine.useEpsilonGc` stays `false`, but the reason has changed. It is no longer an unchecked
+path in the engine; it is that step 3 of this sequence — a CI that fails the build on a regression —
+does not exist yet, and that the evidence covers seconds rather than hours. Both are ordinary work,
+and the switch is one line once they are done.
 
 Run the Aeron `MediaDriver` as a **separate process** (the engine attaches via the CnC file). The
 driver allocates; keeping it out of the engine binary means the engine can credibly claim a

@@ -73,6 +73,23 @@ control:
     publishMs: ${CONTROL_DEPTH_PUBLISH_MS:250}
     maxLevels: ${CONTROL_DEPTH_MAX_LEVELS:25}
 
+  # The shard's CLUSTER ingress, which is the one thing the control plane does not reach through
+  # the gateway: a snapshot is a cluster admin request, not a message for the log. Deliberately
+  # here in this process's own configuration rather than in the database or the discovery
+  # broadcast -- a release carries topology, deployment stays per process, and keeping cluster
+  # ingress out of the directory is what stops an upstream adapter finding the cluster and
+  # skipping the gateway's validation.
+  #
+  # Aeron member-endpoint form, per shard: `0=host:port`, comma-separated across members so the
+  # client can find the leader. A shard with no entry simply cannot be snapshotted from here, and
+  # the API says so rather than failing obscurely.
+  # Set control.cluster.ingress.<shardId>, or CONTROL_CLUSTER_INGRESS_<shardId> in the environment.
+  # Not declared here: the keys are looked up per shard rather than bound as a map, so a shard needs
+  # no entry in this file to be configurable.
+  cluster:
+    ingressChannel: ${CONTROL_CLUSTER_INGRESS_CHANNEL:aeron:udp}
+    egressChannel: ${CONTROL_CLUSTER_EGRESS_CHANNEL:aeron:udp?endpoint=0.0.0.0:0}
+
   # Session scheduling. Every tick reconciles the phase the calendar says a shard should be in
   # against the phase L3 says it is in, and sends the difference -- so it is idempotent, recovers
   # by itself after an outage, and keeps no missed-timer state. It never reopens a halted security:

@@ -38,6 +38,7 @@ class Scheduler(
     private val topology: TopologyService,
     private val operations: OperationsService,
     private val link: ClusterLink,
+    private val clusterAdmin: ClusterAdmin,
     @Value("\${control.scheduler.enabled:true}") private val enabled: Boolean,
 ) {
     private val log = LoggerFactory.getLogger(Scheduler::class.java)
@@ -130,6 +131,34 @@ class Scheduler(
                     securities.zip(observedPhases).joinToString(", ") { "${it.first.symbol}=${it.second}" },
             )
         }
+        // A snapshot at the session close, once per trading date.
+        //
+        // The snapshot is the reason a restart is a restart rather than a rebuild from genesis, and
+        // nothing else in the system asks for one. Three conditions, each of which excludes a
+        // wrong moment rather than merely narrowing the right one:
+        //
+        //  * **after the day's last scheduled transition** -- "closed" before the open is a
+        //    different state from "closed" after the close, and only one of them has a day's
+        //    trading behind it worth not replaying;
+        //  * **observed closed, not merely expected** -- a snapshot taken before the close has
+        //    landed on the feed captures a market that is still open, which is the one image
+        //    nobody wants to restart from;
+        //  * **on a trading day** -- otherwise every weekend and holiday tick asks for one.
+        //
+        // A snapshot that could not be sent is retried on the next tick, because `hasRun` counts
+        // only sent rows. Same reasoning as the purge above: an unsent snapshot is not a snapshot.
+        val zoned = now.atZone(schedule.zone)
+        val closeTime = schedule.ordered.lastOrNull()?.at
+        val afterClose = closeTime != null && !zoned.toLocalTime().isBefore(closeTime)
+        if (schedule.isTradingDay(zoned.toLocalDate()) && afterClose &&
+            expectedName == CLOSED && observed == CLOSED &&
+            !schedules.hasRun(shardId, SNAPSHOT, tradingDate)
+        ) {
+            val result = clusterAdmin.snapshot(shardId)
+            actions += result
+            record(shardId, SNAPSHOT, null, tradingDate, result)
+        }
+
         if (observed == expectedName) {
             return ScheduleDecision(shardId, name, expectedName, observed, actions, null)
         }
@@ -216,6 +245,8 @@ class Scheduler(
     private companion object {
         const val SESSION = "session"
         const val PURGE = "purge"
+        const val SNAPSHOT = "snapshot"
         const val SKIPPED = "skipped"
+        val CLOSED = phaseName(Phase.CLOSED.value())
     }
 }

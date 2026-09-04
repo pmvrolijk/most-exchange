@@ -658,6 +658,52 @@ ladders and writes only **occupied** orders, never the whole 1M-slot pool; resto
 the same ladder order, which reproduces each level's FIFO exactly because booking appends at the
 tail.
 
+#### Restoring into changed geometry
+
+Geometry is fixed when a book is constructed (§8), so **reapplying it means restarting** — and the
+restore is therefore the only place in the system that sees both the state that existed and the
+shape it is being poured into. Schema version 2 puts the geometry into the snapshot for exactly
+that: `SnapshotEngineState` carries the shard id and `ShardSpec.fingerprint()` as its underlying
+64-bit hash, and `SnapshotBook` carries `priceFloor`, `tickSize`, `levelCount`, `maxOrders` and a
+per-book `restingOrderCount`.
+
+That last field is what makes the reconciliation single-pass. A book's header is written before its
+orders are walked, so the count has to be O(1) at that moment — which it is, since `OrderBook`
+already tracks it — and every decision about a security can then be taken at its header, before any
+of its orders have been booked.
+
+Matching fingerprints take the fast path. Otherwise, per security:
+
+| In the snapshot | In the booted `ShardSpec` | |
+| --- | --- | --- |
+| present, geometry identical | present | restore |
+| present, geometry differs | present | **refuse to start** |
+| present, `restingOrderCount > 0` | absent | **refuse to start** |
+| present, book empty | absent | dropped, with a line — this is how a security leaves a shard |
+| absent | present | a new empty book, with a line |
+
+Plus two backstops that refuse: an order whose price falls outside the booted ladder, and orders
+restored not matching the counts the snapshot claims (per book and in total). A version 1 snapshot
+carries no geometry, so it reconciles on security ids alone and refuses on a *removed* security
+rather than guessing whether its book was empty.
+
+**Refusing is the only safe outcome, and it has to be loud.** Dropping a book because its security
+is no longer listed destroys resting orders that clients believe are live. The failure it replaces
+was worse than a crash rather than better: `Image.poll` catches an exception from its fragment
+handler, reports it to the client error handler and advances the position regardless, so an order
+booked into a ladder that had moved under it was *silently dropped* and the book came back quietly
+wrong. Every node boots the same geometry and loads the same snapshot, so the decision is identical
+everywhere and "no node starts" is the correct outcome rather than a split brain. What this does
+**not** close is two nodes booting *different* geometry with no snapshot between them — that is
+still §8's fingerprint enforcement, and still open.
+
+**Nothing takes a snapshot unless something asks for one.** `most cluster snapshot` sends the admin
+request through consensus so every member snapshots at the same log position; `most cluster
+shutdown` snapshots and then stops, which SIGTERM does not; and the control plane's scheduler takes
+one at each session close, once per trading date, after the close has been *observed* on the feed.
+Unlike the four operator commands, this one is answered, so the control plane reports it as
+confirmed rather than merely sent.
+
 The engine emits a raw **book event stream**; it no longer publishes market data formats directly.
 The Market Data Process consumes stream 12 and derives L3 (per-order MBO), L2 (price-aggregated MBP)
 and L1 (BBO + last trade) feeds. This halves the engine's publication work and decouples the matching
@@ -768,7 +814,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="1"
+                   package="com.engine.sbe" id="1" version="2"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1108,12 +1154,26 @@ answers, and a consumer must not render the first when it means the second.
 
   <!-- ================= Snapshot (cluster-internal, never on the wire) ============ -->
 
-  <sbe:message name="SnapshotEngineState" id="30" blockLength="16">
+  <!-- Version 2 adds the geometry the snapshot was taken against. Without it a restore cannot tell
+       a security that was legitimately removed from the shard from one whose orders it is about to
+       drop on the floor, and it cannot tell a ladder it can restore into from one that will throw
+       an ArrayIndexOutOfBounds on every node at the same log position. The added fields carry
+       sinceVersion="2" so a version 1 snapshot still decodes; the restore then reconciles on
+       security ids alone and says so. -->
+  <sbe:message name="SnapshotEngineState" id="30" blockLength="32">
     <field name="nextExchangeOrderId" id="1" type="ExchangeOrderId"/>
     <field name="nextBookEventSeqNum" id="2" type="SeqNum"/>
+    <!-- ShardSpec.fingerprint() as its underlying 64-bit hash, never the hex string, and never a
+         second implementation of the hash. -->
+    <field name="shardFingerprint"    id="3" type="SeqNum"  offset="16" sinceVersion="2"/>
+    <field name="shardId"             id="4" type="ShardId" offset="24" sinceVersion="2"/>
   </sbe:message>
 
-  <sbe:message name="SnapshotBook" id="31" blockLength="40">
+  <!-- restingOrderCount is what makes the restore single-pass: the book header is written before
+       that book's orders are walked, so the count has to be O(1) at that moment (OrderBook tracks
+       it already). Every reconciliation decision can then be taken at the header, before a single
+       order has been booked. -->
+  <sbe:message name="SnapshotBook" id="31" blockLength="72">
     <field name="staticReference"   id="1" type="Price"/>
     <field name="dynamicReference"  id="2" type="Price"/>
     <field name="securityId"        id="3" type="SecurityId"/>
@@ -1121,6 +1181,11 @@ answers, and a consumer must not render the first when it means the second.
     <field name="staticCollarBps"   id="5" type="CollarBps"/>
     <field name="dynamicCollarBps"  id="6" type="CollarBps"/>
     <field name="phase"             id="7" type="Phase"/>
+    <field name="priceFloor"        id="8"  type="Price"      offset="40" sinceVersion="2"/>
+    <field name="tickSize"          id="9"  type="Price"      offset="48" sinceVersion="2"/>
+    <field name="levelCount"        id="10" type="LevelCount" offset="56" sinceVersion="2"/>
+    <field name="maxOrders"         id="11" type="OrderCount" offset="60" sinceVersion="2"/>
+    <field name="restingOrderCount" id="12" type="OrderCount" offset="64" sinceVersion="2"/>
   </sbe:message>
 
   <sbe:message name="SnapshotOrder" id="32" blockLength="64">
@@ -2254,6 +2319,33 @@ It found three defects that unit tests could not:
 * **Net resting depth** measured against production flow, to confirm the 1M order pool and set the
   capacity high-water mark.
 * **Order modify/replace:** currently unsupported (cancel/new only) — confirm this is intentional.
+* **Market data has no book after a snapshot recovery.** `MarketDataService` derives everything
+  from the book event stream, and a restored engine republishes nothing for the orders it restored,
+  so a market data process that restarts alongside the engine comes back empty and stays empty
+  until the next event on that security. The engine's state is correct and trades against restored
+  orders correctly; the derived feed simply has no way to learn it. Three shapes of fix, and the
+  choice is a real one: replay the book events for restored orders at the end of the restore (the
+  simplest, but it puts a burst of events with historical sequence numbers on the feed); let market
+  data ask the engine for an image (a request/response path that does not exist anywhere yet); or
+  have market data snapshot its own `DepthBook` alongside the engine's. Found by
+  `e2e/run-restart.sh`, which reports it rather than asserting it.
+* **Archive growth is unbounded once directories persist.** The recorded log now survives restarts,
+  which is the point, but nothing truncates it. Aeron 1.53's post-snapshot behaviour for the
+  consensus module log and the archive segments needs establishing before a retention procedure or
+  a volume size can be written down; this is deliberately not assumed here.
+* **`auctionMaxPasses` is in no fingerprint.** It bounds the SMP fixed point in `runUncross`, so two
+  nodes booted with different values can produce different uncross results from an identical log
+  while printing the same fingerprint — the exact class of silent divergence `fingerprint()` exists
+  to prevent. It cannot simply be folded into `ShardSpec.fingerprint()`: that hash is over shard
+  topology, is stored by the control plane, and appears in published releases, so changing it
+  invalidates every recorded value. It wants a separate engine-level fingerprint.
+* **The gateway's `origQty` does not survive its own restart.** `OrderStateStore` is three in-memory
+  maps with no persistence, and `GatewayService` substitutes `origQty = 0, cumQty = 0` for anything
+  it did not see — silently, and permanently, since `recordFill` early-returns for such an order so
+  it never re-heals. The engine cannot help: it does not store `origQty` and has no spare word to
+  (§3). The state has to be the gateway's own — an append-only memory-mapped journal replayed at
+  boot — and anything genuinely missing must be reported with an explicit unknown rather than a
+  confidently wrong zero. That substitution is worth fixing on its own, before any journal exists.
 * **`SecurityDefinition` geometry.** The message carries `priceFloor`, `tickSize` and `levelCount`,
   but the ladders are pre-allocated, so geometry is fixed when a book is constructed. The engine
   accepts references and collars and **rejects the whole definition** if the geometry disagrees, on

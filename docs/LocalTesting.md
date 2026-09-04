@@ -183,7 +183,7 @@ cd "$RUN"
 L="$RUN/logs"
 
 # 1. cluster host: media driver + archive + consensus module
-$MOST cluster --dir "$RUN/cluster-host" --aeron-dir "$RUN/aeron" > "$L/cluster.log" 2>&1 &
+$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$RUN/aeron" > "$L/cluster.log" 2>&1 &
 
 # wait for: "cluster: started, awaiting shutdown signal"
 
@@ -617,9 +617,50 @@ rm -rf "$RUN/aeron" "$RUN/cluster-host" "$RUN/logs"
 ```
 
 The properties and the security file can stay; they hold no runtime state. To start completely
-fresh, `rm -rf "$RUN"` and repeat from step 2. The cluster host also deletes its own directories on
-start unless you pass `--keep`, so a stale cluster state does not usually survive a restart on its
-own.
+fresh, `rm -rf "$RUN"` and repeat from step 2.
+
+**The cluster host now keeps its archive and cluster directory across a restart**, which is what
+makes the shard resumable — it wipes them only when you pass `--fresh`. So a stale cluster state
+*does* survive a restart, deliberately, and the walkthrough above passes `--fresh` for that reason.
+The Aeron directory is the exception and is always recreated: it holds memory-mapped IPC buffers
+rather than state, and keeping it would block the next start until the previous driver's liveness
+timeout expired.
+
+### Snapshots, and restarting with state
+
+Nothing takes a snapshot unless you ask, and without a recent one a restart replays the log from the
+last one — which after a session's trading is the difference between seconds and a very long time.
+
+```sh
+$MOST cluster snapshot --dir "$RUN/cluster-host"          # local, via the control toggle
+$MOST cluster snapshot --ingress 0=localhost:20110        # through consensus; every member snapshots
+$MOST cluster shutdown --dir "$RUN/cluster-host"          # snapshot, then stop
+```
+
+To restart with the books intact, stop **the whole node** — the cluster host included — and start it
+again without `--fresh`. Restarting only the engine is not a recovery: the consensus module keeps
+running and replays the log to the new service from the beginning, which rebuilds the same books by
+a completely different route and takes as long as the session is old. The engine prints which
+happened:
+
+```
+matching-engine: restored 3 resting orders across 2 books from a snapshot, nextExchangeOrderId=5 ...
+```
+
+**Give the previous node about ten seconds.** Aeron's archive and cluster mark files carry a
+liveness timestamp and a new process refuses with `active mark file detected` until it ages out,
+even after a clean shutdown.
+
+**Changing a security file changes geometry, and the engine will refuse to start** if the snapshot
+holds state the new geometry cannot hold — a security removed while its book has orders, or a
+changed `priceFloor`, `tickSize`, `levelCount` or `maxOrders`. It prints what is wrong and exits
+non-zero. Removing a security whose book is *empty* is allowed and is how a security leaves a shard;
+so is adding one. `./e2e/run-restart.sh` exercises all of it.
+
+Note that **market data comes back with an empty book** after a snapshot recovery: it derives depth
+from the book event stream and a restored engine republishes nothing for restored orders. The engine
+is correct — send a crossing order and it trades — but `most book` will show nothing until there is
+activity on that security. This is a known gap, not a misconfiguration.
 
 ---
 
@@ -634,6 +675,10 @@ own.
 | `REJECTED ... PRICE_OUT_OF_LADDER` | `levelCount` does not reach the price. At a 0.01 tick, level N is price N/100. |
 | `REJECTED ... PRICE_OUT_OF_BOUNDS` | Outside the static collar band, or `most define` was never run for that security. |
 | `REJECTED ... SELF_MATCH_PREVENTED` | Both sides used the same `--participant`. Use different ids. |
+| `active mark file detected` | A node was restarted too soon after the previous one. Aeron's archive and cluster mark files carry a liveness timestamp; wait about ten seconds. |
+| `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f com.engine`. |
+| `refused to restore its snapshot` | The security file changed in a way that would destroy state. The report names the security and what it holds. Restart on the previous file to restore it, or empty the book first. |
+| `most book` shows nothing after a restart | Expected. Market data rebuilds depth from the book event stream, and a restored engine republishes nothing for restored orders. The engine is fine — send a crossing order and it trades. |
 | Fingerprints differ between processes | They are reading different security files. |
 | `most send` prints no execution report | Increase `--follow`; or the gateway lost its cluster session — check `gateway.log`. |
 | `most load` reports every order `BOOK_CAPACITY` | `maxOrders` is too small for the rate, or the band is too wide to cross so nothing ever leaves the book. |

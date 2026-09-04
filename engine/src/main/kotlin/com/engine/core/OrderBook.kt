@@ -17,7 +17,7 @@ class OrderBook(
     val priceFloor: Long,
     val tickSize: Long,
     val levelCount: Int = 65_536,
-    private val maxOrders: Int = 1_000_000,
+    val maxOrders: Int = 1_000_000,
     private val capacityHighWaterMark: Int = (maxOrders * 0.95).toInt(),
 ) {
     var phase: Byte = Phase.CLOSED
@@ -73,6 +73,11 @@ class OrderBook(
 
     fun hasCapacity(): Boolean = usedCount < capacityHighWaterMark
 
+    /**
+     * Orders currently resting, in O(1). The snapshot reads it at the moment it writes a book's
+     * header -- before walking that book's orders -- so that a restore can decide what to do about
+     * a security the new geometry no longer hosts before it has booked any of them.
+     */
     fun restingOrderCount(): Int = usedCount
 
     fun bestBid(): Int = bestBidLevel

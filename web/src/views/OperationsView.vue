@@ -106,6 +106,28 @@ async function sendPurge() {
   if (ok) purge.value = null
 }
 
+/* ---- snapshot ---------------------------------------------------------------------------- */
+
+/**
+ * The odd one out on this screen, and the confirmation says so.
+ *
+ * A snapshot is a cluster admin request rather than a message for the log, so it does not go
+ * through the gateway -- and unlike the other four, Aeron answers it. `confirmed` here means
+ * confirmed rather than merely sent, which is why this is the one outcome on this screen that can
+ * legitimately come back green straight away.
+ */
+const snapshot = ref<{ shardId: number } | null>(null)
+
+async function sendSnapshot() {
+  const s = snapshot.value
+  if (!s) return
+  const ok = await run(async () => {
+    const result = await api.post<CommandResult>(`/shards/${s.shardId}/snapshot`, {})
+    record([result])
+  })
+  if (ok) snapshot.value = null
+}
+
 /* ---- definition ------------------------------------------------------------------------- */
 
 const definition = ref<{
@@ -223,6 +245,12 @@ function outcomeClass(result: CommandResult): string {
         Purge expired
       </button>
       <button
+        class="ghost small"
+        @click="clearError(); snapshot = { shardId: shard.shardId }"
+      >
+        Take snapshot
+      </button>
+      <button
         class="danger small"
         @click="clearError(); reopen = { shardId: shard.shardId, securityId: '', referencePrice: '' }"
       >
@@ -307,6 +335,15 @@ function outcomeClass(result: CommandResult): string {
     :error="commandError"
     @confirm="sendSession"
     @close="session = null"
+  />
+
+  <ConfirmDialog
+    v-if="snapshot"
+    title="Take a cluster snapshot"
+    :message="`Asks shard ${snapshot.shardId} to write a snapshot of its books, sequenced through consensus so every node takes one at the same log position. Nothing else in the system asks for one, and without a recent snapshot a restart replays the log from the last one — which after a session's trading is the difference between seconds and a very long time. Take one before any restart that changes a security file. It does not move a market and it is safe to repeat.`"
+    confirm-label="Take snapshot"
+    @confirm="sendSnapshot"
+    @close="snapshot = null"
   />
 
   <ConfirmDialog

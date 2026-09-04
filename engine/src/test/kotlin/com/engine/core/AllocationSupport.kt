@@ -134,6 +134,7 @@ internal class Driver(
     val service = MatchingEngineService(
         shardId = 1,
         books = books,
+        shardFingerprint = 0x1234_5678_9abc_def0L,
         bookEventChannel = bookEventChannel,
         bookEventStreamId = bookEventStreamId,
         levelCount = Alloc.LEVELS,

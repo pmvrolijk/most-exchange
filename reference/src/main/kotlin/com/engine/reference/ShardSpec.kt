@@ -35,11 +35,19 @@ data class ShardSpec(
      * so does every cluster node: geometry decides how a price maps to a ladder level, so a
      * mismatch would diverge the books rather than fail loudly.
      */
-    fun fingerprint(): String {
+    fun fingerprint(): String = java.lang.Long.toHexString(fingerprintValue())
+
+    /**
+     * The fingerprint as its underlying 64-bit hash, for anywhere it has to go on a wire or into a
+     * snapshot rather than in front of a human. [fingerprint] is this value in hex, so the two can
+     * never disagree -- a second implementation that drifted by a separator would report agreement
+     * between processes that disagree, which is worse than not checking at all.
+     */
+    fun fingerprintValue(): Long {
         val canonical = securities.sortedBy { it.securityId }.joinToString(",") { it.canonical() }
         var hash = 1125899906842597L
         for (c in "$shardId|$canonical") hash = hash * 31 + c.code
-        return java.lang.Long.toHexString(hash)
+        return hash
     }
 
     /**

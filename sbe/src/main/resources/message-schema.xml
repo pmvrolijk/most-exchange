@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="1"
+                   package="com.engine.sbe" id="1" version="2"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -340,12 +340,26 @@
 
   <!-- ================= Snapshot (cluster-internal, never on the wire) ============ -->
 
-  <sbe:message name="SnapshotEngineState" id="30" blockLength="16">
+  <!-- Version 2 adds the geometry the snapshot was taken against. Without it a restore cannot tell
+       a security that was legitimately removed from the shard from one whose orders it is about to
+       drop on the floor, and it cannot tell a ladder it can restore into from one that will throw
+       an ArrayIndexOutOfBounds on every node at the same log position. The added fields carry
+       sinceVersion="2" so a version 1 snapshot still decodes; the restore then reconciles on
+       security ids alone and says so. -->
+  <sbe:message name="SnapshotEngineState" id="30" blockLength="32">
     <field name="nextExchangeOrderId" id="1" type="ExchangeOrderId"/>
     <field name="nextBookEventSeqNum" id="2" type="SeqNum"/>
+    <!-- ShardSpec.fingerprint() as its underlying 64-bit hash, never the hex string, and never a
+         second implementation of the hash. -->
+    <field name="shardFingerprint"    id="3" type="SeqNum"  offset="16" sinceVersion="2"/>
+    <field name="shardId"             id="4" type="ShardId" offset="24" sinceVersion="2"/>
   </sbe:message>
 
-  <sbe:message name="SnapshotBook" id="31" blockLength="40">
+  <!-- restingOrderCount is what makes the restore single-pass: the book header is written before
+       that book's orders are walked, so the count has to be O(1) at that moment (OrderBook tracks
+       it already). Every reconciliation decision can then be taken at the header, before a single
+       order has been booked. -->
+  <sbe:message name="SnapshotBook" id="31" blockLength="72">
     <field name="staticReference"   id="1" type="Price"/>
     <field name="dynamicReference"  id="2" type="Price"/>
     <field name="securityId"        id="3" type="SecurityId"/>
@@ -353,6 +367,11 @@
     <field name="staticCollarBps"   id="5" type="CollarBps"/>
     <field name="dynamicCollarBps"  id="6" type="CollarBps"/>
     <field name="phase"             id="7" type="Phase"/>
+    <field name="priceFloor"        id="8"  type="Price"      offset="40" sinceVersion="2"/>
+    <field name="tickSize"          id="9"  type="Price"      offset="48" sinceVersion="2"/>
+    <field name="levelCount"        id="10" type="LevelCount" offset="56" sinceVersion="2"/>
+    <field name="maxOrders"         id="11" type="OrderCount" offset="60" sinceVersion="2"/>
+    <field name="restingOrderCount" id="12" type="OrderCount" offset="64" sinceVersion="2"/>
   </sbe:message>
 
   <sbe:message name="SnapshotOrder" id="32" blockLength="64">

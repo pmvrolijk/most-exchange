@@ -29,6 +29,12 @@ process. Boot config carries only geometry and capacity — reference prices and
 `EngineConfig.fingerprint()` exists so that is checkable, since it is the one misconfiguration
 consensus cannot catch.
 
+`./e2e/run-restart.sh` is the only check that state survives a restart: it rests orders, snapshots,
+stops the whole node, and restarts it on the same security file, on one with a security removed
+while it holds orders (must refuse, non-zero), on one with an emptied security removed (must start),
+and on one with a security added. `run-e2e.sh` wipes everything and starts fresh, so it has never
+once shown that anything survives.
+
 `./e2e/run-e2e.sh` (after `./gradlew installDist`) runs every process against a real single-node
 cluster, drives a trade through the CLI, then runs a short `most load` to prove the harness still
 correlates. Run it after changing anything on the wire: it has already caught five defects unit tests
@@ -36,6 +42,54 @@ could not: a clobbered Aeron session header, cumQty derived from a terminal repo
 unenforced ladder-range invariant, a gateway cluster session that died after 10s idle for want of
 keepalives, and processes that never exited on SIGTERM. `docs/LocalTesting.md` is the manual
 walkthrough, and its §9 is the benchmarking procedure.
+
+**The archive and cluster directories are the shard's only resumption point, and they persist by
+default.** `most cluster` wipes them only on `--fresh` (it used to wipe them unless told not to, so
+every restart began from an empty book and said nothing about it). The **Aeron directory is
+different and is always recreated** — it is memory-mapped IPC buffers and a `cnc.dat`, and keeping
+it makes a restart fail with "Active media driver detected" until the previous driver's liveness
+timeout expires. The Docker stack draws the same line by making the aeron volume tmpfs and
+`cluster-data` a durable named volume.
+
+**Nothing takes a snapshot unless something asks.** Without one a restart replays the log from
+genesis, which is what Design.md §1 says the snapshot exists to avoid. `most cluster snapshot`
+(`--ingress` through consensus, `--dir` through the local control toggle), `most cluster shutdown`
+(snapshot then stop, which SIGTERM does not), and the control plane's scheduler at each session
+close. **A node also cannot restart immediately after the previous one stopped** — Aeron's archive
+and cluster mark files carry a liveness timestamp and a new process refuses until it ages out,
+measured at roughly ten seconds here even after a clean shutdown.
+
+**Restarting only the service container is not a recovery.** The consensus module keeps running and
+replays the log to the new service from the beginning, rebuilding the same books by a completely
+different route and taking as long as the session is old. `e2e/run-restart.sh` was written asserting
+on the rendered book and passed for exactly this wrong reason; the engine now prints
+`restored N resting orders ... from a snapshot` so the two are distinguishable, and the test asserts
+on that line rather than on depth.
+
+**A geometry change is reapplied by restarting, so `loadSnapshot` is where it is made safe.** It
+reconciles the snapshot against the booted `ShardSpec` and **refuses to start** rather than lose
+state: a security gone from the shard with resting orders, a changed `priceFloor`/`tickSize`/
+`levelCount`/`maxOrders`, an order outside the new ladder, or counts that do not add up. The quiet
+cases are the two legitimate ones — a security whose book was **empty** leaving the shard, and a new
+security joining — each logged with a line. `SnapshotBook` carries the geometry and a per-book
+`restingOrderCount` (schema v2, `sinceVersion="2"`) precisely so every decision can be taken at the
+book header, before any of its orders have been booked.
+
+**`Image.poll` swallows an exception from its fragment handler**, hands it to the client error
+handler and advances the position anyway. So a bad order during a restore does *not* crash the node
+— it is silently dropped and the book comes back quietly wrong. That is why the restore checks
+`isLevelInRange` itself instead of letting `OrderBook.book()` index out of bounds, and why the
+resting-order counts are reconciled as a backstop. Do not assume a throw on this path is loud.
+
+**A refused restore leaves through the ShutdownSignalBarrier, not `Runtime.halt`.** Halting skips
+`ClusteredServiceContainer.close()`, which leaves the service's cluster mark file carrying a live
+timestamp — so the operator who fixes the security file and restarts immediately is met with "active
+mark file detected" for the next ten seconds instead of a working node.
+
+**After a snapshot recovery the market-data process has no book.** It derives everything from the
+book event stream, and a restored engine republishes nothing for the orders it restored. The engine's
+state is correct and trades against restored orders correctly; the derived L2 feed simply has no way
+to learn it. Open issue — see `docs/Handover.md`.
 
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is

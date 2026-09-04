@@ -136,7 +136,7 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
       --snapshot-channel aeron:ipc --snapshot-stream 34"
 
 echo "== starting the shard ($ORDERS orders, ${DELAY_US}us apart, stages=$STAGES)"
-$MOST cluster --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
+$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 

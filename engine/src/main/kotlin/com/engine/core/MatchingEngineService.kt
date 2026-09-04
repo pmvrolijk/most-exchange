@@ -17,6 +17,7 @@ import com.engine.sbe.SessionChangedEncoder
 import com.engine.sbe.SessionTransitionDecoder
 import com.engine.sbe.SnapshotBookDecoder
 import com.engine.sbe.SnapshotBookEncoder
+import com.engine.sbe.SnapshotEndDecoder
 import com.engine.sbe.SnapshotEndEncoder
 import com.engine.sbe.SnapshotEngineStateDecoder
 import com.engine.sbe.SnapshotEngineStateEncoder
@@ -65,6 +66,12 @@ class MatchingEngineService(
      */
     private val shardId: Int,
     private val books: Array<OrderBook>,
+    /**
+     * `ShardSpec.fingerprintValue()` for the geometry this node booted with, stamped into the
+     * snapshot so a restore can tell at once whether it is being poured into the shape it was
+     * taken from. Never recomputed here: the hash has exactly one implementation, in `reference`.
+     */
+    private val shardFingerprint: Long,
     private val bookEventChannel: String,
     private val bookEventStreamId: Int,
     private val levelCount: Int = 65_536,
@@ -585,6 +592,8 @@ class MatchingEngineService(
             snapshotStateEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
                 .nextExchangeOrderId(nextExchangeOrderId)
                 .nextBookEventSeqNum(nextBookEventSeqNum)
+                .shardFingerprint(shardFingerprint)
+                .shardId(shardId)
         }
 
         var total = 0L
@@ -601,6 +610,13 @@ class MatchingEngineService(
                     .staticCollarBps(book.staticCollarBps)
                     .dynamicCollarBps(book.dynamicCollarBps)
                     .phase(SbePhase.get(book.phase))
+                    .priceFloor(book.priceFloor)
+                    .tickSize(book.tickSize)
+                    .levelCount(book.levelCount)
+                    .maxOrders(book.maxOrders)
+                    // O(1), and read before this book's orders are walked, which is what lets the
+                    // restore decide about a removed security before booking any of them.
+                    .restingOrderCount(book.restingOrderCount())
             }
             book.forEachRestingOrder { node ->
                 total++
@@ -632,12 +648,66 @@ class MatchingEngineService(
         }
     }
 
-    /** Restores from a snapshot image. Orders arrive in ladder order, so FIFO is preserved. */
+    /**
+     * Restores from a snapshot image, reconciling the state it holds against the geometry this
+     * node booted with.
+     *
+     * Orders arrive in ladder order, so replaying them through the ordinary [OrderBook.book]
+     * reproduces each level's FIFO exactly. What the ordering additionally buys is that a book's
+     * header always precedes its orders: every decision about a security can be taken from the
+     * header, before a single one of its orders has been booked.
+     *
+     * The rules, and why each is what it is:
+     *
+     *  * **The fingerprints agree** -- nothing changed, restore and say nothing.
+     *  * **A security is in both, with identical geometry** -- restore.
+     *  * **A security is in both, with different geometry** -- fatal. The ladder moved under the
+     *    orders; re-laddering them is a decision, not a restore.
+     *  * **A security is in the snapshot with resting orders and gone from the shard** -- fatal.
+     *    Those orders are live as far as their owners know.
+     *  * **A security is in the snapshot with an empty book and gone from the shard** -- dropped,
+     *    with a line. This is how a security leaves a shard, and it is deliberately the quiet case.
+     *  * **A security is in the shard and not in the snapshot** -- a new empty book, with a line.
+     *  * **The orders restored do not match the counts the snapshot claims** -- fatal, because a
+     *    reconciliation that cannot count is not a reconciliation.
+     *
+     * Every fatal is collected rather than thrown at once, so one restart tells an operator
+     * everything that is wrong. Once poisoned, the restore keeps decoding and stops applying.
+     */
     private fun loadSnapshot(image: Image) {
         val bookDecoder = SnapshotBookDecoder()
         val orderDecoder = SnapshotOrderDecoder()
         val stateDecoder = SnapshotEngineStateDecoder()
+        val endDecoder = SnapshotEndDecoder()
+        val report = SnapshotRestoreReport(shardId)
+
+        // Null until the state message says otherwise. A version 1 snapshot carries no fingerprint
+        // and no geometry, so it can only be reconciled on security ids -- which is weaker, and
+        // has to be said out loud rather than silently treated as agreement.
+        var geometryKnown = false
+        var fingerprintAgrees = false
+
+        val seen = BooleanArray(books.size)
+        var currentIndex = NOT_FOUND          // book the following orders belong to, or NOT_FOUND
+        var currentSecurityId = 0
+        var currentClaimed = SnapshotBookDecoder.restingOrderCountNullValue()
+        var currentRestored = 0
+        var totalRestored = 0L
         var done = false
+
+        fun closeCurrentBook() {
+            if (currentIndex != NOT_FOUND &&
+                currentClaimed != SnapshotBookDecoder.restingOrderCountNullValue() &&
+                currentClaimed != currentRestored
+            ) {
+                report.fatal(
+                    "security $currentSecurityId: the snapshot claims $currentClaimed resting " +
+                        "orders but carries $currentRestored"
+                )
+            }
+            currentIndex = NOT_FOUND
+            currentRestored = 0
+        }
 
         while (!done && !image.isEndOfStream) {
             image.poll({ buffer, offset, _, _ ->
@@ -650,44 +720,190 @@ class MatchingEngineService(
                         stateDecoder.wrap(buffer, body, blockLength, version)
                         nextExchangeOrderId = stateDecoder.nextExchangeOrderId()
                         nextBookEventSeqNum = stateDecoder.nextBookEventSeqNum()
+
+                        val snapshotShard = stateDecoder.shardId()
+                        val snapshotFingerprint = stateDecoder.shardFingerprint()
+                        geometryKnown =
+                            snapshotFingerprint != SnapshotEngineStateDecoder.shardFingerprintNullValue()
+                        if (!geometryKnown) {
+                            report.note(
+                                "the snapshot predates schema version 2 and carries no geometry; " +
+                                    "reconciling on security ids alone"
+                            )
+                        } else if (snapshotShard != shardId) {
+                            // Almost always a node pointed at another shard's cluster directory.
+                            report.fatal(
+                                "the snapshot was taken by shard $snapshotShard, but this node is " +
+                                    "shard $shardId"
+                            )
+                        } else {
+                            fingerprintAgrees = snapshotFingerprint == shardFingerprint
+                        }
                     }
 
                     SnapshotBookDecoder.TEMPLATE_ID -> {
+                        closeCurrentBook()
                         bookDecoder.wrap(buffer, body, blockLength, version)
-                        val index = indexOfSecurity(bookDecoder.securityId())
-                        if (index >= 0) {
-                            val book = books[index]
-                            book.staticReference = bookDecoder.staticReference()
-                            book.dynamicReference = bookDecoder.dynamicReference()
-                            book.tradingDate = bookDecoder.tradingDate()
-                            book.staticCollarBps = bookDecoder.staticCollarBps()
-                            book.dynamicCollarBps = bookDecoder.dynamicCollarBps()
-                            book.phase = bookDecoder.phase().value()
+                        val securityId = bookDecoder.securityId()
+                        val index = indexOfSecurity(securityId)
+                        val claimed = bookDecoder.restingOrderCount()
+                        val claimedKnown =
+                            claimed != SnapshotBookDecoder.restingOrderCountNullValue()
+
+                        currentSecurityId = securityId
+                        currentClaimed = claimed
+                        currentRestored = 0
+
+                        if (index < 0) {
+                            // A security may leave a shard, but only once nothing is resting on it.
+                            if (!claimedKnown) {
+                                report.fatal(
+                                    "security $securityId is no longer on this shard, and the " +
+                                        "snapshot is too old to say whether its book was empty"
+                                )
+                            } else if (claimed > 0) {
+                                report.fatal(
+                                    "security $securityId is no longer on this shard, but the " +
+                                        "snapshot holds $claimed resting orders for it"
+                                )
+                            } else {
+                                report.note("security $securityId left the shard; its book was empty")
+                            }
+                            currentIndex = NOT_FOUND
+                            return@poll
                         }
+
+                        seen[index] = true
+                        val book = books[index]
+                        if (!fingerprintAgrees && geometryKnown) {
+                            val floor = bookDecoder.priceFloor()
+                            val tick = bookDecoder.tickSize()
+                            val levels = bookDecoder.levelCount()
+                            val capacity = bookDecoder.maxOrders()
+                            if (floor != book.priceFloor || tick != book.tickSize ||
+                                levels != book.levelCount || capacity != book.maxOrders
+                            ) {
+                                report.fatal(
+                                    "security $securityId changed geometry: snapshot " +
+                                        "priceFloor=$floor tickSize=$tick levelCount=$levels " +
+                                        "maxOrders=$capacity, this node priceFloor=" +
+                                        "${book.priceFloor} tickSize=${book.tickSize} " +
+                                        "levelCount=${book.levelCount} maxOrders=${book.maxOrders}" +
+                                        (if (claimedKnown) " ($claimed resting orders)" else "")
+                                )
+                            }
+                        }
+                        if (claimedKnown && claimed > book.maxOrders) {
+                            report.fatal(
+                                "security $securityId: the snapshot holds $claimed resting orders " +
+                                    "but this node's pool is ${book.maxOrders}"
+                            )
+                        }
+
+                        if (report.hasFatal) {
+                            currentIndex = NOT_FOUND
+                            return@poll
+                        }
+
+                        book.staticReference = bookDecoder.staticReference()
+                        book.dynamicReference = bookDecoder.dynamicReference()
+                        book.tradingDate = bookDecoder.tradingDate()
+                        book.staticCollarBps = bookDecoder.staticCollarBps()
+                        book.dynamicCollarBps = bookDecoder.dynamicCollarBps()
+                        book.phase = bookDecoder.phase().value()
+                        currentIndex = index
                     }
 
                     SnapshotOrderDecoder.TEMPLATE_ID -> {
                         orderDecoder.wrap(buffer, body, blockLength, version)
-                        val index = indexOfSecurity(orderDecoder.securityId())
-                        if (index >= 0) {
-                            books[index].book(
-                                exchangeOrderId = orderDecoder.exchangeOrderId(),
-                                participantId = orderDecoder.participantId(),
-                                smpId = orderDecoder.smpId(),
-                                clOrdId = orderDecoder.clOrdId(),
-                                price = orderDecoder.price(),
-                                leavesQty = orderDecoder.leavesQty(),
-                                expireDate = orderDecoder.expireDate(),
-                                side = orderDecoder.side().value(),
-                                smpStrategy = orderDecoder.smpStrategy().value(),
+                        if (report.hasFatal) return@poll
+                        val securityId = orderDecoder.securityId()
+                        if (currentIndex == NOT_FOUND || securityId != currentSecurityId) {
+                            // Either an order for a book the header said was empty, or an image
+                            // whose ordering has been lost. Both mean the counts cannot be trusted.
+                            report.fatal(
+                                "the snapshot carries an order for security $securityId outside " +
+                                    "that security's own section"
                             )
+                            return@poll
                         }
+                        val book = books[currentIndex]
+                        val price = orderDecoder.price()
+                        if (!book.isLevelInRange(book.levelOf(price))) {
+                            // Never let this reach book(): it indexes the ladder unchecked. And the
+                            // throw does not even surface here -- Image.poll catches an exception
+                            // from its handler, hands it to the client error handler and advances
+                            // the position anyway, so the order is silently dropped and the book
+                            // comes back quietly wrong. Checking is the only way to see it; the
+                            // count reconciliation below is the backstop if one ever slips past.
+                            report.fatal(
+                                "security $securityId: a resting order at price $price falls " +
+                                    "outside this node's ladder"
+                            )
+                            return@poll
+                        }
+                        book.book(
+                            exchangeOrderId = orderDecoder.exchangeOrderId(),
+                            participantId = orderDecoder.participantId(),
+                            smpId = orderDecoder.smpId(),
+                            clOrdId = orderDecoder.clOrdId(),
+                            price = price,
+                            leavesQty = orderDecoder.leavesQty(),
+                            expireDate = orderDecoder.expireDate(),
+                            side = orderDecoder.side().value(),
+                            smpStrategy = orderDecoder.smpStrategy().value(),
+                        )
+                        currentRestored++
+                        totalRestored++
                     }
 
-                    else -> done = true // SnapshotEnd
+                    SnapshotEndDecoder.TEMPLATE_ID -> {
+                        closeCurrentBook()
+                        endDecoder.wrap(buffer, body, blockLength, version)
+                        val claimed = endDecoder.restingOrderCount()
+                        if (!report.hasFatal && claimed != totalRestored) {
+                            report.fatal(
+                                "the snapshot claims $claimed resting orders in total but " +
+                                    "$totalRestored were restored"
+                            )
+                        }
+                        done = true
+                    }
+
+                    else -> {
+                        // Previously this was the terminator, which meant an unknown fragment
+                        // silently truncated the restore and left a partial book looking whole.
+                        report.fatal(
+                            "unknown snapshot message ${headerDecoder.templateId()}; " +
+                                "the snapshot cannot be restored by this build"
+                        )
+                        done = true
+                    }
                 }
             }, SNAPSHOT_POLL_LIMIT)
         }
+
+        if (!done) {
+            // The image ran out before SnapshotEnd. Every count check hangs off that message, so a
+            // truncated snapshot must not be mistaken for a complete one that happened to be short.
+            closeCurrentBook()
+            report.fatal("the snapshot ended without a terminator; it is truncated")
+        }
+        for (i in books.indices) {
+            if (!seen[i]) {
+                report.note("security ${books[i].securityId} joined the shard; its book starts empty")
+            }
+        }
+        if (report.hasFatal) throw SnapshotRestoreFailed(report.render())
+        val notes = report.renderNotes()
+        if (notes.isNotEmpty()) println(notes)
+        // Always printed, because the alternative is indistinguishable from a full log replay that
+        // happened to rebuild the same books -- and those are very different operational events.
+        println(
+            "matching-engine: restored $totalRestored resting orders across ${books.size} books " +
+                "from a snapshot, nextExchangeOrderId=$nextExchangeOrderId " +
+                "nextBookEventSeqNum=$nextBookEventSeqNum"
+        )
     }
 
     private inline fun offerToSnapshot(
@@ -948,5 +1164,8 @@ class MatchingEngineService(
     private companion object {
         const val NULL_SESSION = -1L
         const val SNAPSHOT_POLL_LIMIT = 64
+
+        /** What [indexOfSecurity] returns for a security this shard does not host. */
+        const val NOT_FOUND = -1
     }
 }

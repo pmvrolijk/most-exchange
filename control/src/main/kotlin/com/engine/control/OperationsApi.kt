@@ -48,6 +48,7 @@ data class ReopenRequest(
 class OperationsApi(
     private val operations: OperationsService,
     private val link: ClusterLink,
+    private val clusterAdmin: ClusterAdmin,
     private val audit: OperatorAudit,
 ) {
 
@@ -133,6 +134,27 @@ class OperationsApi(
             request = http,
         )
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(result)
+    }
+
+    /**
+     * Asks the shard's cluster to take a snapshot.
+     *
+     * The odd one out in this controller, twice over. It does not go to the gateway -- a snapshot
+     * is a cluster admin request, not a message for the log (see [ClusterAdmin]). And it is the
+     * only command here that can honestly report `confirmed`, because Aeron answers it; the other
+     * four are applied or rejected in silence.
+     *
+     * Worth taking one before any restart that reapplies geometry: without it the next start
+     * replays the log from the last snapshot, which after a session's trading is the difference
+     * between seconds and a very long time.
+     */
+    @PostMapping("/shards/{shardId}/snapshot")
+    fun snapshot(
+        @PathVariable shardId: Int,
+        http: HttpServletRequest,
+    ): ResponseEntity<CommandResult> {
+        val result = clusterAdmin.snapshot(shardId)
+        return accepted(result, "snapshot", "shard:$shardId", http)
     }
 
     /**

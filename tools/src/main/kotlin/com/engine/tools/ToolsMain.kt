@@ -16,7 +16,9 @@ private val USAGE = """
       most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
       most session --phase closed|pre-open|open-auction|continuous [--shard N]
       most purge  [--trading-date YYYYMMDD] [--shard N]
-      most cluster [--dir DIR]
+      most cluster [--dir DIR] [--fresh]
+      most cluster snapshot [--ingress 0=HOST:PORT | --dir DIR]
+      most cluster shutdown [--dir DIR]
 
     Commands:
       securities  List the tradable universe and the shard serving each security.
@@ -27,7 +29,14 @@ private val USAGE = """
       define      Seed a security's reference price and collar widths.
       session     Move a shard to a trading phase; the uncross runs on the way to continuous.
       purge       Run the off-session expiry sweep.
-      cluster     Run a single-node cluster host for local development.
+      cluster     Run a single-node cluster host for local development. It persists the
+                  archive and cluster directories unless --fresh is given, because those
+                  are the shard's only resumption point.
+                  `cluster snapshot` asks for a snapshot -- with --ingress through
+                  consensus, so every member takes one at the same log position and the
+                  request is answered; with --dir through the local control toggle.
+                  `cluster shutdown` snapshots and then stops the node, which SIGTERM
+                  does not.
 
     Load options (the shard must already be defined and CONTINUOUS):
       --count N                Orders to send (default 1000000)

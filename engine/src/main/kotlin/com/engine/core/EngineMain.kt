@@ -46,6 +46,7 @@ fun main(args: Array<String>) {
     val service = MatchingEngineService(
         shardId = config.shard.shardId,
         books = books,
+        shardFingerprint = config.shard.fingerprintValue(),
         bookEventChannel = config.bookEventChannel,
         bookEventStreamId = config.bookEventStreamId,
         levelCount = config.maxLevelCount(),
@@ -62,6 +63,11 @@ fun main(args: Array<String>) {
             "serviceId=${config.serviceId} clusterDir=${config.clusterDir}"
     )
 
+    // Created before the container so the error handler below can release it. A refused snapshot
+    // restore has to leave through the same orderly shutdown as everything else -- see below.
+    val barrier = ShutdownSignalBarrier()
+    val refused = java.util.concurrent.atomic.AtomicReference<SnapshotRestoreFailed>()
+
     val context = ClusteredServiceContainer.Context()
         .clusteredService(service)
         .serviceId(config.serviceId)
@@ -70,6 +76,24 @@ fun main(args: Array<String>) {
         // Busy-spin: this thread owns an isolated core and must never yield it (Design.md §7).
         .idleStrategySupplier { BusySpinIdleStrategy() }
         .errorHandler { throwable ->
+            val refusal = generateSequence(throwable) { it.cause }
+                .filterIsInstance<SnapshotRestoreFailed>()
+                .firstOrNull()
+            if (refusal != null) {
+                // A refused restore is a decision, not a crash: the report is the whole message
+                // and a stack trace only buries it. The service runs on the container's agent
+                // thread, so throwing there lands here rather than out of launch() -- and a node
+                // that cannot restore its state must not go on to join consensus without it.
+                //
+                // Release the barrier rather than halting the JVM. Halting skips
+                // `ClusteredServiceContainer.close()`, which leaves this service's cluster mark
+                // file carrying a live timestamp -- so the operator who fixes the security file
+                // and restarts immediately is met with "active mark file detected" for the next
+                // ten seconds instead of a working node. The orderly path releases it.
+                refused.set(refusal)
+                barrier.signal()
+                return@errorHandler
+            }
             System.err.println("matching-engine: ${throwable.message}")
             throwable.printStackTrace()
         }
@@ -92,8 +116,16 @@ fun main(args: Array<String>) {
 
     container.use {
         println("matching-engine: started, awaiting shutdown signal")
-        ShutdownSignalBarrier().use { barrier ->
+        barrier.use {
             barrier.await()
+            refused.get()?.let { refusal ->
+                // Nothing below applies: this engine restored nothing and processed nothing, so
+                // its counters and histograms would describe a node that never ran.
+                System.err.println(refusal.message)
+                System.err.flush()
+                System.out.flush()
+                return@use
+            }
             // Everything below is INSIDE the barrier block on purpose: closing the barrier
             // releases the signal and the process exits at once, so anything printed after it is
             // racing the exit (CLAUDE.md). The single line that used to live out here won that
@@ -123,4 +155,6 @@ fun main(args: Array<String>) {
             System.out.flush()
         }
     }
+    // After the container is closed, so the mark file is released before the process goes away.
+    if (refused.get() != null) kotlin.system.exitProcess(1)
 }

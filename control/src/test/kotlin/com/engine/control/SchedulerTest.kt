@@ -122,6 +122,66 @@ class SchedulerTest : PostgresTest() {
     }
 
     @Test
+    fun `a snapshot is requested once the shard is observed closed, once per trading date`() {
+        // The snapshot is what makes a restart a restart rather than a replay from genesis, and
+        // nothing else in the system asks for one. With no cluster ingress configured it reports
+        // `sent = false` -- as every command does here with the link down -- but the decision to
+        // ask, and to ask exactly once, is the part worth pinning.
+        seed()
+        observe(Phase.CLOSED, 1, 2)
+
+        val first = scheduler.reconcile(tuesday(18)).single()
+        assertEquals(
+            listOf("snapshot"),
+            first.actions.map { it.command },
+            "a closed shard should be snapshotted and not transitioned",
+        )
+        assertContains(first.actions.single().detail, "no cluster ingress configured")
+
+        // Retried, not suppressed: `hasRun` counts only rows that were actually sent, so an
+        // unsent snapshot is not a snapshot -- the same rule the purge above lives by. Once one
+        // succeeds it is not asked for again that day.
+        val second = scheduler.reconcile(tuesday(18, 5)).single()
+        assertEquals(
+            listOf("snapshot"),
+            second.actions.map { it.command },
+            "a snapshot that could not be sent must be retried",
+        )
+        assertTrue(!schedules.hasRun(0, "snapshot", 20260303))
+    }
+
+    @Test
+    fun `no snapshot is taken while the market is merely closed before the open`() {
+        // "Closed" at 07:30 and "closed" at 18:00 are different states: only one of them has a
+        // day's trading behind it. Snapshotting the first would take an image of an empty morning
+        // and then not take one after the close, which is precisely backwards.
+        seed()
+        observe(Phase.CLOSED, 1, 2)
+
+        val decision = scheduler.reconcile(tuesday(7, 30)).single()
+        assertTrue(
+            decision.actions.none { it.command == "snapshot" },
+            "the day's close has not happened yet",
+        )
+    }
+
+    @Test
+    fun `no snapshot is taken while the market is still observed open`() {
+        // Observed rather than expected: a snapshot taken before the close has landed on the feed
+        // captures a market that is still open, which is the one image nobody wants to restart on.
+        seed()
+        observe(Phase.CONTINUOUS, 1, 2)
+
+        val decision = scheduler.reconcile(tuesday(18)).single()
+        assertEquals("CLOSED", decision.expectedPhase)
+        assertEquals("CONTINUOUS", decision.observedPhase)
+        assertTrue(
+            decision.actions.none { it.command == "snapshot" },
+            "the close has not been seen yet, so there is nothing worth snapshotting",
+        )
+    }
+
+    @Test
     fun `a halted security is never reopened automatically`() {
         // Recovery is operator-driven by design. Worse than overriding that, reconciling back to
         // CONTINUOUS would do it without an auction.

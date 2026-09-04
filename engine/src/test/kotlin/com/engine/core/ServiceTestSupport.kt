@@ -151,12 +151,20 @@ class Harness(
     levelCount: Int = 1024,
     auctionMaxPasses: Int = 64,
     metrics: EngineMetrics? = null,
+    /**
+     * A stand-in for `ShardSpec.fingerprintValue()`. Deliberately a plain parameter rather than
+     * something derived from [books]: deriving it would be a second implementation of a hash whose
+     * only job is agreement. A test that changes geometry passes a different value, which is what
+     * publishing a new security file does.
+     */
+    shardFingerprint: Long = FINGERPRINT,
 ) {
     val session = FakeSession(SESSION_ID)
     private val cluster = FakeCluster(mapOf(SESSION_ID to session))
     val service = MatchingEngineService(
         shardId = SHARD_ID,
         books = books,
+        shardFingerprint = shardFingerprint,
         bookEventChannel = "aeron:ipc",
         bookEventStreamId = 12,
         levelCount = levelCount,
@@ -166,6 +174,24 @@ class Harness(
 
     private val buffer = UnsafeBuffer(ByteArray(4096))
     private val headerEncoder = MessageHeaderEncoder()
+
+    /**
+     * Drives the service's snapshot restore directly.
+     *
+     * `onStart` cannot be used here: it would also create the book-event publication, which needs
+     * a live Aeron. The reflection sits beside the `cluster` field poke below for the same reason
+     * and in the same one place.
+     */
+    fun restore(image: io.aeron.Image) {
+        val method = service.javaClass
+            .getDeclaredMethod("loadSnapshot", io.aeron.Image::class.java)
+            .apply { isAccessible = true }
+        try {
+            method.invoke(service, image)
+        } catch (e: java.lang.reflect.InvocationTargetException) {
+            throw e.targetException
+        }
+    }
 
     init {
         // onStart would create the book-event publication, which needs a live Aeron. Drive the
@@ -262,15 +288,24 @@ class Harness(
     private companion object {
         const val SHARD_ID = 1
         const val SESSION_ID = 7L
+
+        /** Stands in for one particular published security file. */
+        const val FINGERPRINT = 0x1234_5678_9abc_def0L
         val DUMMY_HEADER = io.aeron.logbuffer.Header(0, 0)
     }
 }
 
-fun serviceBook(securityId: Int = 1, levelCount: Int = 1024, maxOrders: Int = 512): OrderBook =
+fun serviceBook(
+    securityId: Int = 1,
+    levelCount: Int = 1024,
+    maxOrders: Int = 512,
+    priceFloor: Long = 0L,
+    tickSize: Long = 1L,
+): OrderBook =
     OrderBook(
         securityId = securityId,
-        priceFloor = 0L,
-        tickSize = 1L,
+        priceFloor = priceFloor,
+        tickSize = tickSize,
         levelCount = levelCount,
         maxOrders = maxOrders,
     )

@@ -18,7 +18,7 @@ docker compose up -d           # ~40s to a trading market
 | --- | --- |
 | Admin UI | <http://localhost:8081> — `admin` / `most-dev-password` |
 | Control API | <http://localhost:8080> — `curl -u admin:most-dev-password localhost:8080/api/status` |
-| Teardown | `docker compose down -v` |
+| Teardown | `docker compose down -v` (`-v` also discards the books — see below) |
 
 `docker compose up` also runs a one-shot `seed` container that creates shard 0 in the control plane,
 imports the same security file the processes booted from, publishes a release, seeds the reference
@@ -203,12 +203,57 @@ either way.
 `ENGINE_MARCH` is pinned to `x86-64-v3` rather than `native`: a container image is by definition a
 binary built somewhere else, and a `-march=native` build fails on a CPU that differs.
 
+## Restarting with the books intact
+
+`cluster-data` is a plain named volume, not tmpfs, and the cluster host no longer wipes it on start.
+That is what makes the shard resumable:
+
+```sh
+docker compose restart engine gateway market-data discovery cluster-host   # books survive
+```
+
+Take a snapshot first, or the restart replays the log from the last one — which after a session's
+trading is the difference between seconds and a very long time. Either through the console
+(Operations → *Take snapshot*), the API, or the CLI:
+
+```sh
+curl -X POST -u admin:most-dev-password localhost:8080/api/shards/0/snapshot
+docker compose exec cluster-host most cluster snapshot --dir /cluster
+```
+
+The control plane reaches the cluster directly for this one, and only this one:
+`CONTROL_CLUSTER_INGRESS_0` names the consensus module's ingress. A snapshot is a cluster admin
+request rather than a message for the log, so there is nothing for the gateway to forward — and
+because Aeron answers it, this is the one operator command the console can report as *confirmed*
+rather than merely *sent*. Note the endpoint is `shard0:20110` and not `engine:20110`: like every
+other endpoint on this shard it is bound by the media driver in the `cluster-host` container.
+
+**After editing a security file, wipe first.** Geometry is fixed when a book is constructed, so the
+engine refuses to restore a snapshot into changed geometry rather than quietly dropping the state it
+cannot hold — it prints what is wrong and exits non-zero. That is the intended behaviour; the way
+past it is to start clean:
+
+```sh
+CLUSTER_FRESH=--fresh docker compose up cluster-host -d
+```
+
+Removing a security whose book is **empty** is allowed, and so is adding one — those are how a shard
+changes shape, and each is logged with a line rather than refused.
+
+Two things to expect. `docker compose down -v` removes the volumes, books included. And market data
+comes back with an **empty book** after a snapshot recovery: it derives depth from the book event
+stream and a restored engine republishes nothing for the orders it restored. The engine is correct —
+send a crossing order and it trades — but the console's ladder stays empty until there is activity
+on that security. Known gap; see `docs/Handover.md`.
+
 ## What is dev-only
 
 Do not carry these into anything real:
 
-- **One cluster node.** No redundancy; failover, leader election and snapshot recovery are exactly
-  what a single node cannot exercise.
+- **One cluster node.** No redundancy; failover and leader election are exactly what a single node
+  cannot exercise. Snapshot *restore* is now exercised single-node by `e2e/run-restart.sh`; what a
+  single node still cannot show is a snapshot taken on one member restoring on another, or a
+  rejoining node catching up from the archive.
 - **A fixed, published admin password.** Unset `CONTROL_ADMIN_PASSWORD` and the control plane
   generates one and logs it.
 - **`CONTROL_COOKIE_SECURE` is false**, because everything here is plain HTTP on localhost.
@@ -223,6 +268,8 @@ Do not carry these into anything real:
 
 | Symptom | Cause |
 | --- | --- |
+| `refused to restore its snapshot` | A security file changed in a way that would destroy state. The report names the security and what it holds. Restore the old file, or `CLUSTER_FRESH=--fresh docker compose up cluster-host -d` to start clean. |
+| `active mark file detected` | A node restarted too soon after the previous one. Aeron's mark files carry a liveness timestamp; wait about ten seconds. |
 | `could not create archive directory` | A named volume landed root-owned. The mount points are created and chowned in the images so the volumes inherit that; `docker compose down -v` and rebuild. |
 | `channel error - Cannot assign requested address` | A shard channel naming a container other than `shard0`. The driver binds these and it lives in `cluster-host`. |
 | A book viewer shows nothing | A live feed has no replay — a subscriber sees only updates after it joined. There is no market data snapshot yet (handover §4, open issue 2). Send an order and it appears. |

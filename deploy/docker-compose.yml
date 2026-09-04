@@ -36,6 +36,8 @@ networks:
 volumes:
   pgdata:
   releases:
+  # NOT tmpfs, and that is the whole point: the recorded log and the snapshots taken against it are
+  # the shard's only resumption point. Losing every node at once is survivable because this survives.
   cluster-data:
   # Aeron's control-and-buffers directory is memory-mapped files. tmpfs so it behaves like the
   # /dev/shm a real deployment uses, and a named volume so every process on the "node" maps the
@@ -126,6 +128,11 @@ services:
       # a last price keeps up once a book is established.
       CONTROL_L1_CHANNEL: "aeron:udp?endpoint=0.0.0.0:0|control=shard0:40001|control-mode=dynamic"
       CONTROL_L1_STREAM: "1"
+      # Shard 0's CLUSTER ingress -- the one thing the control plane does not reach through the
+      # gateway, because a snapshot is a cluster admin request and not a message for the log. The
+      # port is the consensus module's, bound (like every other endpoint on this shard) by the
+      # media driver in the cluster-host container, which is why it is shard0 and not engine.
+      CONTROL_CLUSTER_INGRESS_0: "0=shard0:20110"
       # The calendar is off by default here. It opens markets unattended, which is a surprising
       # thing for a dev stack to do while you are reading its logs.
       CONTROL_SCHEDULER_ENABLED: ${CONTROL_SCHEDULER_ENABLED:-false}
@@ -164,6 +171,12 @@ services:
       # other containers can resolve.
       - "--host"
       - "shard0"
+      # The archive and cluster directory persist across a restart, which is what makes the shard
+      # resumable: `docker compose restart` now brings the books back rather than starting empty.
+      # `CLUSTER_FRESH=--fresh docker compose up` wipes them, which is what you want after editing
+      # a security file -- the engine refuses to restore a snapshot into changed geometry, on
+      # purpose. Blank by default; the CLI treats a blank argument as absent.
+      - "${CLUSTER_FRESH:-}"
     volumes:
       - shard-aeron:/aeron
       - cluster-data:/cluster

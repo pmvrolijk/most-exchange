@@ -93,6 +93,15 @@ class ClusterLink(
 
     val connected: Boolean get() = aeron != null
 
+    /**
+     * The shared Aeron client, or null when there is no media driver.
+     *
+     * Exposed for [ClusterAdmin], which needs a cluster admin connection rather than a plain
+     * publication to the gateway. One Aeron client per process: a second would map its own set of
+     * buffers into the same directory for no gain.
+     */
+    fun aeron(): Aeron? = aeron
+
     @PostConstruct
     fun start() {
         if (!enabled) {

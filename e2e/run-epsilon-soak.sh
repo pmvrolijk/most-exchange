@@ -172,7 +172,7 @@ run_stack() { # run_stack <orders> <label>
 
   echo "-- $label: $(n $orders) orders"
 
-  $MOST cluster --dir "$dir/cluster-host" --aeron-dir "$aeron" > "$logs/cluster.log" 2>&1 &
+  $MOST cluster --fresh --dir "$dir/cluster-host" --aeron-dir "$aeron" > "$logs/cluster.log" 2>&1 &
   local cluster_pid=$!; PIDS+=($cluster_pid)
   wait_for "$logs/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 

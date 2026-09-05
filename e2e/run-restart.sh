@@ -100,6 +100,7 @@ gateway.clientOutboundStreamId=21
 gateway.ingressChannel=aeron:udp
 gateway.ingressEndpoints=0=localhost:20110
 gateway.egressChannel=aeron:udp?endpoint=localhost:0
+gateway.journalFile=$RUN/gateway-orders.jrnl
 EOF
 
 cat > "$RUN/market-data.properties" <<EOF
@@ -331,6 +332,48 @@ if ! diff -q "$RUN/book-live.txt" "$RUN/book-recovered.txt" > /dev/null; then
   fail "the requested image did not rebuild the book"
 fi
 pass "most image rebuilt it without restarting the engine"
+
+# ------------------------------------------------------------------------- 4b
+echo
+echo "== 4b. restart ONLY the gateway -- its order journal is the only place origQty lives"
+# The engine does not store origQty (an order is one cache line), so nothing can hand it back to a
+# gateway that forgot it. Without the journal every report for an order in flight comes back marked
+# UNKNOWN -- honest, but not the number the client wants.
+# The partially filled order has to be the AGGRESSOR's remainder, not the resting side. A maker's
+# fill report is routed by participantId to the session that participant last spoke on, and a `most
+# send` that has stopped following has no session -- the engine counts the report undeliverable and
+# the gateway never sees the fill at all (open issue 3). An aggressor is always listening to its own.
+# Participant 11, which has traded nothing here: the offer it will cross belongs to participant 7,
+# and an aggressor that shares an smpId with the resting side is cancelled rather than filled.
+# Sized past the whole offer, so what is left over rests with a real cumQty behind it.
+$MOST send --symbol AAPL --side buy --price 102.00 --qty 26 --clordid 3002 --participant 11 \
+  --follow 3 $CONN > "$RUN/rest.out" 2>&1 || fail "send aggressor"
+cat "$RUN/rest.out"
+grep -q "TRADE" "$RUN/rest.out" || { cat "$RUN/rest.out" >&2; fail "no partial fill"; }
+REST_ID=$(grep -o "orderId=[0-9]*" "$RUN/rest.out" | head -1 | cut -d= -f2)
+[ -n "$REST_ID" ] || { cat "$RUN/rest.out" >&2; fail "no orderId for the resting order"; }
+pass "order $REST_ID rests with 6 of 26 remaining and 20 filled"
+
+kill "$GATEWAY_PID" 2>/dev/null; wait "$GATEWAY_PID" 2>/dev/null; sleep 1
+$GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway-alone.log" 2>&1 &
+GATEWAY_PID=$!; PIDS+=("$GATEWAY_PID")
+wait_for "$LOGS/gateway-alone.log" "gateway: started" 45 "gateway" || fail "gateway did not restart"
+grep -o "gateway: order journal .*" "$LOGS/gateway-alone.log"
+grep -q "recovered=[1-9]" "$LOGS/gateway-alone.log" \
+  || { tail -10 "$LOGS/gateway-alone.log" >&2; fail "the gateway recovered no orders"; }
+sleep 1
+
+# Cancelling is the cheapest way to make the engine report on that order again. The reply has to
+# carry both numbers the gateway alone knows: what was ordered, and how much of it filled.
+$MOST cancel --symbol AAPL --side buy --order-id "$REST_ID" --orig-clordid 3002 --participant 11 \
+  --follow 3 $CONN > "$RUN/cancel.out" 2>&1 || fail "cancel after gateway restart"
+cat "$RUN/cancel.out"
+grep -q "CANCELED" "$RUN/cancel.out" || fail "the order was not cancelled"
+grep -q "cum unknown" "$RUN/cancel.out" \
+  && fail "the gateway lost the order across its restart; the journal recovered nothing"
+grep -q "cum 20 of 26" "$RUN/cancel.out" \
+  || { cat "$RUN/cancel.out" >&2; fail "origQty and cumQty did not survive the gateway restart"; }
+pass "the cancel reports cum 20 of 26 -- both numbers survived"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

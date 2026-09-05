@@ -2149,6 +2149,42 @@ subscribers care about most.
 Geometry (`priceFloor`, `tickSize`, `levelCount`) must match the engine's exactly: the same values
 that turn a price into a ladder level there turn it into a depth level here.
 
+### The gateway's order journal
+
+The gateway is stateful for one reason (§1): it holds the `origQty` it forwarded, so it can restore
+`cumQty` on the way back. That is what lets the engine omit `origQty` and keep an order at one cache
+line — and it means the value exists in exactly one place in the system. A gateway that forgets it
+cannot ask anyone for it.
+
+`OrderJournal` is a slot per tracked order, 64 bytes, optionally mapped to a file. It is not a log
+written *beside* the in-memory state; it **is** the state. `OrderStateStore` keeps only the two
+index maps that find a slot — pending by participant and `clOrdId`, live by `exchangeOrderId` — and
+every value is read out of the mapping. A durable copy maintained alongside a memory copy is a
+second bookkeeping that can drift from the first, and the drift would appear only after a restart,
+which is the one moment nobody is in a position to check it. It is also the engine's own idiom one
+layer out: a packed slot array plus a primitive id map.
+
+**Crash consistency without a flush.** The state word is written last and read first, so a write
+interrupted partway leaves a slot that reads as free — losing one order rather than inventing one
+out of stale bytes. Behind that, a slot is adopted only if its contents could have come from a
+completed write: every real order has a positive quantity and every acknowledged one has an id.
+`cumQty` is updated by a single aligned 8-byte store, which cannot tear. There is deliberately **no
+`msync`**: flushing per order would put a disk write on a leg measured at 0.2 µs, so a *process*
+crash recovers in full (the mapped pages belong to the operating system and outlive the process)
+while a *machine* power loss can lose the most recent writes. Those orders come back `UNKNOWN`,
+which is the same answer as never having journalled them.
+
+**Capacity is derived, and exhaustion is not an error.** `gateway.journalSlots` defaults to the sum
+of the shard's `maxOrders`, so the engine answers `BOOK_CAPACITY` before the gateway runs out of
+slots for resting orders. If it does run out, the order is forwarded **untracked** rather than
+rejected — refusing an order the engine would have accepted, to protect a bookkeeping structure, is
+the wrong trade — and its reports carry `Enrichment.UNKNOWN`.
+
+**A journal is refused rather than half-adopted.** A file written by a different shard, or for a
+different capacity, is refused while it holds orders and re-initialised when it is empty. Same rule,
+and the same reasoning, as the engine refusing a snapshot it cannot faithfully restore: those orders
+are live as far as their owners know.
+
 ### Where Reference Data Is Authored
 
 Reference data and shard topology are authored in Postgres through the `control` module and
@@ -2454,13 +2490,14 @@ It found three defects that unit tests could not:
   to prevent. It cannot simply be folded into `ShardSpec.fingerprint()`: that hash is over shard
   topology, is stored by the control plane, and appears in published releases, so changing it
   invalidates every recorded value. It wants a separate engine-level fingerprint.
-* **The gateway's `origQty` does not survive its own restart.** `OrderStateStore` is three in-memory
-  maps with no persistence. It no longer *lies* about it — `ClientExecutionReport.enrichment` says
-  `UNKNOWN` for an order this gateway never saw, instead of the `cumQty = 0` it used to send, which
-  read as "nothing has filled" and never re-healed. But saying so is not recovering it. The engine
-  cannot help: it does not store `origQty` and has no spare word to (§3), so the state has to be
-  the gateway's own — an append-only memory-mapped journal replayed at boot. That is still to build,
-  and until it is, a gateway restart costs every in-flight order its `cumQty`.
+* ~~**The gateway's `origQty` does not survive its own restart.**~~ **Done.** `OrderStateStore` is
+  backed by `OrderJournal`, a memory-mapped slot per live order, and a restarted gateway hands back
+  the `origQty` and accumulated `cumQty` of everything in flight (§7, "The gateway's order
+  journal"). What is *not* covered, and is stated rather than hidden: there is no `msync` on the
+  hot path, so a machine power loss can lose the most recent writes and those orders come back
+  `UNKNOWN`; and **nothing reaps a pending order whose acknowledgement never arrives**, which a
+  bounded slot array turns from a heap leak into slots that are never returned. `pendingOrders` is
+  printed at shutdown so the second is visible.
 * **`SecurityDefinition` geometry.** The message carries `priceFloor`, `tickSize` and `levelCount`,
   but the ladders are pre-allocated, so geometry is fixed when a book is constructed. The engine
   accepts references and collars and **rejects the whole definition** if the geometry disagrees, on

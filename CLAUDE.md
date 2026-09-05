@@ -114,13 +114,37 @@ image from the buffer on join — the oldest one still there — discards every 
 rescued by an increment happening to arrive. On a quiet book none does. `DepthFeedAssemblerTest`
 pins both directions; mutating either way fails a different test.
 
-**The gateway says when it does not know a `cumQty`** rather than sending zero.
-`ClientExecutionReport.enrichment` is `UNKNOWN` for an order this gateway never saw — after its own
-restart, usually. It holds `origQty` in memory and the engine does not store it at all, so nothing
-can recover it, and `recordFill` ignores such an order so the value would never re-heal. The field
-sits in the message's existing block padding, so `blockLength` is unchanged and a version 1 reader is
-unaffected. **The journal that would actually preserve the state across a restart is still not
-built** — see `docs/Handover.md`.
+**The gateway's order state is a memory-mapped slot array, and it *is* the store.**
+`OrderStateStore` keeps only the two index maps that find a slot; `origQty` and `cumQty` live in
+`OrderJournal`. That is deliberate — a journal maintained beside an in-memory copy is a second
+bookkeeping that can drift, and it would surface only after a restart, the one moment nobody can
+check it. Same idiom as the engine's packed pool plus id map, one layer out.
+
+Set `gateway.journalFile` or a restart loses every in-flight order's `origQty`; the default is
+unset, which is the old behaviour. `gateway.journalSlots` defaults to the shard's own total order
+pool, which makes exhaustion unreachable for resting orders — the engine answers `BOOK_CAPACITY`
+first. **Exhaustion never rejects an order**: it forwards it untracked and the reports come back
+`UNKNOWN`, which is what that flag is for.
+
+Three rules the journal turns on, each with a test that fails when it is mutated away:
+- **The state word is written last** and read first, so an interrupted write leaves a slot that
+  reads as free — one order lost rather than one invented. `OrderJournalTest` pins the store *order*
+  through a recording buffer, because that is not visible from the file afterwards.
+- **A slot whose fields could not have come from a completed write is not adopted** — no quantity,
+  or acknowledged with no id. Defence behind the ordering, since being wrong there means handing a
+  client an order assembled from stale bytes.
+- **A journal from a different shard or capacity is refused while it holds orders**, and adopted
+  silently when empty. Same rule as the engine refusing a snapshot it cannot faithfully restore.
+
+**There is no `msync` on the hot path**, and that bound is the point: a *process* crash recovers in
+full because the mapped pages belong to the OS, a *machine* power loss can lose the last writes and
+those orders come back `UNKNOWN`. `ClientExecutionReport.enrichment` says so rather than sending a
+`cumQty` of zero, in a field inside the message's existing block padding, so `blockLength` is
+unchanged and a version 1 reader is unaffected.
+
+**Nothing reaps a pending order whose acknowledgement never arrives.** Pre-existing, but a bounded
+slot array turns a heap leak into slots that are never returned. `pendingOrders` is printed at
+shutdown for exactly that reason: a number that only grows is a leak, not traffic.
 
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is

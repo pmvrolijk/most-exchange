@@ -626,6 +626,32 @@ The Aeron directory is the exception and is always recreated: it holds memory-ma
 rather than state, and keeping it would block the next start until the previous driver's liveness
 timeout expired.
 
+### The gateway's order journal
+
+`origQty` exists in one place in this system. The engine does not store it — an order is one cache
+line — so a gateway that forgets it cannot ask anyone, and every report for an order in flight comes
+back with `cum unknown`. Point the gateway at a file and that stops being true:
+
+```
+gateway.journalFile=${RUN}/gateway-orders.jrnl
+```
+
+Unset by default, which is the behaviour that shipped before it existed. `gateway.journalSlots`
+defaults to the shard's own total order pool, so the engine rejects with `BOOK_CAPACITY` before the
+journal fills. The startup line says what came back:
+
+```
+gateway: order journal .../gateway-orders.jrnl slots=20000 recovered=4 (live=4 pending=0)
+```
+
+A *process* crash recovers in full — the mapped pages are the operating system's — but there is no
+`msync` on the hot path, so a machine losing power can lose the last few writes; those orders report
+`cum unknown`, which is the honest answer. Changing the shard or the slot count is refused while the
+file holds orders, and adopted silently once it is empty.
+
+`pendingOrders` at shutdown is worth a glance: nothing reaps an order whose acknowledgement never
+came, so a figure that only ever grows is a leak rather than traffic.
+
 ### Snapshots, and restarting with state
 
 Nothing takes a snapshot unless you ask, and without a recent one a restart replays the log from the
@@ -686,7 +712,7 @@ arrived — a different problem from a quiet feed.
 | `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f com.engine`. |
 | `refused to restore its snapshot` | The security file changed in a way that would destroy state. The report names the security and what it holds. Restart on the previous file to restore it, or empty the book first. |
 | `most book` shows nothing after a restart | Market data restarted without the engine and missed its book image. Run `most image --shard 0`. |
-| A client sees `cum unknown` | The gateway never saw that order, almost always because *it* restarted. It holds `origQty` in memory and the engine does not store it, so the value is genuinely unrecoverable — reported rather than guessed at. |
+| A client sees `cum unknown` | The gateway has no record of that order. With `gateway.journalFile` set that means it was never journalled — check `journalExhausted` at shutdown — or the machine lost power. With it unset, it means the gateway restarted; set it. |
 | Fingerprints differ between processes | They are reading different security files. |
 | `most send` prints no execution report | Increase `--follow`; or the gateway lost its cluster session — check `gateway.log`. |
 | `most load` reports every order `BOOK_CAPACITY` | `maxOrders` is too small for the rate, or the band is too wide to cross so nothing ever leaves the book. |

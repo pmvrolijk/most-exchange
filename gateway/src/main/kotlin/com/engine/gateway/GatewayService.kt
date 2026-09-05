@@ -94,6 +94,15 @@ class GatewayService(
 
     val liveOrders: Int get() = state.liveOrders
 
+    /**
+     * Orders forwarded and not yet acknowledged. Worth watching because nothing reaps one whose
+     * acknowledgement never comes, so a number that only grows is a leak rather than traffic.
+     */
+    val pendingOrders: Int get() = state.pendingOrders
+
+    /** Orders the journal had no room to track, and which will therefore report `UNKNOWN`. */
+    val journalExhausted: Long get() = state.journalExhausted
+
     // ------------------------------------------------------------- inbound
 
     /**

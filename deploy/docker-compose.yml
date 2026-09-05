@@ -224,6 +224,9 @@ services:
       engine: { condition: service_started }
     volumes:
       - shard-aeron:/aeron
+      # The order journal goes here, not on the tmpfs aeron volume: it is the only place origQty
+      # and cumQty exist, so it has to outlive the container the way the books do.
+      - cluster-data:/cluster
       - ./config:/config:ro
     networks: [aeron]
 

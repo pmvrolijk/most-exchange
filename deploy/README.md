@@ -254,6 +254,17 @@ docker compose exec cluster-host most image --shard 0
 Safe to repeat: it changes no book and moves no market, which is why it is the one command on the
 operations screen with no warning about what it will do to a live market.
 
+The gateway keeps its own state on the same durable volume:
+
+```sh
+docker compose restart gateway     # in-flight orders keep their origQty and cumQty
+```
+
+`gateway.journalFile=/cluster/gateway-orders.jrnl` is what makes that work, and it is on
+`cluster-data` rather than the tmpfs aeron volume for the obvious reason. Without it a restarted
+gateway reports `cumQty` as unknown for every order in flight — the engine does not store `origQty`,
+so nothing else can hand it back. The startup line says how many orders came back.
+
 ## What is dev-only
 
 Do not carry these into anything real:

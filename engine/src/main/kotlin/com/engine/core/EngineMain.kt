@@ -134,6 +134,7 @@ fun main(args: Array<String>) {
                 "matching-engine: shutdown signal received. " +
                     "undeliverableReports=${service.undeliverableReports} " +
                     "droppedBookEvents=${service.droppedBookEvents} " +
+                    "bookImagesPublished=${service.bookImagesPublished} " +
                     "backpressureStalls=${service.backpressureStalls} " +
                     "rejectedDefinitions=${service.rejectedDefinitions} " +
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches}"

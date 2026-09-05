@@ -643,6 +643,7 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `3` | `SessionTransition` | Inbound | Cluster ingress |
 | `4` | `PurgeExpiredOrders` | Inbound | Cluster ingress |
 | `5` | `SecurityDefinition` | Inbound | Cluster ingress |
+| `6` | `RequestBookImage` | Inbound | Cluster ingress |
 | `10` | `ExecutionReport` | Outbound, private | Cluster egress |
 | `20` | `OrderAdded` | Outbound, book event | IPC 12 |
 | `21` | `OrderReduced` | Outbound, book event | IPC 12 |
@@ -651,6 +652,7 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `24` | `AuctionUncrossed` | Outbound, book event | IPC 12 |
 | `25` | `SessionChanged` | Outbound, book event | IPC 12 |
 | `26` | `VolatilityHalted` | Outbound, book event | IPC 12 |
+| `27`–`29` | `BookImageBegin` / `BookImageLevel` / `BookImageEnd` | Outbound, book event | IPC 12 |
 | `30`–`33` | `SnapshotEngineState` / `SnapshotBook` / `SnapshotOrder` / `SnapshotEnd` | Snapshot | Cluster snapshot |
 
 The snapshot messages are cluster-internal and never reach a client. A snapshot walks each book's
@@ -773,6 +775,48 @@ and recovery a **subscriber** responsibility: consumers must detect a gap and re
 snapshot rather than assume a continuous stream. Unicast fallback subscribers do get per-channel
 backpressure, but each has its own publication, so a stalled one affects only itself.
 
+### The book image
+
+The L2 recovery feed below lets a *consumer* of market data resynchronise. It does nothing for the
+market data process itself, which derives every book from the engine's event stream and therefore
+comes back from a restart with nothing — and unlike the engine it has no snapshot of its own. A
+restored engine publishes no events for the orders it restored, so before the book image existed a
+market data process restarting alongside the engine showed an empty ladder on a market with real
+depth, and nothing about it looked wrong.
+
+The image is **level-aggregated, not per order** (`BookImageBegin` / `BookImageLevel` /
+`BookImageEnd`, ids 27–29). That follows from what is downstream: `DepthBook` keeps no order queues
+and no per-order state, and every consumer past it rebuilds from L2 aggregates. So the image costs
+occupied levels rather than resting orders — bounded by `levelCount` instead of by a net resting
+depth §8 says nobody has measured — and needs no new engine state, since `PriceLadder` already
+carries `levelQty` and `orderCount` per level for the auction's volume curves.
+
+Two things ask for one, and both go through a single pending flag:
+
+* a **snapshot restore**, which is the whole-node restart case; and
+* **`RequestBookImage`**, a shard-wide operator command, for a market data process that restarted
+  while the engine kept running and so missed the first.
+
+Both publish from `doBackgroundWork`, once the book event publication is *connected* — because both
+ask at exactly the moment a subscriber is least likely to be listening, and publishing into nothing
+counts a drop and loses the image in silence.
+
+**The image consumes no sequence numbers.** It carries the current `nextBookEventSeqNum` as the
+baseline the image is consistent at, the way `DepthSnapshotBegin` carries `l2SeqNum`, and a
+subscriber must not count it as a gap. That is what keeps publishing one a node-local act: the
+sequence is replicated state and is snapshotted, so an image that advanced it would make a node
+whose publication connected a moment later produce a different snapshot. The invariant is §7's for
+metrics, and the same test enforces it. An empty book still sends a bracketed zero-level cycle,
+because "there is no liquidity" and "I cannot yet know" are different answers.
+
+**Installing an image republishes increments as well as a snapshot.** A snapshot alone is not
+enough, and assuming it was is a mistake worth recording: a subscriber that is already synchronised
+*ignores* snapshots (below), so a console that had synchronised to the market data process's empty
+book a moment earlier would ignore every image that followed. Increments carry a level's absolute
+quantity, so a level the image *changes* is self-correcting; a level it *removes* would simply stop
+being mentioned and sit in a consumer's book undisturbed, which is why the vacated levels are zeroed
+explicitly.
+
 ### The L2 recovery feed
 
 The snapshot that paragraph calls for is a fourth stream, published by the Market Data process on a
@@ -800,7 +844,15 @@ Three properties the design depends on:
   middle is discarded rather than installed — the staging discipline `discovery` already applies to
   the universe broadcast. A dropped snapshot message is never retried for the same reason: the cycle
   it belonged to is already void, and the next one is along within the interval.
-* **A snapshot is ignored while a subscriber is synchronised.** Increments past the image's sequence
+* **A snapshot is ignored while a subscriber is synchronised, unless the image is at or ahead of
+  everything applied.** The exception matters as much as the rule. A subscriber joining a stream may
+  be handed whatever is still in the buffer, so the first complete cycle it sees can be the *oldest*
+  — an empty book from before a recovery. Under an unconditional rule it would then discard every
+  later image and could only be rescued by an increment happening to arrive; on a quiet book none
+  does, and it shows an empty ladder for ever with every message it received perfectly valid.
+  Installing is safe exactly when the image's `l2SeqNum` is at or past everything the subscriber has
+  applied, because the image already contains all of it and there is nothing to rewind.
+* **The rule the exception narrows:** increments past the image's sequence
   have already been applied straight to the book and were never buffered, so installing it would
   silently rewind the book to an older state.
 
@@ -846,6 +898,15 @@ answers, and a consumer must not render the first when it means the second.
     <type name="SecurityName"    primitiveType="char" length="48"/>
     <type name="ChannelUri"      primitiveType="char" length="128"/>
 
+    <!-- Whether the gateway knew the order well enough to fill in origQty and cumQty. It cannot
+         after its own restart: it holds those in memory and the engine does not store origQty at
+         all (Design.md §3), so there is nothing to recover them from. Saying so is the point:
+         reporting cumQty = 0 for a half-filled order is a confident lie, and the client has no way
+         to tell it from the truth. Absent on a version 1 report, which is read as KNOWN. -->
+    <enum name="Enrichment" encodingType="int8">
+      <validValue name="KNOWN">0</validValue>
+      <validValue name="UNKNOWN">1</validValue>
+    </enum>
     <enum name="Side" encodingType="int8">
       <validValue name="BUY">0</validValue>
       <validValue name="SELL">1</validValue>
@@ -922,6 +983,14 @@ answers, and a consumer must not render the first when it means the second.
   <sbe:message name="PurgeExpiredOrders" id="4" blockLength="16">
     <field name="purgeTime"   id="1" type="Timestamp"/>
     <field name="tradingDate" id="2" type="TradingDate"/>
+  </sbe:message>
+  <!-- Republish every book on the shard as a level image (ids 27-29), for a market data process
+       that restarted while the engine kept running and so has no book and no way to learn one.
+       Shard-wide like the two above; there is no per-security session command either. Sequenced
+       like any other operator command, but what it produces is node-local output rather than a
+       change to any book; see BookImageBegin. -->
+  <sbe:message name="RequestBookImage" id="6" blockLength="8">
+    <field name="requestTime" id="1" type="Timestamp"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
@@ -1022,6 +1091,52 @@ answers, and a consumer must not render the first when it means the second.
     <field name="aggressorSide"   id="6" type="Side"/>
   </sbe:message>
 
+  <!-- ============ Book image: the recovery feed for the book event stream ============ -->
+
+  <!-- Level-aggregated, not per order, because nothing downstream keeps per-order state: the
+       market data process aggregates straight into a DepthBook and every consumer past it rebuilds
+       from L2. So the image is bounded by occupied levels rather than by resting depth, which
+       matters: a per-order image of a full book would be a million messages, against a net
+       resting depth nobody has measured (§8).
+
+       The engine walks its ladders' occupancy bitset, so producing one costs occupied levels and
+       no extra state: PriceLadder already carries levelQty and orderCount.
+
+       **seqNum here is a baseline, not a sequence.** These messages do not consume book event
+       sequence numbers and must not be counted as a gap; they carry the sequence the image is
+       consistent at, exactly as DepthSnapshotBegin carries l2SeqNum. That is what keeps them
+       node-local. An image is published when a publication happens to connect, or when an operator
+       asks, and nextBookEventSeqNum is replicated state that is snapshotted. If publishing an
+       image moved it, one node taking longer to connect than another would diverge the snapshot.
+
+       Bracketed, and a book with no liquidity still sends a zero-level cycle: "the book is empty"
+       and "I cannot yet know" are different answers, the same rule the L2 snapshot follows. -->
+  <sbe:message name="BookImageBegin" id="27" blockLength="24">
+    <field name="seqNum"     id="1" type="SeqNum"      description="Baseline; not a feed sequence"/>
+    <field name="securityId" id="2" type="SecurityId"/>
+    <field name="shardId"    id="3" type="ShardId"/>
+    <field name="levelCount" id="4" type="OrderCount"  description="BookImageLevel messages to follow"/>
+  </sbe:message>
+
+  <sbe:message name="BookImageLevel" id="28" blockLength="40">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="price"      id="2" type="Price"/>
+    <field name="qty"        id="3" type="Quantity"/>
+    <field name="securityId" id="4" type="SecurityId"/>
+    <field name="shardId"    id="5" type="ShardId"/>
+    <field name="orderCount" id="6" type="OrderCount"/>
+    <field name="side"       id="7" type="Side"/>
+  </sbe:message>
+
+  <!-- Repeats the sequence and the count so a cycle that lost its middle is discarded, not
+       installed, the same reason DepthSnapshotEnd does. -->
+  <sbe:message name="BookImageEnd" id="29" blockLength="24">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="securityId" id="2" type="SecurityId"/>
+    <field name="shardId"    id="3" type="ShardId"/>
+    <field name="levelCount" id="4" type="OrderCount"/>
+  </sbe:message>
+
 
   <!-- ============ Derived feeds, published by the Market Data process ============ -->
 
@@ -1112,6 +1227,10 @@ answers, and a consumer must not render the first when it means the second.
     <field name="rejectReason"    id="10" type="RejectReason"/>
     <field name="execType"        id="11" type="ExecType"/>
     <field name="side"            id="12" type="Side"/>
+    <!-- Fits inside the block's existing padding, so blockLength is unchanged and a version 1
+         reader is unaffected. UNKNOWN means this gateway never saw the order, after its own
+         restart usually, so origQty and cumQty above are not to be believed. -->
+    <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
   </sbe:message>
 
 
@@ -2319,16 +2438,12 @@ It found three defects that unit tests could not:
 * **Net resting depth** measured against production flow, to confirm the 1M order pool and set the
   capacity high-water mark.
 * **Order modify/replace:** currently unsupported (cancel/new only) — confirm this is intentional.
-* **Market data has no book after a snapshot recovery.** `MarketDataService` derives everything
-  from the book event stream, and a restored engine republishes nothing for the orders it restored,
-  so a market data process that restarts alongside the engine comes back empty and stays empty
-  until the next event on that security. The engine's state is correct and trades against restored
-  orders correctly; the derived feed simply has no way to learn it. Three shapes of fix, and the
-  choice is a real one: replay the book events for restored orders at the end of the restore (the
-  simplest, but it puts a burst of events with historical sequence numbers on the feed); let market
-  data ask the engine for an image (a request/response path that does not exist anywhere yet); or
-  have market data snapshot its own `DepthBook` alongside the engine's. Found by
-  `e2e/run-restart.sh`, which reports it rather than asserting it.
+* ~~**Market data has no book after a snapshot recovery.**~~ **Done.** The engine republishes each
+  book as a level image (§5, "The book image") on a restore and on request, and market data installs
+  it. What is *not* covered: per-order **L3** recovery. An MBO consumer that joins or reconnects
+  after a restart still has no way to rebuild per-order state — the image is deliberately
+  level-aggregated, because nothing downstream keeps per-order state today and a per-order image
+  would be bounded by resting depth rather than by `levelCount`.
 * **Archive growth is unbounded once directories persist.** The recorded log now survives restarts,
   which is the point, but nothing truncates it. Aeron 1.53's post-snapshot behaviour for the
   consensus module log and the archive segments needs establishing before a retention procedure or
@@ -2340,12 +2455,12 @@ It found three defects that unit tests could not:
   topology, is stored by the control plane, and appears in published releases, so changing it
   invalidates every recorded value. It wants a separate engine-level fingerprint.
 * **The gateway's `origQty` does not survive its own restart.** `OrderStateStore` is three in-memory
-  maps with no persistence, and `GatewayService` substitutes `origQty = 0, cumQty = 0` for anything
-  it did not see — silently, and permanently, since `recordFill` early-returns for such an order so
-  it never re-heals. The engine cannot help: it does not store `origQty` and has no spare word to
-  (§3). The state has to be the gateway's own — an append-only memory-mapped journal replayed at
-  boot — and anything genuinely missing must be reported with an explicit unknown rather than a
-  confidently wrong zero. That substitution is worth fixing on its own, before any journal exists.
+  maps with no persistence. It no longer *lies* about it — `ClientExecutionReport.enrichment` says
+  `UNKNOWN` for an order this gateway never saw, instead of the `cumQty = 0` it used to send, which
+  read as "nothing has filled" and never re-healed. But saying so is not recovering it. The engine
+  cannot help: it does not store `origQty` and has no spare word to (§3), so the state has to be
+  the gateway's own — an append-only memory-mapped journal replayed at boot. That is still to build,
+  and until it is, a gateway restart costs every in-flight order its `cumQty`.
 * **`SecurityDefinition` geometry.** The message carries `priceFloor`, `tickSize` and `levelCount`,
   but the ladders are pre-allocated, so geometry is fixed when a book is constructed. The engine
   accepts references and collars and **rejects the whole definition** if the geometry disagrees, on

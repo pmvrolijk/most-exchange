@@ -1,6 +1,7 @@
 package com.engine.gateway
 
 import com.engine.sbe.ClientExecutionReportEncoder
+import com.engine.sbe.Enrichment
 import com.engine.sbe.ExecType
 import com.engine.sbe.ExecutionReportDecoder
 import com.engine.sbe.MessageHeaderDecoder
@@ -267,7 +268,8 @@ class GatewayService(
         }
 
         // An order this gateway never saw — the usual cause is a restart, not a fault. Forward
-        // it with what is known rather than dropping a report the client is waiting for.
+        // it with what is known, marked as such, rather than dropping a report the client is
+        // waiting for or inventing a cumQty for it.
         if (origQty == NOT_FOUND && execType != ExecType.REJECTED) untrackedReports++
 
         // CumQty is accumulated from fills, never derived from leavesQty: a terminal report
@@ -275,6 +277,9 @@ class GatewayService(
         // report a cancelled order as fully filled.
         if (execType == ExecType.TRADE) state.recordFill(exchangeOrderId, execReport.lastQty())
 
+        // A rejected order was never bound, so having no origQty for it is the normal case rather
+        // than a loss of state; everything else with no origQty is this gateway not knowing.
+        val unknown = origQty == NOT_FOUND && execType != ExecType.REJECTED
         val knownOrigQty = if (origQty == NOT_FOUND) 0L else origQty
         val cumQty = if (origQty == NOT_FOUND) 0L else state.cumQtyOf(exchangeOrderId)
 
@@ -283,6 +288,13 @@ class GatewayService(
             execReport.side(), price = execReport.price(), lastQty = execReport.lastQty(),
             leavesQty = leavesQty, cumQty = cumQty, origQty = knownOrigQty,
             rejectReason = execReport.rejectReason(),
+            // Said out loud rather than left to be inferred from a zero. This gateway holds
+            // origQty in memory and the engine does not store it at all, so after a gateway
+            // restart there is nothing to recover it from -- and `cumQty = 0` on a half-filled
+            // order is a confident lie the client has no way to detect. It never re-heals either:
+            // recordFill ignores an order it has no origQty for, so the value would stay wrong for
+            // the rest of that order's life.
+            enrichment = if (unknown) Enrichment.UNKNOWN else Enrichment.KNOWN,
         )
 
         if (isTerminal(execType, leavesQty)) state.release(exchangeOrderId)
@@ -310,6 +322,13 @@ class GatewayService(
         cumQty: Long,
         origQty: Long,
         rejectReason: RejectReason,
+        /**
+         * Defaults to KNOWN because every gateway-generated report is one it knows everything
+         * about — it is rejecting an order it is holding in its hand. Only a report coming back
+         * from the engine for an order this gateway has no record of is UNKNOWN, and that one
+         * passes it explicitly.
+         */
+        enrichment: Enrichment = Enrichment.KNOWN,
     ) {
         clientReport.wrapAndApplyHeader(outbound, 0, headerEncoder)
             .participantId(participantId)
@@ -324,6 +343,7 @@ class GatewayService(
             .rejectReason(rejectReason)
             .execType(execType)
             .side(side)
+            .enrichment(enrichment)
         sink.toClient(
             outbound, 0,
             MessageHeaderEncoder.ENCODED_LENGTH + ClientExecutionReportEncoder.BLOCK_LENGTH,

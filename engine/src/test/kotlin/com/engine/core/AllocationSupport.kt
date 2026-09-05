@@ -174,6 +174,19 @@ internal class Driver(
         book.tradingDate = Alloc.TRADING_DATE
     }
 
+
+    // Encoded once, into its own buffer, because `OperatorCommands` constructs a fresh encoder on
+    // every call. That is right for an operator command -- it is sent by hand, not on a hot path --
+    // and wrong inside a loop measuring allocation, where it would be counted as the engine's.
+    private val requestImageBuffer = UnsafeBuffer(ByteArray(256))
+    private val requestImageLength =
+        com.engine.reference.OperatorCommands.encodeRequestBookImage(requestImageBuffer)
+
+    /** The `RequestBookImage` operator command, as the CLI and the control plane send it. */
+    fun requestBookImage() {
+        service.onSessionMessage(session, 0L, requestImageBuffer, 0, requestImageLength, header)
+    }
+
     fun newOrder(participantId: Long, clOrdId: Long, side: Byte, price: Long, qty: Long) {
         newOrderEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId)

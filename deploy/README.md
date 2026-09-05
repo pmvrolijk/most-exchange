@@ -240,11 +240,19 @@ CLUSTER_FRESH=--fresh docker compose up cluster-host -d
 Removing a security whose book is **empty** is allowed, and so is adding one — those are how a shard
 changes shape, and each is logged with a line rather than refused.
 
-Two things to expect. `docker compose down -v` removes the volumes, books included. And market data
-comes back with an **empty book** after a snapshot recovery: it derives depth from the book event
-stream and a restored engine republishes nothing for the orders it restored. The engine is correct —
-send a crossing order and it trades — but the console's ladder stays empty until there is activity
-on that security. Known gap; see `docs/Handover.md`.
+`docker compose down -v` removes the volumes, books included.
+
+Market data comes back with the books, because a restored engine republishes each one as a level
+image. Restart market data **on its own**, though, and it misses that image and has no snapshot of
+its own to fall back on, so its ladder stays empty. Ask for another:
+
+```sh
+curl -X POST -u admin:most-dev-password localhost:8080/api/shards/0/book-image
+docker compose exec cluster-host most image --shard 0
+```
+
+Safe to repeat: it changes no book and moves no market, which is why it is the one command on the
+operations screen with no warning about what it will do to a live market.
 
 ## What is dev-only
 

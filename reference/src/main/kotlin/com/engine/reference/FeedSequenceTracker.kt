@@ -27,6 +27,18 @@ class FeedSequenceTracker {
         private set
 
     /**
+     * The highest sequence seen from [shardId], or -1 before anything has been seen.
+     *
+     * Read by [DepthFeedAssembler] to decide whether a snapshot is safe to install over a book it
+     * is already synchronised with: an image taken at or after everything the consumer has applied
+     * cannot rewind it, because it already contains all of it.
+     */
+    fun lastSeen(shardId: Int): Long {
+        val box = expectedByShard[shardId] ?: return -1L
+        return if (box.initialised) box.expected - 1 else -1L
+    }
+
+    /**
      * Records [seqNum] from [shardId]. Returns the number of messages missed — 0 when the stream
      * is contiguous, and 0 for the first message seen from a shard, which establishes the
      * baseline rather than counting everything before it as lost.

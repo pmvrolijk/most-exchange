@@ -2,6 +2,9 @@ package com.engine.marketdata
 
 import com.engine.reference.FeedSequenceTracker
 import com.engine.sbe.AuctionUncrossedDecoder
+import com.engine.sbe.BookImageBeginDecoder
+import com.engine.sbe.BookImageEndDecoder
+import com.engine.sbe.BookImageLevelDecoder
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.OrderAddedDecoder
 import com.engine.sbe.OrderReducedDecoder
@@ -102,6 +105,9 @@ class MarketDataService(
     private val orderRemoved = OrderRemovedDecoder()
     private val tradeExecuted = TradeExecutedDecoder()
     private val auctionUncrossed = AuctionUncrossedDecoder()
+    private val bookImageBegin = BookImageBeginDecoder()
+    private val bookImageLevel = BookImageLevelDecoder()
+    private val bookImageEnd = BookImageEndDecoder()
     private val sessionChanged = SessionChangedDecoder()
     private val volatilityHalted = VolatilityHaltedDecoder()
 
@@ -122,6 +128,18 @@ class MarketDataService(
      */
     var foreignShardEvents = 0L
         private set
+
+    /** Book images installed, discarded for a bad level count, and messages outside a bracket. */
+    var imagesApplied = 0L
+        private set
+    var imagesDiscarded = 0L
+        private set
+    var imageMessagesOutOfBand = 0L
+        private set
+
+    /** Which book an image is being read into, or [NOT_IN_PROGRESS]. */
+    private var imageInProgress = NOT_IN_PROGRESS
+    private var imageLevels = 0
 
     var snapshotsPublished = 0L
         private set
@@ -206,11 +224,154 @@ class MarketDataService(
                 if (!accept(volatilityHalted.seqNum(), volatilityHalted.shardId())) return
             }
 
+            BookImageBeginDecoder.TEMPLATE_ID -> {
+                bookImageBegin.wrap(buffer, body, blockLength, version)
+                onBookImageBegin(bookImageBegin.securityId(), bookImageBegin.shardId())
+                return
+            }
+
+            BookImageLevelDecoder.TEMPLATE_ID -> {
+                bookImageLevel.wrap(buffer, body, blockLength, version)
+                onBookImageLevel(
+                    bookImageLevel.securityId(), bookImageLevel.shardId(),
+                    bookImageLevel.side(), bookImageLevel.price(),
+                    bookImageLevel.qty(), bookImageLevel.orderCount(),
+                )
+                return
+            }
+
+            BookImageEndDecoder.TEMPLATE_ID -> {
+                bookImageEnd.wrap(buffer, body, blockLength, version)
+                onBookImageEnd(
+                    bookImageEnd.securityId(), bookImageEnd.shardId(),
+                    bookImageEnd.levelCount(),
+                )
+                return
+            }
+
             else -> return // Unknown template: forward nothing rather than guess.
         }
 
         // L3 is the engine's own event, unaltered.
         publisher.publishL3(buffer, offset, length)
+    }
+
+    // ------------------------------------------------------------- book image
+
+    /**
+     * A book image replaces this security's book wholesale.
+     *
+     * The engine sends one when it has restored from a snapshot, or when asked, and both mean the
+     * same thing: this process has no idea what the book is. Depth here is derived purely from the
+     * event stream, and a restored engine publishes no events for the orders it restored — so
+     * without an image the book comes back empty and stays empty until the next order arrives on
+     * that security.
+     *
+     * The image's `seqNum` is deliberately **not** passed to [accept]. It is the baseline the image
+     * is consistent at rather than a feed sequence: the engine consumes no sequence numbers to send
+     * one, so counting them would report a gap on every image.
+     */
+    private fun onBookImageBegin(securityId: Int, eventShardId: Int) {
+        if (eventShardId != shardId) {
+            foreignShardEvents++
+            return
+        }
+        val index = indexOf(securityId)
+        if (index < 0) {
+            unknownSecurityEvents++
+            imageInProgress = NOT_IN_PROGRESS
+            return
+        }
+        // Cleared at Begin rather than at End, so a cycle that is cut off leaves an empty book
+        // rather than a merged one. An empty book is visibly wrong and recovers on the next image;
+        // a book half-replaced by a truncated image looks entirely plausible.
+        books[index].rememberOccupancy()
+        books[index].clear()
+        imageInProgress = index
+        imageLevels = 0
+    }
+
+    private fun onBookImageLevel(
+        securityId: Int,
+        eventShardId: Int,
+        side: Side,
+        price: Long,
+        qty: Long,
+        orders: Int,
+    ) {
+        if (eventShardId != shardId) {
+            foreignShardEvents++
+            return
+        }
+        val index = indexOf(securityId)
+        if (index < 0 || index != imageInProgress) {
+            imageMessagesOutOfBand++
+            return
+        }
+        if (books[index].install(price, qty, orders, side == Side.BUY) == NULL_LEVEL) {
+            outOfRangeEvents++
+            return
+        }
+        imageLevels++
+    }
+
+    private fun onBookImageEnd(securityId: Int, eventShardId: Int, levelCount: Int) {
+        if (eventShardId != shardId) {
+            foreignShardEvents++
+            return
+        }
+        val index = indexOf(securityId)
+        if (index < 0 || index != imageInProgress) {
+            imageMessagesOutOfBand++
+            imageInProgress = NOT_IN_PROGRESS
+            return
+        }
+        imageInProgress = NOT_IN_PROGRESS
+        if (imageLevels != levelCount) {
+            // Begin and End repeat the count so a cycle that lost its middle is discarded rather
+            // than installed. Leaving the book empty is recoverable; a partial book that looks
+            // whole is not.
+            books[index].clear()
+            imagesDiscarded++
+            return
+        }
+        imagesApplied++
+        republish(index, securityId)
+    }
+
+    /**
+     * Pushes a recovered book downstream, as **increments as well as a snapshot**.
+     *
+     * The snapshot alone is not enough, and assuming it was is the mistake this exists to correct.
+     * A subscriber that is already synchronised **ignores snapshots** — deliberately, because
+     * installing an image over a book whose later increments were applied straight through would
+     * rewind it. So a console that synchronised to this process's empty book a moment before the
+     * image arrived would ignore every snapshot that followed and sit on an empty book for ever,
+     * on a market with real depth, with nothing about it looking wrong.
+     *
+     * An increment carries a level's absolute quantity, so replacing a level is self-correcting. A
+     * level the image *removed* is not: it would simply stop being mentioned, and would sit in a
+     * consumer's book undisturbed. Hence the vacated levels first, each zeroed explicitly.
+     *
+     * The snapshot still goes out, for the subscribers that are not yet synchronised and for whom
+     * the increments are unusable on their own.
+     */
+    private fun republish(index: Int, securityId: Int) {
+        val book = books[index]
+        book.forEachVacated(isBid = true) { price ->
+            publisher.publishDepth(securityId, Side.BUY.value(), price, 0L, 0)
+        }
+        book.forEachVacated(isBid = false) { price ->
+            publisher.publishDepth(securityId, Side.SELL.value(), price, 0L, 0)
+        }
+        book.forEachOccupied(isBid = true) { price, qty, orders ->
+            publisher.publishDepth(securityId, Side.BUY.value(), price, qty, orders)
+        }
+        book.forEachOccupied(isBid = false) { price, qty, orders ->
+            publisher.publishDepth(securityId, Side.SELL.value(), price, qty, orders)
+        }
+        publishSnapshot(index)
+        emitTopOfBookIfChanged(index, securityId)
     }
 
     /**
@@ -359,5 +520,8 @@ class MarketDataService(
     companion object {
         /** No bid or no offer. Distinct from a real price so consumers can tell them apart. */
         const val NO_PRICE = Long.MIN_VALUE
+
+        /** No book image is being read. */
+        const val NOT_IN_PROGRESS = -1
     }
 }

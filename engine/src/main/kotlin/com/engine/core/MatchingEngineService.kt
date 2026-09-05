@@ -1,6 +1,9 @@
 package com.engine.core
 
 import com.engine.sbe.AuctionUncrossedEncoder
+import com.engine.sbe.BookImageBeginEncoder
+import com.engine.sbe.BookImageEndEncoder
+import com.engine.sbe.BookImageLevelEncoder
 import com.engine.sbe.ExecType
 import com.engine.sbe.ExecutionReportEncoder
 import com.engine.sbe.MessageHeaderDecoder
@@ -12,6 +15,7 @@ import com.engine.sbe.OrderReducedEncoder
 import com.engine.sbe.OrderRemovedEncoder
 import com.engine.sbe.PurgeExpiredOrdersDecoder
 import com.engine.sbe.RemoveReason
+import com.engine.sbe.RequestBookImageDecoder
 import com.engine.sbe.SecurityDefinitionDecoder
 import com.engine.sbe.SessionChangedEncoder
 import com.engine.sbe.SessionTransitionDecoder
@@ -112,6 +116,13 @@ class MatchingEngineService(
      */
     private val participantToSession = Long2LongHashMap(NULL_SESSION)
 
+    /**
+     * A book image is owed to the book event stream. Set by a snapshot restore and by
+     * `RequestBookImage`; cleared once one has been written. Node-local by design, so it is not
+     * snapshotted and cannot make one node's state differ from another's.
+     */
+    private var bookImagePending = false
+
     private val matchOutcome = MatchOutcome()
     private val cancelOutcome = CancelOutcome()
     private val uncrossScratch = LongArray(levelCount)
@@ -134,6 +145,11 @@ class MatchingEngineService(
     private val sessionChangedEncoder = SessionChangedEncoder()
     private val volatilityHaltedEncoder = VolatilityHaltedEncoder()
 
+    private val bookImageBeginEncoder = BookImageBeginEncoder()
+    private val bookImageLevelEncoder = BookImageLevelEncoder()
+    private val bookImageEndEncoder = BookImageEndEncoder()
+    private val requestBookImageDecoder = RequestBookImageDecoder()
+
     private val snapshotStateEncoder = SnapshotEngineStateEncoder()
     private val snapshotBookEncoder = SnapshotBookEncoder()
     private val snapshotOrderEncoder = SnapshotOrderEncoder()
@@ -143,6 +159,10 @@ class MatchingEngineService(
     var undeliverableReports = 0L
         private set
     var droppedBookEvents = 0L
+        private set
+
+    /** Book images written. A market data process that has no book expects this to be non-zero. */
+    var bookImagesPublished = 0L
         private set
     var backpressureStalls = 0L
         private set
@@ -163,6 +183,29 @@ class MatchingEngineService(
 
     override fun onRoleChange(newRole: Cluster.Role) {
         isLeader = newRole == Cluster.Role.LEADER
+    }
+
+    /**
+     * Publishes a pending book image once there is somewhere for it to go.
+     *
+     * Deferred to here rather than done at the point it is asked for, because both things that ask
+     * for one happen when a subscriber is least likely to be listening: a snapshot restore runs
+     * during `onStart`, before the market data process has necessarily subscribed, and the operator
+     * command exists precisely for a market data process that has only just restarted. Publishing
+     * into an unconnected publication would count a drop and lose the image silently.
+     *
+     * [bookImagePending] is node-local and deliberately not snapshotted: it records an intention to
+     * write output, not any part of the replicated state. A follower keeps it pending, since its
+     * book event publication is muted, and publishes if it is ever made leader.
+     */
+    override fun doBackgroundWork(nowNs: Long): Int {
+        if (!bookImagePending || !isLeader) return 0
+        val publication = bookEventPub ?: return 0
+        if (!publication.isConnected) return 0
+        for (book in books) publishBookImage(book)
+        bookImagePending = false
+        bookImagesPublished++
+        return 1
     }
 
     override fun onTerminate(cluster: Cluster) {
@@ -229,6 +272,14 @@ class MatchingEngineService(
                 securityDefinitionDecoder.wrap(buffer, body, blockLength, version)
                 onSecurityDefinition()
                 metrics?.securityDefinition?.record(metrics.nanoTime() - started)
+            }
+
+            RequestBookImageDecoder.TEMPLATE_ID -> {
+                requestBookImageDecoder.wrap(buffer, body, blockLength, version)
+                // Deferred rather than published here: the point of the command is a market data
+                // process that has just restarted, and its subscription may not be connected yet.
+                // Setting the flag makes both triggers -- this and a snapshot restore -- one path.
+                bookImagePending = true
             }
 
             else -> Unit // Unknown template: ignore rather than throw. See the class KDoc.
@@ -897,6 +948,11 @@ class MatchingEngineService(
         if (report.hasFatal) throw SnapshotRestoreFailed(report.render())
         val notes = report.renderNotes()
         if (notes.isNotEmpty()) println(notes)
+        // Market data derives its books purely from the book event stream and a restore publishes
+        // no events, so without this it comes back empty and stays empty until the next order on
+        // that security. Deferred to doBackgroundWork: nothing is subscribed yet at this point.
+        bookImagePending = true
+
         // Always printed, because the alternative is indistinguishable from a full log replay that
         // happened to rebuild the same books -- and those are very different operational events.
         println(
@@ -1137,6 +1193,67 @@ class MatchingEngineService(
      * because dropping would tear the feed for a consumer that is still there, but the stall is
      * counted so it surfaces as an alert instead of a silent freeze (Design.md §7).
      */
+    /**
+     * Writes one security's book as a bracketed level image.
+     *
+     * **Reads `nextBookEventSeqNum` and never advances it.** That is the whole reason this is
+     * allowed to happen when a publication happens to connect, or when an operator asks: the
+     * sequence is replicated state and is snapshotted, so an image that consumed sequence numbers
+     * would make a node that took longer to connect than its peers produce a different snapshot.
+     * The number on these messages is the sequence the image is consistent at, exactly as
+     * `DepthSnapshotBegin` carries `l2SeqNum`, and a subscriber must not count it as a gap.
+     *
+     * An empty book still sends a bracketed zero-level cycle: "there is no liquidity" and "I cannot
+     * yet know" are different answers, and a subscriber that cannot tell them apart will sit on an
+     * empty book waiting for an image that already came.
+     */
+    private fun publishBookImage(book: OrderBook) {
+        val baseline = nextBookEventSeqNum
+        val securityId = book.securityId
+        val levels = book.occupiedLevelCount()
+
+        publishBookEvent(
+            MessageHeaderEncoder.ENCODED_LENGTH + BookImageBeginEncoder.BLOCK_LENGTH,
+        ) { buffer, offset ->
+            bookImageBeginEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
+                .seqNum(baseline)
+                .securityId(securityId)
+                .shardId(shardId)
+                .levelCount(levels)
+        }
+
+        publishImageSide(book, baseline, Side.BUY)
+        publishImageSide(book, baseline, Side.SELL)
+
+        publishBookEvent(
+            MessageHeaderEncoder.ENCODED_LENGTH + BookImageEndEncoder.BLOCK_LENGTH,
+        ) { buffer, offset ->
+            bookImageEndEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
+                .seqNum(baseline)
+                .securityId(securityId)
+                .shardId(shardId)
+                .levelCount(levels)
+        }
+    }
+
+    private fun publishImageSide(book: OrderBook, baseline: Long, side: Byte) {
+        val securityId = book.securityId
+        book.forEachOccupiedLevel(side == Side.BUY) { price, qty, orders ->
+            publishBookEvent(
+                MessageHeaderEncoder.ENCODED_LENGTH + BookImageLevelEncoder.BLOCK_LENGTH,
+            ) { buffer, offset ->
+                bookImageLevelEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
+                    .seqNum(baseline)
+                    .price(price)
+                    .qty(qty)
+                    .securityId(securityId)
+                    .shardId(shardId)
+                    .orderCount(orders)
+                    .side(SbeSide.get(side))
+            }
+        }
+    }
+
     private inline fun publishBookEvent(length: Int, encode: (MutableDirectBuffer, Int) -> Unit) {
         if (!isLeader) return
         val publication = bookEventPub ?: return

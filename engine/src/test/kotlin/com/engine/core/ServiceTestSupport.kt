@@ -258,6 +258,14 @@ class Harness(
         submit(MessageHeaderEncoder.ENCODED_LENGTH + SessionTransitionEncoder.BLOCK_LENGTH)
     }
 
+    /** The `RequestBookImage` operator command, as the CLI and the control plane send it. */
+    fun requestBookImage() {
+        com.engine.reference.OperatorCommands.encodeRequestBookImage(buffer)
+        submit(
+            MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.RequestBookImageEncoder.BLOCK_LENGTH,
+        )
+    }
+
     fun purge(tradingDate: Int) {
         PurgeExpiredOrdersEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
             .purgeTime(0L)

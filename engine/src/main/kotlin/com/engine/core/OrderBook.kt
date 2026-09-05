@@ -628,6 +628,39 @@ class OrderBook(
     // ---------------------------------------------------------------- snapshot
 
     /**
+     * Visits every occupied level on one side, ascending, with the aggregates already kept there.
+     *
+     * This is what a book image is built from, and it is why an image costs occupied levels rather
+     * than resting orders: [PriceLadder] already maintains `levelQty` and `orderCount` per level for
+     * the auction's volume curves, so nothing has to be counted or stored to produce one.
+     */
+    inline fun forEachOccupiedLevel(
+        isBid: Boolean,
+        action: (price: Long, qty: Long, orders: Int) -> Unit,
+    ) {
+        val ladder = if (isBid) bids else asks
+        var level = ladder.lowestOccupiedAtOrAbove(0)
+        while (level != NULL_LEVEL) {
+            action(priceOf(level), ladder.levelQty[level], ladder.orderCount[level])
+            level = ladder.lowestOccupiedAtOrAbove(level + 1)
+        }
+    }
+
+    /** Occupied levels across both sides, so an image can state its own length up front. */
+    fun occupiedLevelCount(): Int = countOccupied(bids) + countOccupied(asks)
+
+    @PublishedApi
+    internal fun countOccupied(ladder: PriceLadder): Int {
+        var count = 0
+        var level = ladder.lowestOccupiedAtOrAbove(0)
+        while (level != NULL_LEVEL) {
+            count++
+            level = ladder.lowestOccupiedAtOrAbove(level + 1)
+        }
+        return count
+    }
+
+    /**
      * Visits every resting order, in ladder order and FIFO within each level. Restoring by
      * replaying this order through [book] reproduces each level's queue exactly, because
      * booking appends at the tail.

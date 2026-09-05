@@ -86,10 +86,41 @@ resting-order counts are reconciled as a backstop. Do not assume a throw on this
 timestamp — so the operator who fixes the security file and restarts immediately is met with "active
 mark file detected" for the next ten seconds instead of a working node.
 
-**After a snapshot recovery the market-data process has no book.** It derives everything from the
-book event stream, and a restored engine republishes nothing for the orders it restored. The engine's
-state is correct and trades against restored orders correctly; the derived L2 feed simply has no way
-to learn it. Open issue — see `docs/Handover.md`.
+**A recovered engine republishes its books as a level image, and market data rebuilds from it.**
+Market data keeps no per-order state, so the image is one message per *occupied ladder level*
+(`BookImageBegin`/`Level`/`End`, ids 27-29) rather than per order — bounded by `levelCount` instead
+of by a resting depth nobody has measured. Two triggers, one path: a snapshot restore sets a pending
+flag, and so does the `RequestBookImage` operator command (`most image`, `POST /api/shards/{id}/book-image`)
+for a market-data process that restarted while the engine kept running. Both publish from
+`doBackgroundWork` once the book-event publication is *connected*, because both ask at the moment a
+subscriber is least likely to be listening.
+
+**An image carries the sequence as a baseline and consumes none.** `nextBookEventSeqNum` is
+replicated state and is snapshotted, so an image that advanced it would let a node whose publication
+connected later produce a different snapshot. Same invariant as metrics, and
+`MetricsDeterminismTest` checks it. A subscriber must not count an image's `seqNum` as a gap.
+
+**Installing an image publishes increments as well as a snapshot, and that is not belt-and-braces.**
+A subscriber that is already synchronised *ignores* snapshots (below), so a console that synchronised
+to market-data's empty book a moment before the image landed would ignore every snapshot after it.
+Increments carry absolute per-level quantities, so a replaced level self-corrects — but a level the
+image *removed* would simply stop being mentioned, which is why `DepthBook.forEachVacated` zeroes it
+explicitly.
+
+**A synchronised subscriber ignores a snapshot only when installing it would rewind.** The rule used
+to be unconditional; it now allows an image whose `l2SeqNum` is at or ahead of everything applied,
+because such an image already contains all of it. Without the exception a subscriber handed a stale
+image from the buffer on join — the oldest one still there — discards every later one and can only be
+rescued by an increment happening to arrive. On a quiet book none does. `DepthFeedAssemblerTest`
+pins both directions; mutating either way fails a different test.
+
+**The gateway says when it does not know a `cumQty`** rather than sending zero.
+`ClientExecutionReport.enrichment` is `UNKNOWN` for an order this gateway never saw — after its own
+restart, usually. It holds `origQty` in memory and the engine does not store it at all, so nothing
+can recover it, and `recordFill` ignores such an order so the value would never re-heal. The field
+sits in the message's existing block padding, so `blockLength` is unchanged and a version 1 reader is
+unaffected. **The journal that would actually preserve the state across a restart is still not
+built** — see `docs/Handover.md`.
 
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is
@@ -148,6 +179,9 @@ this; keep it that way or the tests validate a layout the cluster rejects.
     dominates it, add rounds, not tolerance.
   - The soak measures a **slope across two runs**, not a total: ~95MB of pools at startup would
     otherwise swamp the per-order figure.
+  - A fourth `inline` is now load-bearing the same way: `OrderBook.forEachOccupiedLevel`, which the
+    book image walks. Removing it boxes the callback's captured state once per level, and
+    `AeronAllocationTest` catches it.
   - All three are mutation-validated. Removing `inline` from `matchAggressive`, `offerToSnapshot`
     or `publishBookEvent` compiles in silence — "warnings are errors" says nothing about it — and
     each is caught by the test covering its path and no other. If you touch one of those keywords,

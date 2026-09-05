@@ -16,6 +16,7 @@ private val USAGE = """
       most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
       most session --phase closed|pre-open|open-auction|continuous [--shard N]
       most purge  [--trading-date YYYYMMDD] [--shard N]
+      most image  [--shard N]
       most cluster [--dir DIR] [--fresh]
       most cluster snapshot [--ingress 0=HOST:PORT | --dir DIR]
       most cluster shutdown [--dir DIR]
@@ -29,6 +30,8 @@ private val USAGE = """
       define      Seed a security's reference price and collar widths.
       session     Move a shard to a trading phase; the uncross runs on the way to continuous.
       purge       Run the off-session expiry sweep.
+      image       Republish every book on the shard as a level image, for a market data
+                  process that restarted and has no book to rebuild from.
       cluster     Run a single-node cluster host for local development. It persists the
                   archive and cluster directories unless --fresh is given, because those
                   are the shard's only resumption point.
@@ -84,6 +87,7 @@ fun main(argv: Array<String>) {
             "define" -> runDefine(args)
             "session" -> runSession(args)
             "purge" -> runPurge(args)
+            "image" -> runImage(args)
             "cluster" -> runCluster(args)
             else -> {
                 System.err.println("most: unknown command '$command'")

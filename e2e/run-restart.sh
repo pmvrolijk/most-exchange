@@ -235,8 +235,10 @@ capture_book() { # capture_book <output file>
   ( $MOST book --symbol AAPL --depth 5 --refresh 500 $CONN > "$1.raw" 2>&1 & echo $! > "$RUN/book.pid" )
   sleep 4
   kill "$(cat "$RUN/book.pid")" 2>/dev/null
-  # Last rendered frame only, with the cursor control sequences stripped.
-  sed -e "$STRIP" "$1.raw" | grep -E "^\s*[0-9]" | tail -20 > "$1"
+  # The distinct ladder rows, not the frames. The inspector redraws on a timer, so how many
+  # identical frames land in a fixed window is a property of timing rather than of the book, and
+  # comparing frame counts makes the check fail on a slow machine for no reason.
+  sed -e "$STRIP" "$1.raw" | grep -E "^\s*[0-9]" | sort -u > "$1"
 }
 capture_book "$RUN/book-before.txt"
 cat "$RUN/book-before.txt"
@@ -270,6 +272,21 @@ grep -q "restored 3 resting orders" "$LOGS/engine-same.log" \
 grep -o "matching-engine: restored .*" "$LOGS/engine-same.log"
 pass "three resting orders restored from the snapshot, with both sequences carried"
 
+# Market data derives its books entirely from the book event stream, and a restore publishes no
+# events for the orders it restored -- so without the book image the engine now sends on recovery,
+# this comes back empty and stays empty until the next order arrives on that security. When this
+# script was first written it reported that gap here instead of asserting it.
+#
+# Captured before the crossing order below, because that trade changes the book.
+capture_book "$RUN/book-after.txt"
+cat "$RUN/book-after.txt"
+if ! diff -q "$RUN/book-before.txt" "$RUN/book-after.txt" > /dev/null; then
+  echo "--- before ---"; cat "$RUN/book-before.txt"
+  echo "--- after ----"; cat "$RUN/book-after.txt"
+  fail "market data's book did not come back; the engine published no book image"
+fi
+pass "market data rebuilt the same book from the engine's image"
+
 # The strongest evidence available: trade against a restored order. A resting sell of 10 was filled
 # for 4 before the snapshot, so exactly 6 remain. If price, side, leavesQty or the ladder position
 # came back wrong, this either does not trade or trades the wrong quantity.
@@ -280,17 +297,40 @@ grep -q "TRADE" "$RUN/cross.out" || fail "the crossing order did not trade again
 grep -q "cum 6" "$RUN/cross.out" || fail "the restored order did not carry its true leavesQty"
 pass "a restored, partially filled order matched for exactly its remaining 6"
 
-# Known gap, reported rather than asserted: market data derives its books entirely from the book
-# event stream, and a restored engine republishes nothing for orders it restored. So a market data
-# process that restarts alongside the engine comes back with an empty book and stays empty until
-# the next event on that security. The engine's state is correct; the derived feed does not know it.
-capture_book "$RUN/book-after.txt"
-if diff -q "$RUN/book-before.txt" "$RUN/book-after.txt" > /dev/null; then
-  echo "  note: market data's book also came back (a fix for the gap below would look like this)"
-else
-  echo "  note: market data's book is NOT restored -- known gap, see docs/Handover.md."
-  echo "        The engine's state is correct; the derived L2 feed has no way to learn it."
+echo
+echo "== 4a. restart ONLY market data -- an image on request is the way back"
+# The other half, and the reason RequestBookImage exists. The engine is still running and has
+# published its recovery image long ago, so a market data process starting now has missed it and
+# has no snapshot of its own to fall back on. Nothing but asking will recover it.
+# The book as it stands now, after that trade consumed the 101.00 offer.
+capture_book "$RUN/book-live.txt"
+[ -s "$RUN/book-live.txt" ] || fail "no book to compare against"
+
+kill "$MARKETDATA_PID" 2>/dev/null; wait "$MARKETDATA_PID" 2>/dev/null; sleep 1
+$MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data-alone.log" 2>&1 &
+MARKETDATA_PID=$!; PIDS+=("$MARKETDATA_PID")
+wait_for "$LOGS/market-data-alone.log" "market-data: started" 30 "market data" || fail "market data"
+sleep 2
+
+capture_book "$RUN/book-orphaned.txt"
+if [ -s "$RUN/book-orphaned.txt" ] && diff -q "$RUN/book-live.txt" "$RUN/book-orphaned.txt" > /dev/null; then
+  fail "market data somehow had the book already; this step is testing nothing"
 fi
+pass "a market data process that restarted alone has no book, as expected"
+
+$MOST image --shard 0 $CONN > "$RUN/image.out" 2>&1 || fail "request book image"
+cat "$RUN/image.out"
+# The engine publishes on its next duty cycle, and market data republishes on receipt, so this is
+# not a race in the system -- it is giving the CLI's own JVM time to start after the fact.
+sleep 3
+capture_book "$RUN/book-recovered.txt"
+cat "$RUN/book-recovered.txt"
+if ! diff -q "$RUN/book-live.txt" "$RUN/book-recovered.txt" > /dev/null; then
+  echo "--- expected ---"; cat "$RUN/book-live.txt"
+  echo "--- got --------"; cat "$RUN/book-recovered.txt"
+  fail "the requested image did not rebuild the book"
+fi
+pass "most image rebuilt it without restarting the engine"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

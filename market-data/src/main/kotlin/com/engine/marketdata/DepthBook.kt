@@ -29,6 +29,13 @@ class DepthBook(
     @PublishedApi internal val bidOccupancy = LongArray((levelCount + 63) ushr 6)
     @PublishedApi internal val askOccupancy = LongArray((levelCount + 63) ushr 6)
 
+    // What was occupied before an image replaced the book, so the image can say which levels it
+    // vacated. Two bitsets rather than a copy of the book: 4KB a side at the shard's usual
+    // geometry, allocated once, against the alternative of downstream never being told that a
+    // level went away.
+    @PublishedApi internal val priorBidOccupancy = LongArray((levelCount + 63) ushr 6)
+    @PublishedApi internal val priorAskOccupancy = LongArray((levelCount + 63) ushr 6)
+
     var bestBidLevel = NULL_LEVEL
         private set
     var bestAskLevel = NULL_LEVEL
@@ -47,6 +54,76 @@ class DepthBook(
     fun bestBidQty(): Long = if (bestBidLevel == NULL_LEVEL) 0L else bidQty[bestBidLevel]
 
     fun bestAskQty(): Long = if (bestAskLevel == NULL_LEVEL) 0L else askQty[bestAskLevel]
+
+    /**
+     * Empties the book, for installing a fresh image over it.
+     *
+     * A book image replaces rather than merges, and it has to: the engine sends one when this
+     * process has no idea what the book is, so anything already here is either nothing or stale.
+     * Merging would leave whatever the old state held at levels the image does not mention.
+     */
+    /** Remembers the occupied levels, so [forEachVacated] can report what an image removed. */
+    fun rememberOccupancy() {
+        bidOccupancy.copyInto(priorBidOccupancy)
+        askOccupancy.copyInto(priorAskOccupancy)
+    }
+
+    /**
+     * Visits every level that was occupied when [rememberOccupancy] was called and is not occupied
+     * now — the levels an image silently removed.
+     *
+     * Downstream has to be told about these explicitly. A depth update carries a level's absolute
+     * quantity, so replacing a level is self-correcting, but a level that simply stops being
+     * mentioned would sit in a consumer's book for ever.
+     */
+    inline fun forEachVacated(isBid: Boolean, action: (price: Long) -> Unit) {
+        val prior = if (isBid) priorBidOccupancy else priorAskOccupancy
+        val now = if (isBid) bidOccupancy else askOccupancy
+        for (word in prior.indices) {
+            var vacated = prior[word] and now[word].inv()
+            while (vacated != 0L) {
+                val bit = java.lang.Long.numberOfTrailingZeros(vacated)
+                action(priceOf((word shl 6) + bit))
+                vacated = vacated and (vacated - 1L)
+            }
+        }
+    }
+
+    fun clear() {
+        bidQty.fill(0L)
+        askQty.fill(0L)
+        bidOrders.fill(0)
+        askOrders.fill(0)
+        bidOccupancy.fill(0L)
+        askOccupancy.fill(0L)
+        bestBidLevel = NULL_LEVEL
+        bestAskLevel = NULL_LEVEL
+    }
+
+    /**
+     * Installs one level of an image. Unlike [add] this *sets* the aggregates rather than adding to
+     * them, because an image carries a level's total rather than a delta.
+     */
+    fun install(price: Long, qty: Long, orders: Int, isBid: Boolean): Int {
+        val level = levelOf(price)
+        if (!isInRange(level)) return NULL_LEVEL
+        if (isBid) {
+            bidQty[level] = qty
+            bidOrders[level] = orders
+        } else {
+            askQty[level] = qty
+            askOrders[level] = orders
+        }
+        if (qty > 0L || orders > 0) {
+            occupancy(isBid).let { it[level ushr 6] = it[level ushr 6] or (1L shl (level and 63)) }
+            if (isBid) {
+                if (bestBidLevel == NULL_LEVEL || level > bestBidLevel) bestBidLevel = level
+            } else {
+                if (bestAskLevel == NULL_LEVEL || level < bestAskLevel) bestAskLevel = level
+            }
+        }
+        return level
+    }
 
     /** Adds [qty] and one order to a level. Returns the level, or [NULL_LEVEL] if out of range. */
     fun add(price: Long, qty: Long, isBid: Boolean): Int {

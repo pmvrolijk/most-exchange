@@ -137,6 +137,23 @@ class OperationsApi(
     }
 
     /**
+     * Asks the shard to republish its books as level images.
+     *
+     * The recovery lever for market data, which keeps no snapshot of its own: it derives depth from
+     * the book event stream, so a restart leaves it with no book and no way to learn one. Changes
+     * no book and moves no market, so unlike its neighbours on this controller it needs no
+     * confirmation dialog spelling out what it will do to a live market.
+     */
+    @PostMapping("/shards/{shardId}/book-image")
+    fun bookImage(
+        @PathVariable shardId: Int,
+        http: HttpServletRequest,
+    ): ResponseEntity<CommandResult> {
+        val result = operations.requestBookImage(shardId)
+        return accepted(result, "book-image", "shard:$shardId", http)
+    }
+
+    /**
      * Asks the shard's cluster to take a snapshot.
      *
      * The odd one out in this controller, twice over. It does not go to the gateway -- a snapshot

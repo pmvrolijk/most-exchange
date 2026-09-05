@@ -1,6 +1,7 @@
 package com.engine.gateway
 
 import com.engine.sbe.ClientExecutionReportDecoder
+import com.engine.sbe.Enrichment
 import com.engine.sbe.ExecType
 import com.engine.sbe.ExecutionReportEncoder
 import com.engine.sbe.MessageHeaderDecoder
@@ -26,6 +27,7 @@ data class ClientReport(
     val cumQty: Long,
     val origQty: Long,
     val rejectReason: Int,
+    val enrichment: Enrichment,
 )
 
 class RecordingSink : GatewaySink {
@@ -55,6 +57,7 @@ class RecordingSink : GatewaySink {
             decoder.participantId(), decoder.clOrdId(), decoder.exchangeOrderId(),
             decoder.execType().name, decoder.lastQty(), decoder.leavesQty(),
             decoder.cumQty(), decoder.origQty(), decoder.rejectReason().value(),
+            decoder.enrichment(),
         )
     }
 }
@@ -246,15 +249,57 @@ class GatewayServiceTest {
     }
 
     @Test
-    fun `a report for an unknown order is forwarded and counted`() {
+    fun `a report for an unknown order is forwarded, counted, and marked unknown`() {
         // The usual cause is a gateway restart, not a fault: the client is still waiting.
+        //
+        // The quantities are zeros because there is nothing to reconstruct them from -- this
+        // gateway holds origQty in memory and the engine does not store it at all -- and the flag
+        // is what stops a client reading those zeros as facts. On a half-filled order "cumQty = 0"
+        // says nothing has filled, which is both false and indistinguishable from the truth.
         report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5)
 
         assertEquals(1L, service.untrackedReports)
         val forwarded = sink.toClient.single()
         assertEquals("TRADE", forwarded.execType)
+        assertEquals(Enrichment.UNKNOWN, forwarded.enrichment)
         assertEquals(0L, forwarded.origQty)
         assertEquals(0L, forwarded.cumQty)
+    }
+
+    @Test
+    fun `an order the gateway tracked is marked known`() {
+        newOrder(1, 100, 1, qty = 10)
+        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
+        report(1, 100, 500, ExecType.TRADE, lastQty = 4, leavesQty = 6)
+
+        assertTrue(sink.toClient.all { it.enrichment == Enrichment.KNOWN })
+        assertEquals(4L, sink.toClient.last().cumQty)
+    }
+
+    @Test
+    fun `a locally rejected order is known, not unknown`() {
+        // The gateway is rejecting an order it is holding in its hand, so it knows everything it
+        // is saying. Marking these UNKNOWN would make the flag mean "a reject happened" and cost
+        // it the only meaning worth having.
+        newOrder(1, 100, securityId = 99, qty = 10)
+
+        val forwarded = sink.toClient.single()
+        assertEquals("REJECTED", forwarded.execType)
+        assertEquals(Enrichment.KNOWN, forwarded.enrichment)
+        assertEquals(10L, forwarded.origQty)
+    }
+
+    @Test
+    fun `an unknown order stays unknown as further fills arrive`() {
+        // It never re-heals: recordFill ignores an order with no origQty, so a gateway that
+        // started accumulating from the fills it happened to see would report a cumQty that is
+        // wrong by exactly what it missed -- worse than saying it does not know.
+        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5)
+        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 0)
+
+        assertEquals(2, sink.toClient.size)
+        assertTrue(sink.toClient.all { it.enrichment == Enrichment.UNKNOWN })
+        assertTrue(sink.toClient.all { it.cumQty == 0L })
     }
 
     @Test

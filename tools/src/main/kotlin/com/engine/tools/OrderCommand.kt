@@ -3,6 +3,7 @@ package com.engine.tools
 import com.engine.reference.PriceCodec
 import com.engine.reference.RoutedSecurity
 import com.engine.sbe.ClientExecutionReportDecoder
+import com.engine.sbe.Enrichment
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleEncoder
@@ -143,11 +144,17 @@ fun encodeCancel(
 fun formatReport(decoder: ClientExecutionReportDecoder, symbol: String): String {
     val execType = decoder.execType().name
     val reject = decoder.rejectReason()
+    // The gateway says when it never saw the order -- after its own restart, usually -- and the
+    // quantities it could not reconstruct are then zeros rather than facts. Printing "cum 0" for a
+    // half-filled order would read as "nothing filled", which is exactly the wrong thing to show
+    // an operator trying to work out what a restart cost them.
+    val cum = if (decoder.enrichment() == Enrichment.UNKNOWN) "unknown" else decoder.cumQty().toString()
+    val orig = if (decoder.enrichment() == Enrichment.UNKNOWN) "unknown" else decoder.origQty().toString()
     val detail = when (execType) {
         "TRADE" -> "last ${decoder.lastQty()} @ ${PriceCodec.format(decoder.price())} " +
-            "cum ${decoder.cumQty()} leaves ${decoder.leavesQty()}"
+            "cum $cum leaves ${decoder.leavesQty()}"
         "REJECTED" -> "reason $reject"
-        else -> "leaves ${decoder.leavesQty()} cum ${decoder.cumQty()} of ${decoder.origQty()}"
+        else -> "leaves ${decoder.leavesQty()} cum $cum of $orig"
     }
     return "  $execType  $symbol  orderId=${decoder.exchangeOrderId()} " +
         "clOrdId=${decoder.clOrdId()}  $detail"

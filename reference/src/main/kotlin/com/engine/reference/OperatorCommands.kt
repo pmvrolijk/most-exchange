@@ -3,6 +3,7 @@ package com.engine.reference
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.Phase
 import com.engine.sbe.PurgeExpiredOrdersEncoder
+import com.engine.sbe.RequestBookImageEncoder
 import com.engine.sbe.SecurityDefinitionEncoder
 import com.engine.sbe.SessionTransitionEncoder
 import org.agrona.MutableDirectBuffer
@@ -84,6 +85,23 @@ object OperatorCommands {
             .purgeTime(0L)
             .tradingDate(tradingDate)
         return MessageHeaderEncoder.ENCODED_LENGTH + PurgeExpiredOrdersEncoder.BLOCK_LENGTH
+    }
+
+    /**
+     * Asks the engine to republish every book on the shard as a level image.
+     *
+     * For a market data process that restarted while the engine kept running: it derives its books
+     * entirely from the book event stream, so it comes back with nothing and no way to learn what
+     * it missed. Shard-wide, like the session transition and the purge — there is no per-security
+     * form of either.
+     *
+     * Changes no book and moves no market. What it produces is output on the book event stream, so
+     * it is safe to repeat and safe to send at any time.
+     */
+    fun encodeRequestBookImage(buffer: MutableDirectBuffer): Int {
+        RequestBookImageEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
+            .requestTime(0L)
+        return MessageHeaderEncoder.ENCODED_LENGTH + RequestBookImageEncoder.BLOCK_LENGTH
     }
 
     /**

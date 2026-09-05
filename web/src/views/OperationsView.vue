@@ -106,6 +106,28 @@ async function sendPurge() {
   if (ok) purge.value = null
 }
 
+/* ---- book image -------------------------------------------------------------------------- */
+
+/**
+ * The only command on this screen that cannot hurt anything.
+ *
+ * It changes no book and moves no market: the engine republishes each book as a level image on the
+ * book event stream, and market data installs it. The reason to reach for it is a market data
+ * process that restarted while the engine kept running -- it derives its books entirely from that
+ * stream and keeps no snapshot of its own, so it comes back with an empty ladder on a live market.
+ */
+const bookImage = ref<{ shardId: number } | null>(null)
+
+async function sendBookImage() {
+  const b = bookImage.value
+  if (!b) return
+  const ok = await run(async () => {
+    const result = await api.post<CommandResult>(`/shards/${b.shardId}/book-image`, {})
+    record([result])
+  })
+  if (ok) bookImage.value = null
+}
+
 /* ---- snapshot ---------------------------------------------------------------------------- */
 
 /**
@@ -251,6 +273,12 @@ function outcomeClass(result: CommandResult): string {
         Take snapshot
       </button>
       <button
+        class="ghost small"
+        @click="clearError(); bookImage = { shardId: shard.shardId }"
+      >
+        Republish books
+      </button>
+      <button
         class="danger small"
         @click="clearError(); reopen = { shardId: shard.shardId, securityId: '', referencePrice: '' }"
       >
@@ -335,6 +363,15 @@ function outcomeClass(result: CommandResult): string {
     :error="commandError"
     @confirm="sendSession"
     @close="session = null"
+  />
+
+  <ConfirmDialog
+    v-if="bookImage"
+    title="Republish the books"
+    :message="`Asks shard ${bookImage.shardId} to republish every book as a level image on the book event stream, so the market data process can rebuild depth it does not have. Reach for this when a book shows empty on a market you know has depth — usually because market data restarted while the engine kept running, since it keeps no snapshot of its own. It changes no book and moves no market, and it is safe to repeat.`"
+    confirm-label="Republish"
+    @confirm="sendBookImage"
+    @close="bookImage = null"
   />
 
   <ConfirmDialog

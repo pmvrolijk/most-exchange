@@ -165,6 +165,32 @@ class OperationsService(
     }
 
     /**
+     * Asks the shard to republish every book as a level image.
+     *
+     * For a market data process that restarted while the engine kept running. Depth is derived
+     * entirely from the book event stream, so a restarted one has no book and nothing to rebuild
+     * from — and unlike the engine it has no snapshot of its own to fall back on.
+     *
+     * Goes through the gateway like the other four, and is unacknowledged like them: what it
+     * produces is output on a feed nobody replies on. It changes no book and moves no market, so
+     * repeating it is harmless — which is worth knowing, because the way to tell whether it worked
+     * is to look at whether the books came back.
+     */
+    fun requestBookImage(shardId: Int): CommandResult {
+        topology.securitiesOfShardOrThrow(shardId)
+        val outcome = link.send(shardId) { buffer ->
+            OperatorCommands.encodeRequestBookImage(buffer)
+        }
+        return CommandResult(
+            command = "book image shard $shardId",
+            sent = outcome.sent,
+            confirmed = false,
+            detail = if (outcome.sent) "asked shard $shardId to republish its books"
+            else outcome.detail,
+        )
+    }
+
+    /**
      * The halt-recovery runbook, as one operation (Design.md §4.6, which lists writing it down as
      * an open item).
      *

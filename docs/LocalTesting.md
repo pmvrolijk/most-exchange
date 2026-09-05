@@ -657,10 +657,17 @@ changed `priceFloor`, `tickSize`, `levelCount` or `maxOrders`. It prints what is
 non-zero. Removing a security whose book is *empty* is allowed and is how a security leaves a shard;
 so is adding one. `./e2e/run-restart.sh` exercises all of it.
 
-Note that **market data comes back with an empty book** after a snapshot recovery: it derives depth
-from the book event stream and a restored engine republishes nothing for restored orders. The engine
-is correct — send a crossing order and it trades — but `most book` will show nothing until there is
-activity on that security. This is a known gap, not a misconfiguration.
+**Market data comes back with the book too**, because a restored engine republishes each one as a
+level image. If market data restarts *on its own* while the engine keeps running, it misses that
+image and has no snapshot of its own — ask for another:
+
+```sh
+$MOST image --shard 0                     # republish every book on the shard
+```
+
+Safe to repeat, changes no book, and moves no market. `market-data: stopped.` prints
+`imagesApplied=` at shutdown; zero, on a process whose ladder stayed empty, means no image ever
+arrived — a different problem from a quiet feed.
 
 ---
 
@@ -678,7 +685,8 @@ activity on that security. This is a known gap, not a misconfiguration.
 | `active mark file detected` | A node was restarted too soon after the previous one. Aeron's archive and cluster mark files carry a liveness timestamp; wait about ten seconds. |
 | `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f com.engine`. |
 | `refused to restore its snapshot` | The security file changed in a way that would destroy state. The report names the security and what it holds. Restart on the previous file to restore it, or empty the book first. |
-| `most book` shows nothing after a restart | Expected. Market data rebuilds depth from the book event stream, and a restored engine republishes nothing for restored orders. The engine is fine — send a crossing order and it trades. |
+| `most book` shows nothing after a restart | Market data restarted without the engine and missed its book image. Run `most image --shard 0`. |
+| A client sees `cum unknown` | The gateway never saw that order, almost always because *it* restarted. It holds `origQty` in memory and the engine does not store it, so the value is genuinely unrecoverable — reported rather than guessed at. |
 | Fingerprints differ between processes | They are reading different security files. |
 | `most send` prints no execution report | Increase `--follow`; or the gateway lost its cluster session — check `gateway.log`. |
 | `most load` reports every order `BOOK_CAPACITY` | `maxOrders` is too small for the rate, or the band is too wide to cross so nothing ever leaves the book. |

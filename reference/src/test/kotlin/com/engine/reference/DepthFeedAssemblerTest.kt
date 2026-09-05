@@ -134,6 +134,45 @@ class DepthFeedAssemblerTest {
     }
 
     @Test
+    fun `a snapshot at or ahead of everything applied is installed, not ignored`() {
+        // The other half of the rule above, and the case that stranded a real consumer.
+        //
+        // A subscriber joining a stream can be handed whatever is still in the buffer, so the
+        // first complete cycle it sees may be the OLDEST -- an empty book from before a recovery.
+        // Under "ignore snapshots while synchronised" it would then discard every later image and
+        // wait for an increment to rescue it. On a quiet book none comes, and it shows an empty
+        // ladder for ever on a market with real depth, with every message it received valid.
+        //
+        // Installing is safe precisely when the image is at or past everything applied: it already
+        // contains all of it, so there is nothing to rewind.
+        val a = DepthFeedAssembler()
+        a.snapshot()                                   // synchronised, and empty
+        assertEquals(0, assertNotNull(a.book(security)).levels(isBid = true, limit = 5).size)
+
+        a.snapshot(Triple(true, 99L, 15L), Triple(false, 101L, 6L))
+
+        val book = assertNotNull(a.book(security))
+        assertEquals(99L, book.bestBid(), "a newer image was ignored and the book left empty")
+        assertEquals(101L, book.bestAsk())
+    }
+
+    @Test
+    fun `an update applied after the image still wins over that image`() {
+        // The guard is on the image's sequence, not on its arrival: an increment past the image
+        // has been applied and was never buffered, so the image must not come back over it. This
+        // is the case the exception above must not have widened.
+        val a = DepthFeedAssembler()
+        a.snapshot(Triple(true, 100L, 10L))
+        val imageSeq = l2
+        a.update(isBid = true, price = 100, qty = 25)
+
+        a.snapshot(Triple(true, 100L, 10L), at = imageSeq)
+
+        val book = assertNotNull(a.book(security))
+        assertEquals(25L, book.levels(isBid = true, limit = 1).single().qty, "the book was rewound")
+    }
+
+    @Test
     fun `a gap on one shard leaves another shard's books alone`() {
         // Several shards may share one multicast group; their sequences are separate streams, and
         // one falling behind says nothing about the other.

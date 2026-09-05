@@ -4,6 +4,9 @@ import com.engine.reference.AggregatedBook
 import com.engine.reference.DepthFeedAssembler
 import com.engine.reference.DepthFeedDecoder
 import com.engine.sbe.AuctionUncrossedEncoder
+import com.engine.sbe.BookImageBeginEncoder
+import com.engine.sbe.BookImageEndEncoder
+import com.engine.sbe.BookImageLevelEncoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.OrderAddedEncoder
 import com.engine.sbe.OrderReducedEncoder
@@ -131,6 +134,43 @@ class BookEventFeeder(
         AuctionUncrossedEncoder().wrapAndApplyHeader(buffer, 0, header)
             .seqNum(seq++).uncrossPrice(price).executedQty(qty).securityId(securityId).shardId(shardId)
         emit(MessageHeaderEncoder.ENCODED_LENGTH + AuctionUncrossedEncoder.BLOCK_LENGTH)
+    }
+
+    /**
+     * One bracketed book image, exactly as the engine writes it after a snapshot restore.
+     *
+     * [seq] is passed through as the baseline and **not** advanced: an image consumes no book event
+     * sequence numbers, which is what lets the engine publish one at a node-local moment without
+     * changing replicated state. A feeder that advanced it here would be testing a different
+     * protocol from the one the engine speaks.
+     */
+    fun bookImage(
+        securityId: Int,
+        levels: List<Triple<Byte, Long, Pair<Long, Int>>>,
+        declaredCount: Int = levels.size,
+        shardIdOverride: Int = shardId,
+    ) {
+        BookImageBeginEncoder().wrapAndApplyHeader(buffer, 0, header)
+            .seqNum(seq).securityId(securityId).shardId(shardIdOverride).levelCount(declaredCount)
+        emit(MessageHeaderEncoder.ENCODED_LENGTH + BookImageBeginEncoder.BLOCK_LENGTH)
+
+        for ((side, price, aggregate) in levels) {
+            BookImageLevelEncoder().wrapAndApplyHeader(buffer, 0, header)
+                .seqNum(seq).price(price).qty(aggregate.first).securityId(securityId)
+                .shardId(shardIdOverride).orderCount(aggregate.second).side(Side.get(side))
+            emit(MessageHeaderEncoder.ENCODED_LENGTH + BookImageLevelEncoder.BLOCK_LENGTH)
+        }
+
+        BookImageEndEncoder().wrapAndApplyHeader(buffer, 0, header)
+            .seqNum(seq).securityId(securityId).shardId(shardIdOverride).levelCount(declaredCount)
+        emit(MessageHeaderEncoder.ENCODED_LENGTH + BookImageEndEncoder.BLOCK_LENGTH)
+    }
+
+    /** A Begin with no End, for the truncated-cycle case. */
+    fun bookImageBeginOnly(securityId: Int, declaredCount: Int) {
+        BookImageBeginEncoder().wrapAndApplyHeader(buffer, 0, header)
+            .seqNum(seq).securityId(securityId).shardId(shardId).levelCount(declaredCount)
+        emit(MessageHeaderEncoder.ENCODED_LENGTH + BookImageBeginEncoder.BLOCK_LENGTH)
     }
 
     private fun emit(length: Int) = service.onBookEvent(buffer, 0, length)

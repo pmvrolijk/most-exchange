@@ -72,6 +72,40 @@ class MetricsDeterminismTest {
     }
 
     @Test
+    fun `publishing a book image changes no replicated state`() {
+        // A book image is output, not a decision. It is published when a publication happens to
+        // connect and when an operator asks, both of which are node-local moments -- so if it
+        // touched anything a snapshot carries, one node connecting later than another would
+        // diverge them. The sequence is the one to watch: every other book event stamps and
+        // advances nextBookEventSeqNum, and an image deliberately reads it without advancing it.
+        val quiet = Harness(arrayOf(serviceBook(SECURITY)))
+        val asked = Harness(arrayOf(serviceBook(SECURITY)))
+
+        drive(quiet)
+        drive(asked)
+        repeat(3) { asked.requestBookImage() }
+        // Both triggers, since they set the same flag and run through the same publish path.
+        asked.service.doBackgroundWork(0L)
+
+        assertContentEquals(quiet.reports, asked.reports, "an image changed the execution reports")
+        assertContentEquals(
+            bookFingerprint(quiet.books[0]),
+            bookFingerprint(asked.books[0]),
+            "an image changed the book",
+        )
+        assertEquals(
+            quiet.service.nextExchangeOrderId,
+            asked.service.nextExchangeOrderId,
+            "an image changed the order id sequence",
+        )
+        assertEquals(
+            quiet.service.nextBookEventSeqNum,
+            asked.service.nextBookEventSeqNum,
+            "an image consumed book event sequence numbers",
+        )
+    }
+
+    @Test
     fun `an instrumented node produces identical state to an uninstrumented one`() {
         val plain = Harness(arrayOf(serviceBook(SECURITY)))
         val metrics = EngineMetrics(SystemNanoClock.INSTANCE, stages = true)

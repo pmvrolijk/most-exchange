@@ -110,7 +110,13 @@ fun main(args: Array<String>) {
                     "droppedL1=${publisher.droppedL1} droppedL2=${publisher.droppedL2} " +
                     "droppedL3=${publisher.droppedL3} " +
                     "snapshots=${service.snapshotsPublished} " +
-                    "droppedSnapshot=${publisher.droppedSnapshot}"
+                    "droppedSnapshot=${publisher.droppedSnapshot} " +
+                    // A process that restarted and has no book expects imagesApplied to be
+                    // non-zero. Zero with a book that stayed empty is the tell that the engine
+                    // never sent one, which is a different problem from a feed that is quiet.
+                    "imagesApplied=${service.imagesApplied} " +
+                    "imagesDiscarded=${service.imagesDiscarded} " +
+                    "imageOutOfBand=${service.imageMessagesOutOfBand}"
             )
             System.out.flush()
         }

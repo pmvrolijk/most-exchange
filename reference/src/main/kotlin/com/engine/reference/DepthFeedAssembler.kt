@@ -114,7 +114,18 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
     ) {
         snapshotSequences.accept(shardId, seqNum)
         val feed = feedFor(securityId, shardId)
-        if (feed.state == SyncState.SYNCHRONISED) return
+        // A snapshot is normally ignored while synchronised, because increments past the image's
+        // sequence were applied straight to the book and never buffered, so installing it would
+        // silently rewind to an older state.
+        //
+        // Unless the image is at or ahead of everything this subscriber has applied, in which case
+        // it already contains all of it and there is nothing to rewind. That exception is not a
+        // refinement for its own sake: without it a subscriber that synchronised on a **stale**
+        // image -- the oldest one still in the stream's buffer when it joined -- ignores every
+        // later one and can only be rescued by an increment happening to arrive. On a quiet book
+        // none does, and it sits on an empty ladder for ever with nothing looking wrong. That is
+        // exactly what a consumer starting up after a market data recovery sees.
+        if (feed.state == SyncState.SYNCHRONISED && l2SeqNum < l2Sequences.lastSeen(shardId)) return
         feed.state = SyncState.BUILDING
         feed.staging.clear()
         feed.pending.clear()

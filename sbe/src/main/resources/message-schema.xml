@@ -32,6 +32,15 @@
     <type name="SecurityName"    primitiveType="char" length="48"/>
     <type name="ChannelUri"      primitiveType="char" length="128"/>
 
+    <!-- Whether the gateway knew the order well enough to fill in origQty and cumQty. It cannot
+         after its own restart: it holds those in memory and the engine does not store origQty at
+         all (Design.md §3), so there is nothing to recover them from. Saying so is the point:
+         reporting cumQty = 0 for a half-filled order is a confident lie, and the client has no way
+         to tell it from the truth. Absent on a version 1 report, which is read as KNOWN. -->
+    <enum name="Enrichment" encodingType="int8">
+      <validValue name="KNOWN">0</validValue>
+      <validValue name="UNKNOWN">1</validValue>
+    </enum>
     <enum name="Side" encodingType="int8">
       <validValue name="BUY">0</validValue>
       <validValue name="SELL">1</validValue>
@@ -108,6 +117,14 @@
   <sbe:message name="PurgeExpiredOrders" id="4" blockLength="16">
     <field name="purgeTime"   id="1" type="Timestamp"/>
     <field name="tradingDate" id="2" type="TradingDate"/>
+  </sbe:message>
+  <!-- Republish every book on the shard as a level image (ids 27-29), for a market data process
+       that restarted while the engine kept running and so has no book and no way to learn one.
+       Shard-wide like the two above; there is no per-security session command either. Sequenced
+       like any other operator command, but what it produces is node-local output rather than a
+       change to any book; see BookImageBegin. -->
+  <sbe:message name="RequestBookImage" id="6" blockLength="8">
+    <field name="requestTime" id="1" type="Timestamp"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
@@ -208,6 +225,52 @@
     <field name="aggressorSide"   id="6" type="Side"/>
   </sbe:message>
 
+  <!-- ============ Book image: the recovery feed for the book event stream ============ -->
+
+  <!-- Level-aggregated, not per order, because nothing downstream keeps per-order state: the
+       market data process aggregates straight into a DepthBook and every consumer past it rebuilds
+       from L2. So the image is bounded by occupied levels rather than by resting depth, which
+       matters: a per-order image of a full book would be a million messages, against a net
+       resting depth nobody has measured (§8).
+
+       The engine walks its ladders' occupancy bitset, so producing one costs occupied levels and
+       no extra state: PriceLadder already carries levelQty and orderCount.
+
+       **seqNum here is a baseline, not a sequence.** These messages do not consume book event
+       sequence numbers and must not be counted as a gap; they carry the sequence the image is
+       consistent at, exactly as DepthSnapshotBegin carries l2SeqNum. That is what keeps them
+       node-local. An image is published when a publication happens to connect, or when an operator
+       asks, and nextBookEventSeqNum is replicated state that is snapshotted. If publishing an
+       image moved it, one node taking longer to connect than another would diverge the snapshot.
+
+       Bracketed, and a book with no liquidity still sends a zero-level cycle: "the book is empty"
+       and "I cannot yet know" are different answers, the same rule the L2 snapshot follows. -->
+  <sbe:message name="BookImageBegin" id="27" blockLength="24">
+    <field name="seqNum"     id="1" type="SeqNum"      description="Baseline; not a feed sequence"/>
+    <field name="securityId" id="2" type="SecurityId"/>
+    <field name="shardId"    id="3" type="ShardId"/>
+    <field name="levelCount" id="4" type="OrderCount"  description="BookImageLevel messages to follow"/>
+  </sbe:message>
+
+  <sbe:message name="BookImageLevel" id="28" blockLength="40">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="price"      id="2" type="Price"/>
+    <field name="qty"        id="3" type="Quantity"/>
+    <field name="securityId" id="4" type="SecurityId"/>
+    <field name="shardId"    id="5" type="ShardId"/>
+    <field name="orderCount" id="6" type="OrderCount"/>
+    <field name="side"       id="7" type="Side"/>
+  </sbe:message>
+
+  <!-- Repeats the sequence and the count so a cycle that lost its middle is discarded, not
+       installed, the same reason DepthSnapshotEnd does. -->
+  <sbe:message name="BookImageEnd" id="29" blockLength="24">
+    <field name="seqNum"     id="1" type="SeqNum"/>
+    <field name="securityId" id="2" type="SecurityId"/>
+    <field name="shardId"    id="3" type="ShardId"/>
+    <field name="levelCount" id="4" type="OrderCount"/>
+  </sbe:message>
+
 
   <!-- ============ Derived feeds, published by the Market Data process ============ -->
 
@@ -298,6 +361,10 @@
     <field name="rejectReason"    id="10" type="RejectReason"/>
     <field name="execType"        id="11" type="ExecType"/>
     <field name="side"            id="12" type="Side"/>
+    <!-- Fits inside the block's existing padding, so blockLength is unchanged and a version 1
+         reader is unaffected. UNKNOWN means this gateway never saw the order, after its own
+         restart usually, so origQty and cumQty above are not to be believed. -->
+    <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
   </sbe:message>
 
 

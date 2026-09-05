@@ -126,6 +126,24 @@ fun runSession(args: Args) {
 }
 
 /** The off-session expiry sweep (Design.md §4.3), run well before PRE_OPEN. */
+/**
+ * Asks the shard to republish every book as a level image.
+ *
+ * For a market data process that restarted while the engine kept running: depth is derived from
+ * the book event stream, so a restarted one has no book and nothing to rebuild from. Changes no
+ * book and moves no market, so it is safe to repeat.
+ */
+fun runImage(args: Args) {
+    val shardId = args.int("shard", 0)
+
+    sendToShard(
+        args,
+        resolveShard = { it.shardRoute(shardId) },
+        build = { buffer -> OperatorCommands.encodeRequestBookImage(buffer) },
+        describe = { "shard $shardId asked to republish its books" },
+    )
+}
+
 fun runPurge(args: Args) {
     val tradingDate = args.int("trading-date", todayAsTradingDate())
     val shardId = args.int("shard", 0)

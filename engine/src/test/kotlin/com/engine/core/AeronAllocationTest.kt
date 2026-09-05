@@ -176,6 +176,53 @@ class AeronAllocationTest {
         CloseHelper.quietClose(snapshotPub)
     }
 
+    /**
+     * The book image walk, which has the same shape as the snapshot walk and the same trap: a
+     * callback per level, taken by an `inline fun`, inside another `inline fun` that claims and
+     * encodes. Drop either keyword and the lambda's captured state boxes once per level.
+     *
+     * Not on the steady-state path in the sense the others are -- an image is published on a
+     * restore or when an operator asks -- but it runs on the engine thread, in a burst, and under
+     * Epsilon a burst is exactly as fatal as a rate.
+     */
+    @Test
+    fun `publishing a book image allocates nothing per level`() {
+        val bookEvents = aeron.addSubscription(CHANNEL, BOOK_EVENT_STREAM)
+        drain = Drainer(listOf(bookEvents))
+
+        val driverUnderTest = Driver(
+            maxOrders = 4096,
+            aeron = aeron,
+            bookEventChannel = CHANNEL,
+            bookEventStreamId = BOOK_EVENT_STREAM,
+        )
+        awaitConnected(bookEvents)
+
+        // Resting only, on distinct levels, so the image has as many levels as it has orders.
+        driverUnderTest.sessionTransition(Phase.PRE_OPEN)
+        var clOrdId = 0L
+        repeat(IMAGE_LEVELS) {
+            driverUnderTest.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - it, 1L)
+        }
+        assertEquals(IMAGE_LEVELS, driverUnderTest.book.occupiedLevelCount())
+
+        // One round is one whole image, so a round is IMAGE_LEVELS encoded messages.
+        assertNoSteadyStateAllocation("publishing a book image", opsPerRound = IMAGE_LEVELS, rounds = 20) {
+            driverUnderTest.requestBookImage()
+            driverUnderTest.service.doBackgroundWork(0L)
+        }
+
+        assertTrue(
+            driverUnderTest.service.bookImagesPublished > 0,
+            "sanity: images were actually published, so the encode path was measured",
+        )
+        assertEquals(
+            0L,
+            driverUnderTest.service.droppedBookEvents,
+            "book events were dropped, so the encode path was never reached",
+        )
+    }
+
     private fun awaitConnected(subscription: Subscription) {
         val deadline = System.nanoTime() + CONNECT_TIMEOUT_NS
         while (subscription.imageCount() == 0) {
@@ -189,6 +236,7 @@ class AeronAllocationTest {
         const val BOOK_EVENT_STREAM = 12
         const val SNAPSHOT_STREAM = 13
         const val RESTING_ORDERS = 2_000
+        const val IMAGE_LEVELS = 512
         const val CONNECT_TIMEOUT_NS = 10_000_000_000L
     }
 }

@@ -265,6 +265,30 @@ docker compose restart gateway     # in-flight orders keep their origQty and cum
 gateway reports `cumQty` as unknown for every order in flight — the engine does not store `origQty`,
 so nothing else can hand it back. The startup line says how many orders came back.
 
+## Who speaks for whom
+
+`config/shard-0-participants.properties` says which gateway speaks for which participant. The
+cluster-host authenticates the gateway against it and stamps `gw-0` on the session as its encoded
+principal; the engine turns that back into a participant list and binds every one at session open.
+That is what keeps a participant reachable when it has said nothing since the gateway last connected
+— a `docker compose restart gateway`, most of all, which otherwise leaves every quiet participant of
+that gateway unable to be sent its own fills, and the gateway's `cumQty` for those orders quietly
+frozen (Design.md §1).
+
+Three files, three roles:
+
+| | |
+| --- | --- |
+| `config/shard-0-participants.properties` | The registry. Mounted into cluster-host, engine and gateway. Holds the **SHA-256** of the secret, never the secret. |
+| `config/gateway-0.secret` | The secret itself, read only by the gateway. |
+| `--participants` on `cluster-host` | What makes the consensus module verify anything at all. |
+
+Remove all three and the stack still runs: the engine falls back to learning routes from traffic,
+which is what shipped before the registry existed. What it does not do is fall back *quietly on its
+own* — credentials that fail to verify are rejected outright, and a gateway configured with an id
+but no secret refuses to start, because a gateway that connected anonymously by accident trades
+perfectly well while losing exactly the fills this is for.
+
 ## What is dev-only
 
 Do not carry these into anything real:
@@ -273,6 +297,10 @@ Do not carry these into anything real:
   cannot exercise. Snapshot *restore* is now exercised single-node by `e2e/run-restart.sh`; what a
   single node still cannot show is a snapshot taken on one member restoring on another, or a
   rejoining node catching up from the archive.
+- **A shared secret in the repository.** `config/gateway-0.secret` is committed, which is fine for
+  a stack whose admin password is also fixed and is not how a real one is run.
+- **A hand-written participant registry.** The control plane owns the `participant` table but does
+  not yet render or publish this file, so nothing checks the two agree.
 - **A fixed, published admin password.** Unset `CONTROL_ADMIN_PASSWORD` and the control plane
   generates one and logs it.
 - **`CONTROL_COOKIE_SECURE` is false**, because everything here is plain HTTP on localhost.

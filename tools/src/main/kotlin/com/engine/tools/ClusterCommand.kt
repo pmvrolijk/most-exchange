@@ -1,5 +1,7 @@
 package com.engine.tools
 
+import com.engine.reference.ParticipantRegistry
+import com.engine.reference.RegistryAuthenticatorSupplier
 import io.aeron.Aeron
 import io.aeron.archive.Archive
 import io.aeron.archive.ArchiveThreadingMode
@@ -63,7 +65,21 @@ private fun runClusterHost(args: Args) {
     val members = args.optional("members")
         ?: "0,$host:20110,$host:20220,$host:20330,$host:20440,$host:8010"
 
+    // Who may connect as which gateway. Optional: without it every client connects anonymously,
+    // the engine learns its routes from traffic, and the shard behaves exactly as it did before
+    // this existed. With it, a gateway presenting the right secret has its id stamped on the
+    // session as the encoded principal, which is what lets the engine bind that gateway's
+    // participants at session open on every node (Design.md §1).
+    val registryFile = args.optional("participants")
+    val registry = registryFile?.let(ParticipantRegistry::load)
+    val authenticator = registry?.let(::RegistryAuthenticatorSupplier)
+
     println("cluster: aeronDir=$aeronDir archive=$archiveDir cluster=$clusterDir")
+    println(
+        if (registry == null) "cluster: no participant registry (pass --participants to authenticate gateways)"
+        else "cluster: participants=$registryFile fingerprint=${registry.fingerprint()} " +
+            "gateways=${registry.gateways.map { it.gatewayId }}"
+    )
     println("cluster: members=$members")
     println(
         if (fresh) "cluster: --fresh -- deleting the archive and cluster directories on start"
@@ -96,10 +112,20 @@ private fun runClusterHost(args: Args) {
         .replicationChannel("aeron:udp?endpoint=$host:0")
         .deleteDirOnStart(fresh)
         .errorHandler { it.printStackTrace() }
+    authenticator?.let(consensusContext::authenticatorSupplier)
 
     ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
         println("cluster: started, awaiting shutdown signal")
         ShutdownSignalBarrier().use { it.await() }
+        // Inside nothing that races the exit, but still worth printing: an authenticated gateway
+        // count of zero on a shard that configured a registry means every gateway connected
+        // anonymously, which looks identical to it working until a maker goes quiet.
+        authenticator?.authenticator?.let {
+            println(
+                "cluster: authenticatedGateways=${it.authenticatedGateways} " +
+                    "rejectedSessions=${it.rejectedSessions}"
+            )
+        }
         println("cluster: shutdown signal received")
     }
 }

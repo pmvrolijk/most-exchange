@@ -52,6 +52,7 @@ fun main(args: Array<String>) {
         levelCount = config.maxLevelCount(),
         auctionMaxPasses = config.auctionMaxPasses,
         backpressureAlertThreshold = config.backpressureAlertThreshold,
+        participantRegistry = config.participantRegistry,
         metrics = metrics,
     )
 
@@ -60,8 +61,19 @@ fun main(args: Array<String>) {
     println(
         "matching-engine: shard=${config.shard.shardId} fingerprint=${config.fingerprint()} " +
             "securities=${config.shard.securities.map { it.symbol }} " +
-            "serviceId=${config.serviceId} clusterDir=${config.clusterDir}"
+            "serviceId=${config.serviceId} clusterDir=${config.clusterDir} " +
+            "participantRegistry=${config.registryFingerprint()}"
     )
+    if (config.participantRegistry == null) {
+        // Not an error -- it is the behaviour that shipped before the registry existed -- but it
+        // is the difference between a maker being reachable and its fills being counted and
+        // dropped, so it is said out loud rather than left to be noticed in a counter.
+        println(
+            "matching-engine: no participant registry (${EngineConfig.PARTICIPANT_REGISTRY} " +
+                "unset). Routes are learned from traffic only, so a participant that has sent " +
+                "nothing since its gateway connected cannot be sent its fills."
+        )
+    }
 
     // Created before the container so the error handler below can release it. A refused snapshot
     // restore has to leave through the same orderly shutdown as everything else -- see below.
@@ -137,7 +149,10 @@ fun main(args: Array<String>) {
                     "bookImagesPublished=${service.bookImagesPublished} " +
                     "backpressureStalls=${service.backpressureStalls} " +
                     "rejectedDefinitions=${service.rejectedDefinitions} " +
-                    "auctionPassLimitBreaches=${service.auctionPassLimitBreaches}"
+                    "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
+                    "declaredBindings=${service.declaredBindings} " +
+                    "unknownPrincipals=${service.unknownPrincipals} " +
+                    "participantRoutes=${service.participantRoutes}"
             )
             if (metrics != null) {
                 println("matching-engine: latency${metrics.summary()}")

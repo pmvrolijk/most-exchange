@@ -326,6 +326,38 @@ rejects with `GATEWAY_UNAVAILABLE`. **The outbound leg cannot do this** — egre
 drained or the session dies — so it drops and counts; retrying there was measured and cost 10x on
 the p99 while still dropping.
 
+**A participant is bound to its session at session open, from an authenticated principal.** A
+gateway presents `gatewayId:secret` as its cluster credentials; the **consensus module** (`most
+cluster --participants`) verifies them against the shard's `ParticipantRegistry` and stamps the
+gateway id on the session as its **encoded principal**; the engine turns that back into a
+participant list and binds every one. Aeron carries the principal in the session-open event through
+the log, so every node derives the identical map — and because `ServiceSnapshotLoader` restores
+sessions *without* replaying `onSessionOpen`, the engine rebuilds the bindings in `onStart` from
+`cluster.clientSessions()` and the map needs **no snapshot state of its own**.
+
+- **Traffic still wins for the order it arrived on**, and that is not a leftover: the gateway that
+  forwarded an order holds its `origQty` and is the only one that can restore `cumQty` on the way
+  back. Correspondingly `onSessionClose` drops only routes that session **still owns** — a route
+  traffic has moved to a live gateway stays there. Both directions are mutation-tested in
+  `ParticipantBindingTest`.
+- **Wrong credentials are rejected, never downgraded to anonymous.** A gateway that connected
+  anonymously by accident trades perfectly well and loses only the fills of whichever participants
+  went quiet — invisible until someone reconciles a `cumQty`. **No** credentials still authenticate
+  anonymously, because the control plane and the CLI connect to send operator commands and are
+  addressed by nobody.
+- **The registry is not in `ShardSpec.fingerprint()`** and must not be folded into it: that hash is
+  recorded by the control plane and published in every release, and rotating a gateway secret is not
+  a change of geometry. It has its own `fingerprint()`, printed by the engine, the gateway and the
+  cluster host.
+- **Everything here is optional and off by default.** Unset, the engine learns routes from traffic
+  exactly as before. What is *not* built: enforcement (`UNAUTHORIZED_PARTICIPANT` is still raised by
+  nothing, so a gateway may still trade for a participant that is not its own) and control-plane
+  authoring — the `participant` table exists but nothing renders or publishes this file.
+- `e2e/run-restart.sh` §4c is the check: rest an offer, restart the gateway, cross the offer, and
+  the maker's cancel must report `cum 4 of 10`. Before the binding it read `cum 0 of 10`, because
+  the engine counted the maker's fill undeliverable and **a gateway cannot journal a fill it is
+  never told about**.
+
 **The directory publishes the GATEWAY's client endpoints**, not the cluster ingress/egress — an
 adapter connecting to the cluster directly would bypass the gateway's validation and `cumQty`
 reconstruction.
@@ -455,9 +487,10 @@ the first message seen. `shardId` must stay on the *book event* (not only the de
 L3 is forwarded verbatim. The market-data process also uses it to reject foreign-shard events, which
 catches being pointed at the wrong engine.
 
-**Execution reports route by `participantId → clusterSessionId`**, learned from inbound traffic — a
-session belongs to a gateway, not a participant, and the maker side of a fill needs a route back.
-Undeliverable reports are counted and dropped, never blocked on.
+**Execution reports route by `participantId → clusterSessionId`** — a session belongs to a gateway,
+not a participant, and the maker side of a fill needs a route back. Declared at session open from
+the authenticated principal, and still learned from inbound traffic (see above). Undeliverable
+reports are counted and dropped, never blocked on.
 
 **Agrona has no `Long2IntHashMap`** despite what earlier drafts assumed — the id map is a
 `Long2LongHashMap` with the `int` node index widened to a `long`. Check a primitive collection

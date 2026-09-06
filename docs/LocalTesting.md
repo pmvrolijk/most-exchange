@@ -94,6 +94,45 @@ arrive as commands through the replicated log (§4.4). That is what `most define
 
 ---
 
+## 2a. The participant registry (optional)
+
+Which gateway speaks for which participant. Skip it and everything below still works — the engine
+falls back to learning routes from inbound traffic, which is what shipped before this file existed.
+What you lose is the case that traffic cannot cover: a participant that has said nothing since the
+gateway last connected has no route at all, so its fills are counted undeliverable and dropped, and
+the gateway's `cumQty` for that order silently stops advancing (Design.md §1). A gateway restart
+puts every one of its quiet participants in that state at once.
+
+The secret is stored as its SHA-256; the secret itself goes in a file the gateway reads.
+
+```sh
+SECRET="local-dev-secret"
+printf '%s\n' "$SECRET" > "$RUN/gateway-0.secret"
+HASH=$(printf '%s' "$SECRET" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Linux
+
+cat > "$RUN/shard-0-participants.properties" <<EOF
+shard.id=0
+registry.gateways=gw-0
+gateway.gw-0.secret=$HASH
+gateway.gw-0.participants=7,8
+EOF
+```
+
+Three things it enforces, each with a reason:
+
+* **A participant belongs to at most one gateway.** Two claims would be settled by whichever
+  session opened last, which is routing decided by connection timing.
+* **Credentials that do not verify are rejected**, never downgraded to an anonymous session. A
+  gateway that connected anonymously by accident trades perfectly well and loses only the fills of
+  whichever participants have gone quiet — invisible until someone reconciles a `cumQty`.
+* **Every node needs an identical copy.** Each process prints the registry's `fingerprint` at
+  startup for the same reason it prints the shard's.
+
+It is *not* enforcement: the engine binds routes from it but does not yet refuse an order whose
+`participantId` is not bound to the session it arrived on.
+
+---
+
 ## 3. Process configuration
 
 Four small files, each pointing at the shared security list.
@@ -102,6 +141,8 @@ Four small files, each pointing at the shared security list.
 
 ```properties
 engine.securitiesFile=${RUN}/shard-0-securities.properties
+# Optional; see §2a. Omit this line and routes are learned from traffic alone.
+engine.participantRegistry=${RUN}/shard-0-participants.properties
 engine.aeronDir=${RUN}/aeron
 engine.clusterDir=${RUN}/cluster-host/cluster
 engine.bookEvent.channel=aeron:ipc
@@ -120,6 +161,11 @@ gateway.client.inbound.channel=aeron:ipc
 gateway.client.inbound.streamId=20
 gateway.client.outbound.channel=aeron:ipc
 gateway.client.outbound.streamId=21
+# Optional; see §2a. All three go together -- an id with no secret refuses to start, because a
+# gateway that failed to authenticate as itself would connect anonymously and lose fills quietly.
+gateway.participantRegistry=${RUN}/shard-0-participants.properties
+gateway.gatewayId=gw-0
+gateway.credentialTokenFile=${RUN}/gateway-0.secret
 ```
 
 `$RUN/market-data.properties`
@@ -183,7 +229,11 @@ cd "$RUN"
 L="$RUN/logs"
 
 # 1. cluster host: media driver + archive + consensus module
-$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$RUN/aeron" > "$L/cluster.log" 2>&1 &
+# --participants is optional (§2a). It is this process, not the engine, that verifies a gateway's
+# credentials: the consensus module stamps the gateway id on the session as its encoded principal,
+# and the engine only turns that principal back into a participant list.
+$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$RUN/aeron" \
+  --participants "$RUN/shard-0-participants.properties" > "$L/cluster.log" 2>&1 &
 
 # wait for: "cluster: started, awaiting shutdown signal"
 

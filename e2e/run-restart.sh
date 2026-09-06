@@ -80,9 +80,27 @@ EOF
   security_block 3 GOOG US02079K3059 "Alphabet Inc."
 } > "$RUN/securities-with-goog.properties"
 
+# Who speaks for whom. The consensus module authenticates the gateway against this and stamps
+# `gw-0` on the session as its encoded principal; the engine turns that principal back into a
+# participant list at session open. Step 4c is what it buys: a maker that has said nothing since
+# the gateway restarted is still sent its own fill.
+sha256() { # sha256 <text>
+  if command -v sha256sum > /dev/null 2>&1; then printf '%s' "$1" | sha256sum | cut -d' ' -f1
+  else printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; fi
+}
+GATEWAY_SECRET="restart-e2e-secret"
+printf '%s\n' "$GATEWAY_SECRET" > "$RUN/gateway.secret"
+cat > "$RUN/participants.properties" <<EOF
+shard.id=0
+registry.gateways=gw-0
+gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
+gateway.gw-0.participants=7,8,9,11,12,13
+EOF
+
 write_engine_config() { # write_engine_config <securities file>
   cat > "$RUN/engine.properties" <<EOF
 engine.securitiesFile=$1
+engine.participantRegistry=$RUN/participants.properties
 engine.aeronDir=$AERON_DIR
 engine.clusterDir=$RUN/cluster-host/cluster
 engine.bookEvent.channel=aeron:ipc
@@ -101,6 +119,9 @@ gateway.ingressChannel=aeron:udp
 gateway.ingressEndpoints=0=localhost:20110
 gateway.egressChannel=aeron:udp?endpoint=localhost:0
 gateway.journalFile=$RUN/gateway-orders.jrnl
+gateway.participantRegistry=$RUN/participants.properties
+gateway.gatewayId=gw-0
+gateway.credentialTokenFile=$RUN/gateway.secret
 EOF
 
 cat > "$RUN/market-data.properties" <<EOF
@@ -147,7 +168,8 @@ start_cluster() { # start_cluster <attempt>
   # after a clean shutdown. That is a fact about restarting a node, not about this script.
   local i=0
   while [ "$i" -lt 6 ]; do
-    $MOST cluster --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" > "$LOGS/cluster-$1.log" 2>&1 &
+    $MOST cluster --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" \
+      --participants "$RUN/participants.properties" > "$LOGS/cluster-$1.log" 2>&1 &
     CLUSTER_PID=$!
     PIDS+=("$CLUSTER_PID")
     if wait_for "$LOGS/cluster-$1.log" "awaiting shutdown signal" 20 "cluster host"; then return 0; fi
@@ -204,7 +226,11 @@ start_engine first
 wait_for "$LOGS/engine-first.log" "awaiting shutdown signal" 45 "engine" || fail "engine"
 FINGERPRINT=$(grep -o "fingerprint=[0-9a-f]*" "$LOGS/engine-first.log" | head -1)
 echo "  $FINGERPRINT"
+grep -q "participantRegistry=none" "$LOGS/engine-first.log" \
+  && fail "the engine did not load the participant registry"
 start_support first
+grep -q "identity=gw-0" "$LOGS/gateway-first.log" \
+  || { tail -10 "$LOGS/gateway-first.log" >&2; fail "the gateway has no cluster identity"; }
 
 # --------------------------------------------------------------------- 1 and 2
 echo
@@ -339,10 +365,11 @@ echo "== 4b. restart ONLY the gateway -- its order journal is the only place ori
 # The engine does not store origQty (an order is one cache line), so nothing can hand it back to a
 # gateway that forgot it. Without the journal every report for an order in flight comes back marked
 # UNKNOWN -- honest, but not the number the client wants.
-# The partially filled order has to be the AGGRESSOR's remainder, not the resting side. A maker's
-# fill report is routed by participantId to the session that participant last spoke on, and a `most
-# send` that has stopped following has no session -- the engine counts the report undeliverable and
-# the gateway never sees the fill at all (open issue 3). An aggressor is always listening to its own.
+# The partially filled order is the AGGRESSOR's remainder rather than the resting side, which used
+# to be forced: a maker's fill was routed by participantId to the session that participant last
+# spoke on, so a maker that had gone quiet across the restart was never told about its own fill and
+# the gateway had nothing to journal. Step 4c is that case, and it now works -- this step keeps the
+# aggressor shape so the two are measured separately.
 # Participant 11, which has traded nothing here: the offer it will cross belongs to participant 7,
 # and an aggressor that shares an smpId with the resting side is cancelled rather than filled.
 # Sized past the whole offer, so what is left over rests with a real cumQty behind it.
@@ -374,6 +401,52 @@ grep -q "cum unknown" "$RUN/cancel.out" \
 grep -q "cum 20 of 26" "$RUN/cancel.out" \
   || { cat "$RUN/cancel.out" >&2; fail "origQty and cumQty did not survive the gateway restart"; }
 pass "the cancel reports cum 20 of 26 -- both numbers survived"
+
+# ------------------------------------------------------------------------- 4c
+echo
+echo "== 4c. a maker that has been quiet since the gateway restarted is still sent its fill"
+# The other half of 4b, and the one the journal cannot rescue on its own: a gateway can only
+# journal a fill it is told about. Participant 12 rests an offer and stops listening; the gateway
+# is then restarted, so the session the engine learned participant 12 on is gone. Its route comes
+# back only because the replacement session authenticates as gw-0 and the engine binds every
+# participant the registry gives that gateway at session open.
+$MOST send --symbol AAPL --side sell --price 103.00 --qty 10 --clordid 4001 --participant 12 \
+  --follow 3 $CONN > "$RUN/quiet-maker.out" 2>&1 || fail "send the quiet maker's offer"
+QUIET_ID=$(grep -o "orderId=[0-9]*" "$RUN/quiet-maker.out" | head -1 | cut -d= -f2)
+[ -n "$QUIET_ID" ] || { cat "$RUN/quiet-maker.out" >&2; fail "no orderId for the quiet maker"; }
+
+# Wait out the client publication's linger before restarting the gateway, or this step measures
+# nothing. `most send` exits and closes its publication, but the media driver keeps it for the
+# linger period (5s), so a gateway subscription created inside that window gets an image starting
+# at the publication's *initial* position and re-forwards the order. The engine then re-learns the
+# route from that replay and the fill is delivered whether or not anything was bound at session
+# open -- which is exactly how the first version of this step passed with the registry removed.
+sleep 7
+
+kill "$GATEWAY_PID" 2>/dev/null; wait "$GATEWAY_PID" 2>/dev/null; sleep 1
+$GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway-quiet.log" 2>&1 &
+GATEWAY_PID=$!; PIDS+=("$GATEWAY_PID")
+wait_for "$LOGS/gateway-quiet.log" "gateway: started" 45 "gateway" || fail "gateway did not restart"
+sleep 1
+
+# Participant 13, so self-match prevention does not cancel the aggressor instead of filling it.
+$MOST send --symbol AAPL --side buy --price 103.00 --qty 4 --clordid 4002 --participant 13 \
+  --follow 3 $CONN > "$RUN/quiet-taker.out" 2>&1 || fail "send the aggressor"
+grep -q "TRADE" "$RUN/quiet-taker.out" || { cat "$RUN/quiet-taker.out" >&2; fail "no fill"; }
+sleep 1
+
+# The maker's own fill is not visible to anyone watching -- it stopped following. What proves it
+# arrived is the gateway's arithmetic afterwards: cancelling the remainder reports the cumQty the
+# gateway could only have accumulated from a fill report it was actually sent. Before the binding
+# this read `cum 0 of 10`.
+$MOST cancel --symbol AAPL --side sell --order-id "$QUIET_ID" --orig-clordid 4001 --participant 12 \
+  --follow 3 $CONN > "$RUN/quiet-cancel.out" 2>&1 || fail "cancel the quiet maker's remainder"
+cat "$RUN/quiet-cancel.out"
+grep -q "cum 4 of 10" "$RUN/quiet-cancel.out" \
+  || { cat "$RUN/quiet-cancel.out" >&2
+       grep -ho "undeliverableReports=[0-9]*" "$LOGS"/engine-*.log >&2
+       fail "the quiet maker was never told about its fill"; }
+pass "the maker's fill reached the gateway across a restart it slept through"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

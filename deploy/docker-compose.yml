@@ -177,9 +177,16 @@ services:
       # a security file -- the engine refuses to restore a snapshot into changed geometry, on
       # purpose. Blank by default; the CLI treats a blank argument as absent.
       - "${CLUSTER_FRESH:-}"
+      # Who may connect as which gateway. The consensus module verifies the credentials and stamps
+      # the gateway id on the session as its encoded principal, which is what lets the engine bind
+      # that gateway's participants at session open (Design.md §1). Without it every client is
+      # anonymous and the engine learns its routes from traffic alone.
+      - "--participants"
+      - "/config/shard-0-participants.properties"
     volumes:
       - shard-aeron:/aeron
       - cluster-data:/cluster
+      - ./config:/config:ro
     networks:
       aeron:
         # The whole shard's Aeron identity. Every UDP endpoint the shard exposes is bound by the

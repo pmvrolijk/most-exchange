@@ -29,6 +29,7 @@ import com.engine.sbe.SnapshotOrderDecoder
 import com.engine.sbe.SnapshotOrderEncoder
 import com.engine.sbe.TradeExecutedEncoder
 import com.engine.sbe.VolatilityHaltedEncoder
+import com.engine.reference.ParticipantRegistry
 import io.aeron.ExclusivePublication
 import io.aeron.Image
 import io.aeron.Publication
@@ -82,6 +83,16 @@ class MatchingEngineService(
     private val auctionMaxPasses: Int = 64,
     private val backpressureAlertThreshold: Int = 1_000_000,
     /**
+     * Which gateway speaks for which participant, or null to keep the old behaviour of learning
+     * every route from traffic.
+     *
+     * When present, a session that authenticated as one of these gateways has all of that
+     * gateway's participants bound to it the moment the session opens -- so a maker that has said
+     * nothing since the gateway last connected is still reachable when its resting order fills.
+     * Every node must hold an identical copy; see [ParticipantRegistry].
+     */
+    private val participantRegistry: ParticipantRegistry? = null,
+    /**
      * Hot-path timing, or null to compile it out of the path entirely. Null is the default and the
      * production posture; see [EngineMetrics] for why an engine may read a clock at all.
      */
@@ -110,9 +121,23 @@ class MatchingEngineService(
         private set
 
     /**
-     * participantId to cluster session id, learned from inbound traffic. A session belongs to
-     * a gateway, not an end participant, and the maker side of a fill needs a route back
-     * (Design.md §1). Deterministic: every node sees the same messages in the same order.
+     * participantId to cluster session id. A session belongs to a gateway, not an end participant,
+     * and the maker side of a fill needs a route back (Design.md §1).
+     *
+     * Filled from two sources, in this order of authority:
+     *
+     *  - **Declared**, at session open, from the gateway id the consensus module authenticated and
+     *    stamped on the session as its encoded principal, resolved through [participantRegistry].
+     *    This is what makes a quiet maker reachable: without it a participant that has sent nothing
+     *    since its gateway last connected has no route at all, and its fills are counted
+     *    undeliverable and dropped.
+     *  - **Learned**, from inbound traffic, which still wins for the order it arrived on. That is
+     *    not a weaker fallback grudgingly kept: the gateway that forwarded an order is the one
+     *    holding its `origQty`, and so the only one that can restore `cumQty` on the way back. A
+     *    report must follow the order, not the registry.
+     *
+     * Deterministic under both: session opens and closes are log events, and every node sees the
+     * same messages in the same order.
      */
     private val participantToSession = Long2LongHashMap(NULL_SESSION)
 
@@ -171,6 +196,22 @@ class MatchingEngineService(
     var auctionPassLimitBreaches = 0L
         private set
 
+    /**
+     * Participants bound to a session at session open from an authenticated gateway principal, as
+     * opposed to learned from traffic. Zero on a node with no registry, and zero on one whose
+     * gateways connect without credentials -- which is the difference between "configured" and
+     * "working", and is why it is counted rather than assumed.
+     */
+    var declaredBindings = 0L
+        private set
+
+    /** Sessions that opened carrying a principal this node's registry does not know. */
+    var unknownPrincipals = 0L
+        private set
+
+    /** Routes currently held, declared and learned together. */
+    val participantRoutes: Int get() = participantToSession.size
+
     // ------------------------------------------------------------ lifecycle
 
     override fun onStart(cluster: Cluster, snapshotImage: Image?) {
@@ -179,6 +220,21 @@ class MatchingEngineService(
         this.bookEventPub =
             cluster.aeron().addExclusivePublication(bookEventChannel, bookEventStreamId)
         if (snapshotImage != null) loadSnapshot(snapshotImage)
+        // Sessions that outlived this service. A restore does *not* replay onSessionOpen for them
+        // -- Aeron's ServiceSnapshotLoader adds them straight to the container's session map -- so
+        // rebuilding here is what makes a declared binding survive a restart. It also means the
+        // binding needs no snapshot state of its own: the principal is already consensus state,
+        // and this derives the same map from it on every node.
+        rebindDeclaredParticipants()
+    }
+
+    /**
+     * Rebinds every session that already exists. Called from [onStart], and separately reachable
+     * so a test can drive it without a live Aeron: [onStart] also creates the book event
+     * publication, which needs a media driver.
+     */
+    internal fun rebindDeclaredParticipants() {
+        for (session in cluster.clientSessions()) bindDeclaredParticipants(session)
     }
 
     override fun onRoleChange(newRole: Cluster.Role) {
@@ -213,13 +269,70 @@ class MatchingEngineService(
         bookEventPub = null
     }
 
-    override fun onSessionOpen(session: ClientSession, timestamp: Long) = Unit
+    override fun onSessionOpen(session: ClientSession, timestamp: Long) {
+        bindDeclaredParticipants(session)
+    }
 
+    /**
+     * Drops the routes this session declared, and only those it still owns.
+     *
+     * The ownership test is not defensive tidiness. A participant registered to gateway A that has
+     * been sending through gateway B is bound to B by its own traffic, and B is the gateway holding
+     * its `origQty`; A going away must not take that route with it.
+     *
+     * Learned routes are left alone, as they always were -- a stale session id simply fails to
+     * resolve, and [Cluster.getClientSession] is the thing that decides.
+     */
     override fun onSessionClose(
         session: ClientSession,
         timestamp: Long,
         closeReason: CloseReason,
-    ) = Unit // Stale ids simply fail to resolve; no bookkeeping needed.
+    ) {
+        val participants = declaredParticipantsOf(session) ?: return
+        for (participantId in participants) {
+            if (participantToSession.get(participantId) == session.id()) {
+                participantToSession.remove(participantId)
+            }
+        }
+    }
+
+    /**
+     * Resolves a session's authenticated principal to the participants it speaks for.
+     *
+     * Allocates: decoding the principal makes a String, and this is the one place that does. It is
+     * called on session open, on session close and once per surviving session at startup -- never
+     * on the message path -- so it costs nothing that `AllocationTest` measures. Keep it that way.
+     */
+    private fun declaredParticipantsOf(session: ClientSession): LongArray? {
+        val registry = participantRegistry ?: return null
+        val principal = session.encodedPrincipal()
+        if (principal == null || principal.isEmpty()) return null
+        return registry.participantsOf(String(principal, Charsets.US_ASCII))
+    }
+
+    /**
+     * Binds every participant a session speaks for, replacing whatever route each had.
+     *
+     * A session that opens carrying a principal no registry entry matches is counted rather than
+     * refused. Refusing is the consensus module's job and it already did it: a principal only
+     * exists because the module verified a secret against this same file. One that resolves here
+     * to nothing therefore means the two files disagree, which is a configuration fault to make
+     * visible, not an order to reject.
+     */
+    private fun bindDeclaredParticipants(session: ClientSession) {
+        val registry = participantRegistry ?: return
+        val principal = session.encodedPrincipal()
+        if (principal == null || principal.isEmpty()) return
+        val participants = registry.participantsOf(String(principal, Charsets.US_ASCII))
+        if (participants == null) {
+            unknownPrincipals++
+            return
+        }
+        for (participantId in participants) {
+            participantToSession.put(participantId, session.id())
+            declaredBindings++
+        }
+    }
 
     override fun onTimerEvent(correlationId: Long, timestamp: Long) = Unit
 

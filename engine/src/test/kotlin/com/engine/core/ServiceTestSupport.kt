@@ -52,7 +52,16 @@ data class Report(
 class FakeSession(
     private val sessionId: Long,
     private val sink: MutableList<Report> = mutableListOf(),
+    /**
+     * The gateway id the consensus module authenticated this session as, or null for an anonymous
+     * one. Aeron delivers it as the encoded principal, which is where the engine's declared
+     * participant bindings come from.
+     */
+    principal: String? = null,
 ) : ClientSession {
+
+    private val encodedPrincipal =
+        principal?.toByteArray(Charsets.US_ASCII) ?: ByteArray(0)
 
     private val buffer = UnsafeBuffer(ByteArray(256 * 1024))
     private val claimed = mutableListOf<Int>()
@@ -66,7 +75,7 @@ class FakeSession(
     override fun id(): Long = sessionId
     override fun responseStreamId(): Int = 1
     override fun responseChannel(): String = "fake"
-    override fun encodedPrincipal(): ByteArray = ByteArray(0)
+    override fun encodedPrincipal(): ByteArray = encodedPrincipal
     override fun close() = Unit
     override fun isClosing(): Boolean = false
     override fun offer(b: DirectBuffer, offset: Int, length: Int): Long = 1L
@@ -152,6 +161,13 @@ class Harness(
     auctionMaxPasses: Int = 64,
     metrics: EngineMetrics? = null,
     /**
+     * Which gateway speaks for which participant. Null is the old behaviour: every route learned
+     * from traffic.
+     */
+    participantRegistry: com.engine.reference.ParticipantRegistry? = null,
+    /** The gateway id the harness's own session authenticated as, if any. */
+    sessionPrincipal: String? = null,
+    /**
      * A stand-in for `ShardSpec.fingerprintValue()`. Deliberately a plain parameter rather than
      * something derived from [books]: deriving it would be a second implementation of a hash whose
      * only job is agreement. A test that changes geometry passes a different value, which is what
@@ -159,8 +175,14 @@ class Harness(
      */
     shardFingerprint: Long = FINGERPRINT,
 ) {
-    val session = FakeSession(SESSION_ID)
-    private val cluster = FakeCluster(mapOf(SESSION_ID to session))
+    val session = FakeSession(SESSION_ID, principal = sessionPrincipal)
+
+    /**
+     * Mutable, so a test can open and close sessions the way a gateway restart does. `FakeCluster`
+     * reads it live rather than copying, which is what makes `clientSessions()` reflect them.
+     */
+    private val liveSessions = linkedMapOf<Long, ClientSession>(SESSION_ID to session)
+    private val cluster = FakeCluster(liveSessions)
     val service = MatchingEngineService(
         shardId = SHARD_ID,
         books = books,
@@ -169,6 +191,7 @@ class Harness(
         bookEventStreamId = 12,
         levelCount = levelCount,
         auctionMaxPasses = auctionMaxPasses,
+        participantRegistry = participantRegistry,
         metrics = metrics,
     )
 
@@ -199,13 +222,54 @@ class Harness(
         service.javaClass.getDeclaredField("cluster").apply { isAccessible = true }
             .set(service, cluster)
         service.onRoleChange(Cluster.Role.LEADER)
+        // The rest of what onStart does: bind the participants of every session already present.
+        service.rebindDeclaredParticipants()
     }
 
     val reports: List<Report> get() = session.reports
 
+    /** Opens a session the way the consensus module does once it has authenticated one. */
+    fun openSession(sessionId: Long, principal: String? = null): FakeSession {
+        val opened = openSessionWithoutBinding(sessionId, principal)
+        service.onSessionOpen(opened, 0L)
+        return opened
+    }
+
+    /**
+     * Adds a session without the open event, which is what a snapshot restore leaves behind:
+     * Aeron's `ServiceSnapshotLoader` puts surviving sessions straight into the container's map
+     * and the service is never told they opened.
+     */
+    fun openSessionWithoutBinding(sessionId: Long, principal: String? = null): FakeSession {
+        val opened = FakeSession(sessionId, principal = principal)
+        liveSessions[sessionId] = opened
+        return opened
+    }
+
+    /** Closes one. The session is gone from the cluster afterwards, as it is in production. */
+    fun closeSession(session: FakeSession) {
+        service.onSessionClose(session, 0L, io.aeron.cluster.codecs.CloseReason.CLIENT_ACTION)
+        liveSessions.remove(session.id())
+    }
+
+    /** Drives the rebuild `onStart` runs over sessions that outlived the service. */
+    fun rebindFromExistingSessions() = service.rebindDeclaredParticipants()
+
+    private var inbound: FakeSession = session
+
+    /** Sends the next messages on [on], as a different gateway's session would. */
+    fun on(on: FakeSession): Harness {
+        inbound = on
+        return this
+    }
+
     private fun submit(length: Int) {
-        service.onSessionMessage(session, 0L, buffer, 0, length, DUMMY_HEADER)
-        session.drain()
+        val sender = inbound
+        inbound = session
+        service.onSessionMessage(sender, 0L, buffer, 0, length, DUMMY_HEADER)
+        // Every live session, not just the sender: one order can report to two, since the maker
+        // side of a fill goes wherever that participant is routed.
+        for (live in liveSessions.values) (live as FakeSession).drain()
     }
 
     fun newOrder(

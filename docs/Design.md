@@ -102,11 +102,48 @@ Its responsibilities:
 
 A cluster session belongs to a **gateway**, not to an end participant, and the maker side of a fill
 needs a route back that the inbound message cannot supply. The engine therefore keeps a
-`participantId → clusterSessionId` map learned from inbound traffic: deterministic, because every
-node sees the same messages in the same order, and self-healing, because a stale id simply fails to
-resolve. A report for a participant with no live session is counted and dropped — blocking the engine
-thread on an absent consumer is worse than losing the report. Binding the participant from an
-authenticated session principal at session open would be stronger; see §8.
+`participantId → clusterSessionId` map, filled from two sources.
+
+**Declared, at session open.** A gateway presents `gatewayId:secret` as its Aeron cluster
+credentials. The **consensus module** verifies them against the shard's *participant registry* and
+stamps the gateway id on the session as its **encoded principal**; the engine resolves that
+principal back to a participant list through its own copy of the same file and binds every one of
+them. Two properties come free from doing it this way rather than with a message of our own: the
+principal is carried in the session-open event through the replicated log, so every node derives the
+identical map; and because Aeron restores sessions and their principals from the consensus module's
+own snapshot, a service that restarts rebuilds the bindings in `onStart` from
+`Cluster.clientSessions()` and needs no snapshot state of its own.
+
+**Learned, from inbound traffic**, exactly as before — and traffic still wins for the order it
+arrived on. That is not a weaker fallback grudgingly kept: the gateway that forwarded an order is
+the one holding its `origQty`, and therefore the only one that can restore `cumQty` on the way back
+(§3.1). A report has to follow the order, not the registry. Correspondingly, closing a session drops
+only the routes that session still owns; one that has since moved to a live gateway stays there.
+
+Learning alone was not enough, and the failure was quiet. A participant that had said nothing since
+its gateway last connected had no route at all, so its fills were counted undeliverable and dropped —
+and since a gateway cannot journal a fill it is never told about, the `cumQty` it reported for that
+order silently stopped advancing, with nothing downstream able to detect it. A gateway restart put
+every one of its quiet participants in that state at once.
+
+The registry is a published file, read by the consensus module and by the engine, and each prints
+its `fingerprint()` at startup: two nodes disagreeing about it would route the same report to
+different places. It is deliberately **not** folded into `ShardSpec.fingerprint()`, which the control
+plane records in every release — rotating a gateway secret is not a change of shard geometry. A
+participant belongs to at most one gateway, because two claims on one participant would be resolved
+by whichever session happened to open last.
+
+Both halves are optional and default to off, which is the behaviour that shipped before the registry
+existed. A client presenting **no** credentials — the control plane, the operator CLI — authenticates
+anonymously with the null principal and is bound to nothing. Credentials that do **not** verify are
+**rejected outright**, never downgraded to anonymous: a gateway that connected anonymously by
+accident would trade perfectly well and lose only the fills of whichever participants had gone
+quiet, which is precisely the failure this removes. What is still not enforced is the converse — the
+engine does not yet refuse an order whose `participantId` is not bound to the session it arrived on,
+so `UNAUTHORIZED_PARTICIPANT` remains unraised; see §8.
+
+A report for a participant with no live session is still counted and dropped — blocking the engine
+thread on an absent consumer is worse than losing the report.
 
 This is why the gateway is stateful: it is the only component that remembers an order's original
 quantity, and that memory is what lets the engine keep an order at exactly one cache line.
@@ -2504,9 +2541,19 @@ It found three defects that unit tests could not:
   the grounds that half-applying a definition is worse than rejecting it. Splitting this into a
   boot-time `SecurityDefinition` and a runtime `SecurityReconfigure` would make the distinction
   explicit.
-* **Participant-to-session binding.** Learned from inbound traffic today (§1). Production should bind
-  from the authenticated session principal at session open, so a maker who has not sent a message
-  since failover is still reachable.
+* ~~**Participant-to-session binding.**~~ **Done.** A gateway authenticates to the consensus module
+  against the shard's participant registry and the engine binds that gateway's participants at
+  session open, from the principal carried in the log (§1). `e2e/run-restart.sh` §4c rests an offer,
+  restarts the gateway, crosses the offer and checks the maker's `cumQty` advanced — which it can
+  only do if the fill reached a gateway the maker had not spoken to. Three things are left, and are
+  stated rather than hidden. **Enforcement:** the engine binds routes but does not yet *refuse* an
+  order whose `participantId` is not bound to the sending session, so `UNAUTHORIZED_PARTICIPANT` is
+  still raised by nothing and a gateway may still trade on behalf of a participant that is not its
+  own. **Authoring:** the registry is a hand-written published file; the control plane owns the
+  `participant` table but does not yet render or publish it the way it does shard security files, so
+  nothing checks that the registry and the database agree. **Granularity:** the identity is the
+  gateway's, not the end participant's — this is authentication of the process, and the participant
+  ids it claims are trusted because the file says so, not because each client proved anything.
 * **`SecurityDefinition` distribution:** the Market Data Process currently learns the reference
   prices only implicitly, from trades. If downstream needs the collars or tick size, a corresponding
   book event is required.

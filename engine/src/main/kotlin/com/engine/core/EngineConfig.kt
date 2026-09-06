@@ -1,5 +1,6 @@
 package com.engine.core
 
+import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ShardSpec
 import java.io.File
 import java.util.Properties
@@ -17,6 +18,13 @@ import java.util.Properties
  */
 data class EngineConfig(
     val shard: ShardSpec,
+    /**
+     * Which gateway speaks for which participant, or null to keep learning every route from
+     * traffic. Optional so an existing deployment starts unchanged; a production shard sets it,
+     * because without it a maker that has been quiet since its gateway last connected cannot be
+     * sent its own fills (Design.md §1).
+     */
+    val participantRegistry: ParticipantRegistry? = null,
     val aeronDirectoryName: String?,
     val clusterDir: File,
     val serviceId: Int,
@@ -64,8 +72,17 @@ data class EngineConfig(
      */
     fun fingerprint(): String = shard.fingerprint()
 
+    /**
+     * The registry's own fingerprint, or `none`. Deliberately a *second* value beside
+     * [fingerprint] rather than folded into it: `ShardSpec.fingerprint()` is recorded by the
+     * control plane and published in every release, so widening what it covers would invalidate
+     * every value already written down. Rotating a gateway secret is not a change of geometry.
+     */
+    fun registryFingerprint(): String = participantRegistry?.fingerprint() ?: "none"
+
     companion object {
         const val SECURITIES_FILE = "engine.securitiesFile"
+        const val PARTICIPANT_REGISTRY = "engine.participantRegistry"
         const val AERON_DIR = "engine.aeronDir"
         const val CLUSTER_DIR = "engine.clusterDir"
         const val SERVICE_ID = "engine.serviceId"
@@ -77,8 +94,13 @@ data class EngineConfig(
         const val METRICS_STAGES = "engine.metrics.stages"
         const val METRICS_FILE = "engine.metrics.file"
 
-        fun from(properties: Properties, shard: ShardSpec): EngineConfig = EngineConfig(
+        fun from(
+            properties: Properties,
+            shard: ShardSpec,
+            participantRegistry: ParticipantRegistry? = null,
+        ): EngineConfig = EngineConfig(
             shard = shard,
+            participantRegistry = participantRegistry,
             aeronDirectoryName = properties.getProperty(AERON_DIR),
             clusterDir = File(properties.getProperty(CLUSTER_DIR) ?: "cluster"),
             serviceId = properties.getProperty(SERVICE_ID)?.toInt() ?: 0,
@@ -106,7 +128,17 @@ data class EngineConfig(
             }
             val securitiesFile = properties.getProperty(SECURITIES_FILE)
                 ?: error("missing required configuration key: $SECURITIES_FILE")
-            return from(properties, ShardSpec.load(securitiesFile))
+            val registryFile = properties.getProperty(PARTICIPANT_REGISTRY)
+            val registry = registryFile?.let(ParticipantRegistry::load)
+            val shard = ShardSpec.load(securitiesFile)
+            // Caught here rather than at the first misrouted report: a registry published for
+            // another shard would authenticate gateways this engine never serves and bind
+            // participants no book of its own has ever heard of.
+            require(registry == null || registry.shardId == shard.shardId) {
+                "$PARTICIPANT_REGISTRY is for shard ${registry?.shardId}, " +
+                    "but this node serves shard ${shard.shardId}"
+            }
+            return from(properties, shard, registry)
         }
     }
 }

@@ -67,8 +67,27 @@ security.2.levelCount=32768
 security.2.maxOrders=10000
 EOF
 
+# Who speaks for whom. The consensus module authenticates the gateway against this file and stamps
+# `gw-0` on its session as the encoded principal; the engine turns that back into a participant list
+# at session open, so a participant that has gone quiet is still reachable (Design.md §1). The
+# case that actually needs it -- a gateway restart -- is in run-restart.sh; here it is wired up so
+# the ordinary path is the authenticated one rather than an untested variant of it.
+sha256() { # sha256 <text>
+  if command -v sha256sum > /dev/null 2>&1; then printf '%s' "$1" | sha256sum | cut -d' ' -f1
+  else printf '%s' "$1" | shasum -a 256 | cut -d' ' -f1; fi
+}
+GATEWAY_SECRET="e2e-secret"
+printf '%s\n' "$GATEWAY_SECRET" > "$RUN/gateway.secret"
+cat > "$RUN/participants.properties" <<EOF
+shard.id=0
+registry.gateways=gw-0
+gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
+gateway.gw-0.participants=7,8
+EOF
+
 cat > "$RUN/engine.properties" <<EOF
 engine.securitiesFile=$RUN/securities.properties
+engine.participantRegistry=$RUN/participants.properties
 engine.aeronDir=$AERON_DIR
 engine.clusterDir=$RUN/cluster-host/cluster
 engine.bookEvent.channel=aeron:ipc
@@ -90,6 +109,9 @@ gateway.client.outbound.channel=aeron:ipc
 gateway.client.outbound.streamId=21
 gateway.metrics=true
 gateway.metrics.file=$RUN/gateway-latency.hgrm
+gateway.participantRegistry=$RUN/participants.properties
+gateway.gatewayId=gw-0
+gateway.credentialTokenFile=$RUN/gateway.secret
 EOF
 
 cat > "$RUN/market-data.properties" <<EOF
@@ -128,7 +150,8 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
 
 # -------------------------------------------------------------------- processes
 echo "== starting cluster host"
-$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
+$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" \
+  --participants "$RUN/participants.properties" > "$LOGS/cluster.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 
@@ -137,11 +160,18 @@ $ENGINE "$RUN/engine.properties" > "$LOGS/engine.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/engine.log" "awaiting shutdown signal" 45 "engine" || fail "engine"
 grep -o "fingerprint=[0-9a-f]*" "$LOGS/engine.log" | head -1
+grep -q "participantRegistry=none" "$LOGS/engine.log" \
+  && fail "the engine did not load the participant registry"
 
 echo "== starting gateway"
 $GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/gateway.log" "gateway: started" 45 "gateway" || fail "gateway"
+# A gateway whose credentials were refused does not start at all, and one that fell back to
+# connecting anonymously would trade perfectly well while losing exactly the fills the binding
+# exists to deliver -- so the identity it printed is worth asserting on.
+grep -q "identity=gw-0" "$LOGS/gateway.log" \
+  || { tail -10 "$LOGS/gateway.log" >&2; fail "the gateway connected without an identity"; }
 
 echo "== starting market data"
 $MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data.log" 2>&1 &

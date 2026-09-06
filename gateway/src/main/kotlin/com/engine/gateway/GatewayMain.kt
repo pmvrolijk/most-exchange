@@ -1,6 +1,9 @@
 package com.engine.gateway
 
+import com.engine.reference.GatewayCredentialsSupplier
+import com.engine.reference.GatewayIdentity
 import com.engine.reference.LatencyHistogram
+import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ShardSpec
 import io.aeron.Aeron
 import io.aeron.Publication
@@ -40,6 +43,25 @@ fun main(args: Array<String>) {
             "out=${config.clientOutboundChannel}:${config.clientOutboundStreamId}"
     )
 
+    // Resolved before anything connects. A gateway that authenticates as nobody still trades --
+    // its own clients' reports come back on the session their orders went out on -- but the
+    // participants it speaks for are then reachable only while they keep speaking, which is the
+    // failure this identity exists to remove. Better said at boot than discovered in a counter.
+    val identity = config.identity()
+    if (identity == null) {
+        println(
+            "gateway: no cluster identity (${GatewayConfig.GATEWAY_ID} unset). Connecting " +
+                "anonymously: the engine will learn routes from traffic, so a participant of " +
+                "this gateway that has been quiet since connect will not be sent its fills."
+        )
+    } else {
+        println(
+            "gateway: identity=${identity.gatewayId} " +
+                "registry=${config.participantRegistry?.fingerprint()} " +
+                "participants=${identity.participants.sorted()}"
+        )
+    }
+
     val aeronContext = Aeron.Context()
     config.aeronDirectoryName?.let(aeronContext::aeronDirectoryName)
 
@@ -66,6 +88,13 @@ fun main(args: Array<String>) {
             .egressListener(egressListener)
             .ingressChannel(config.ingressChannel)
             .egressChannel(config.egressChannel)
+        // The consensus module verifies this against the same registry file and stamps the gateway
+        // id on the session as its encoded principal, which reaches every node through the
+        // replicated log. Wrong credentials are rejected outright rather than downgraded to an
+        // anonymous session, so a failure here is a failure to connect, not a quiet loss of fills.
+        config.credentials()?.let { (gatewayId, token) ->
+            clusterContext.credentialsSupplier(GatewayCredentialsSupplier(gatewayId, token))
+        }
         // Multi-node clusters advertise every member's ingress endpoint so the client can find
         // the leader; a channel carrying its own endpoint is the single-node shorthand.
         config.ingressEndpoints?.let(clusterContext::ingressEndpoints)
@@ -284,15 +313,73 @@ data class GatewayConfig(
     val metricsEnabled: Boolean = false,
     /** Where to write percentile distributions at shutdown, for diffing against a later run. */
     val metricsFile: String? = null,
+    /**
+     * Which gateway speaks for which participant, or null to connect anonymously.
+     *
+     * The gateway reads it for one reason only -- to check at boot that the id it is about to
+     * present is actually in the file, and to say which participants that makes it responsible
+     * for. The authority is the consensus module, which reads the same file.
+     */
+    val participantRegistry: ParticipantRegistry? = null,
+    /** This gateway's id in [participantRegistry]. Null connects anonymously. */
+    val gatewayId: String? = null,
+    /**
+     * The shared secret behind [ParticipantRegistry] entry's SHA-256. Kept out of the registry
+     * file on purpose: that file is published to every node, and a secret that travels that far
+     * is not one. [CREDENTIAL_TOKEN_FILE] is the better home for it than a properties value.
+     */
+    val credentialToken: String? = null,
 ) {
+    init {
+        require((gatewayId == null) == (credentialToken == null)) {
+            "$GATEWAY_ID and one of $CREDENTIAL_TOKEN / $CREDENTIAL_TOKEN_FILE must be set " +
+                "together: an id with no secret cannot authenticate, and a secret with no id " +
+                "has nothing to authenticate as"
+        }
+        require(gatewayId == null || participantRegistry != null) {
+            "$GATEWAY_ID is set but $PARTICIPANT_REGISTRY is not, so there is nothing to check " +
+                "the id against"
+        }
+        val registry = participantRegistry
+        if (gatewayId != null && registry != null) {
+            require(registry.gateway(gatewayId) != null) {
+                "gateway id '$gatewayId' is not in the participant registry, which registers " +
+                    registry.gateways.map { it.gatewayId }
+            }
+            require(registry.shardId == shard.shardId) {
+                "$PARTICIPANT_REGISTRY is for shard ${registry.shardId}, but this gateway " +
+                    "serves shard ${shard.shardId}"
+            }
+        }
+    }
+
+    /** This gateway's registry entry, or null when it connects anonymously. */
+    fun identity(): GatewayIdentity? =
+        gatewayId?.let { participantRegistry?.gateway(it) }
+
+    /** The id and secret to present, or null to connect with no credentials at all. */
+    fun credentials(): Pair<String, String>? {
+        val id = gatewayId ?: return null
+        val token = credentialToken ?: return null
+        return id to token
+    }
+
     companion object {
         const val SECURITIES_FILE = "gateway.securitiesFile"
+        const val PARTICIPANT_REGISTRY = "gateway.participantRegistry"
+        const val GATEWAY_ID = "gateway.gatewayId"
+        const val CREDENTIAL_TOKEN = "gateway.credentialToken"
+        const val CREDENTIAL_TOKEN_FILE = "gateway.credentialTokenFile"
         const val JOURNAL_FILE = "gateway.journalFile"
         const val JOURNAL_SLOTS = "gateway.journalSlots"
         const val METRICS_ENABLED = "gateway.metrics"
         const val METRICS_FILE = "gateway.metrics.file"
 
-        fun from(properties: Properties, shard: ShardSpec): GatewayConfig = GatewayConfig(
+        fun from(
+            properties: Properties,
+            shard: ShardSpec,
+            registry: ParticipantRegistry? = null,
+        ): GatewayConfig = GatewayConfig(
             shard = shard,
             aeronDirectoryName = properties.getProperty("gateway.aeronDir"),
             ingressChannel = properties.getProperty("gateway.ingressChannel") ?: "aeron:udp",
@@ -315,7 +402,29 @@ data class GatewayConfig(
                     .coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
+            participantRegistry = registry,
+            gatewayId = properties.getProperty(GATEWAY_ID)?.trim()?.ifEmpty { null },
+            credentialToken = credentialToken(properties),
         )
+
+        /**
+         * The secret, from a file if one is named and from the property otherwise.
+         *
+         * The file wins, and is the form to use: a properties file full of endpoints and stream
+         * ids ends up in a repository, and a secret in it ends up there too. Trailing whitespace
+         * is trimmed because a secret in a file almost always ends with a newline nobody typed.
+         */
+        private fun credentialToken(properties: Properties): String? {
+            val path = properties.getProperty(CREDENTIAL_TOKEN_FILE)?.trim()?.ifEmpty { null }
+            if (path != null) {
+                val file = File(path)
+                require(file.isFile) { "$CREDENTIAL_TOKEN_FILE not found: $path" }
+                val token = file.readText().trim()
+                require(token.isNotEmpty()) { "$CREDENTIAL_TOKEN_FILE is empty: $path" }
+                return token
+            }
+            return properties.getProperty(CREDENTIAL_TOKEN)?.trim()?.ifEmpty { null }
+        }
 
         fun load(path: String?): GatewayConfig {
             val properties = Properties()
@@ -330,7 +439,12 @@ data class GatewayConfig(
             }
             val securitiesFile = properties.getProperty(SECURITIES_FILE)
                 ?: error("missing required configuration key: $SECURITIES_FILE")
-            return from(properties, ShardSpec.load(securitiesFile))
+            val registryFile = properties.getProperty(PARTICIPANT_REGISTRY)
+            return from(
+                properties,
+                ShardSpec.load(securitiesFile),
+                registryFile?.let(ParticipantRegistry::load),
+            )
         }
     }
 }

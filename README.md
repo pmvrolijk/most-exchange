@@ -6,6 +6,11 @@ replication and sequencing, generated SBE codecs on the wire.
 **[`docs/Design.md`](docs/Design.md) is the authoritative specification.** Read it before changing
 anything; §8 tracks the open questions.
 
+**[`docs/Status.md`](docs/Status.md) is where things stand** — what is real, what is open, and
+what to do next. It is the shortest path into the project; [`docs/Handover.md`](docs/Handover.md)
+is the archive behind it, and [`docs/Rationale.md`](docs/Rationale.md) explains why each rule in
+`CLAUDE.md` exists.
+
 **[`docs/OperatorManual.pdf`](docs/OperatorManual.pdf) is the Operator's Manual** — installing,
 configuring and operating the exchange, with the full configuration reference and the daily
 procedures. Its source is in [`docs/manual/`](docs/manual/) and it is rebuilt with `npm run build`

@@ -1,114 +1,32 @@
-# Handover
+# Handover — archive
 
-State of the project, what is real and what is not, what to do next, and what went wrong along the
-way. Updated at the end of the session that moved `origQty` into the engine, deleted the gateway's
-order journal, and thereby turned gateway HA from an open design question into a deployment choice
-(§2h) — along with a participant registry the control plane authors and both node processes re-read
-while they run. Before that, the session that bound a participant to its session at session open,
-from an authenticated gateway principal, so a maker that has gone quiet is still sent its own fills
-(§2g). Before that, the session that gave the gateway an order journal (§2f) — the thing §2h has now
-deleted. Before that, the session that closed the two places recovery left the system confidently
-wrong: market data with no book, and the gateway reporting `cumQty = 0` for an order it
-never saw (§2e). Before that, the session that made a restart resume — durable cluster directories, a
-snapshot that something actually asks for, and a restore that refuses to destroy state when geometry
-changes (§2d). Before that: hot-path instrumentation and the round-trip attribution (§2c), native
-images (§2a) and the zero-allocation proof (§2b).
+**Not the session entry point.** [`Status.md`](Status.md) is: where things stand, open issues, what
+to do next, and how to pick the project up. This file is the record of *how* the system got here —
+the work records, the decisions that are load-bearing, and what went wrong along the way. Read a
+section of it when you need the reasoning behind a particular change; do not read it to orient.
+
+Section numbers are stable and are cited from `CLAUDE.md`, `docs/Design.md` and `docs/Rationale.md`,
+so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and their headings are kept
+below as pointers.
+
+**The chronology this file records**, most recent first: the session that moved `origQty` into the
+engine, deleted the gateway's order journal, and thereby turned gateway HA from an open design
+question into a deployment choice (§2h) — along with a participant registry the control plane
+authors and both node processes re-read while they run. Before that, the session that bound a
+participant to its session at session open, from an authenticated gateway principal, so a maker that
+has gone quiet is still sent its own fills (§2g). Before that, the session that gave the gateway an
+order journal (§2f) — the thing §2h has now deleted. Before that, the session that closed the two
+places recovery left the system confidently wrong: market data with no book, and the gateway
+reporting `cumQty = 0` for an order it never saw (§2e). Before that, the session that made a restart
+resume — durable cluster directories, a snapshot that something actually asks for, and a restore
+that refuses to destroy state when geometry changes (§2d). Before that: hot-path instrumentation and
+the round-trip attribution (§2c), native images (§2a) and the zero-allocation proof (§2b).
 
 ---
 
 ## 1. Where things stand
 
-| | |
-| --- | --- |
-| Branch | **`snaphot-recovery-md-and-gateway`**, ahead of `master` — the participant binding of §2g, and the stateless gateway of §2h |
-| Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~22,700 lines — 13,300 main across 64 files, 9,500 test across 49 |
-| Frontend | ~3,100 lines of TypeScript and Vue across 24 files, outside the Gradle build |
-| Tests | 457, all passing |
-| Specification | [`Design.md`](Design.md), 2,268 lines — authoritative |
-| Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page, gateway tier included |
-| Control plane | [`ControlPlane.md`](ControlPlane.md) — data model, releases, live control, scheduling, **auth (§4)** |
-| Admin SPA | [`../web/README.md`](../web/README.md) — Vue 3 + Vite, read and write, live books |
-| Local setup | [`LocalTesting.md`](LocalTesting.md) — verified working; §9 benchmarks, §9a attributes by stage |
-| Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command, verified trading |
-
-```sh
-./gradlew clean build                        # 457 tests (control's need Docker)
-./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
-./e2e/run-restart.sh                         # does the shard come back with its book?
-./e2e/run-attribution.sh                     # where a round trip goes, by stage
-./e2e/run-epsilon-soak.sh                    # steady-state allocation (needs an Epsilon binary)
-cd web && npm install && npm run dev         # the admin SPA on :5173
-```
-
-**What has changed since the last handover.** The gateway holds no order state at all (§2h).
-`origQty` moved into the engine — a cold word beside the order's cache line, not in it — and the
-engine states `origQty` and `cumQty` on every execution report. The journal of §2f is deleted, and
-with it the two caveats it carried. What that buys is not a smaller gateway: it is a *disposable*
-one, which is what makes gateway HA a deployment choice rather than the open design question
-`docs/ProdDeployment.md` §2.1 called "the weakest part of the design". `e2e/run-restart.sh` §4d
-places an order through one gateway and cancels it through another.
-
-The participant registry is now **authored by the control plane** and **re-read while the nodes
-run**, so onboarding a participant or rotating a gateway secret costs a gateway restart — which is
-free — rather than a restart of the cluster host and the engine. §4e rotates a secret mid-run, with
-a negative control that fails when the reload is turned off.
-
-Before that, recovery stopped leaving anything quietly wrong (§2e). A restored engine now republishes each book as a level image, so market data — which keeps no
-snapshot of its own and derives every book from the event stream — comes back with the market rather
-than with an empty ladder. And the gateway says `UNKNOWN` for an order it has no record of instead of
-sending `cumQty = 0`, which read as "nothing has filled" and never corrected itself.
-
-Before that, the shard got a resumption point (§2d). It did not
-before, and nothing said so: `most cluster` deleted its archive and cluster directory on every start
-unless told otherwise, nothing in the repo ever asked for a snapshot, and `loadSnapshot` silently
-dropped any book whose security was missing from the booted security file. Restarting to reapply
-geometry, or after losing every node at once, therefore began from an empty book. All three are
-fixed, and `e2e/run-restart.sh` is the check that says so.
-
-Before that, three of the previous list's items, in order.
-
-*Native images* (§2a). All four core processes compile with `nativeCompile`, and `e2e/run-e2e.sh`
-passes with every one substituted for its JVM start script — same trade, same report and fill counts.
-The `linux/amd64` container builds too. What is still unverified is a trade *through* native
-containers, which needs an x86-64 host.
-
-*Zero allocation* (§2b). No longer a claim. Three measurements put steady-state allocation at zero —
-per-call through fakes, the snapshot and book-event paths against a real media driver, and 1.9M
-orders through a real cluster — and each was validated by deliberately breaking what it exists to
-catch. `--gc=epsilon` is still off, for a reason that has changed: not an unmeasured path, but a
-missing CI and evidence measured in seconds rather than hours.
-
-*Latency, attributed* (§2c). The engine and gateway now time their own hot paths, and
-`e2e/run-attribution.sh` splits a client round trip. **The exchange's own code is 1.4% of it**; the
-rest is consensus, the archive write and the wire. Design.md §2's 0.5 µs/order estimate, unverified
-since the first commit, holds at 0.42 µs.
-
-Before those: operators can watch live order books in the console. The control plane subscribes to
-L1/L2/snapshot as an ordinary consumer, rebuilds the books with the *shared* `DepthFeedAssembler`,
-and streams conflated images to the SPA over server-sent events. Underneath it, the market data feed
-gained a **snapshot**, so a consumer can join mid-session or recover from a gap — the open issue that
-blocked every real subscriber. `most book` no longer has to be started before the depth exists, and
-the e2e proves it by starting afterwards.
-
-Before that, the admin SPA stopped being read-only: draft topology, releases, the trading calendar,
-operator accounts and — behind confirmations that state what each one does to a live market — the
-four unacknowledged operator commands. Driving those endpoints against the running Docker stack
-turned up one real defect in the read-only half: a 64-bit `universeVersion` was crossing the wire as
-a JSON number and losing its low digits in the browser.
-
-Before that, the system was *measured*, end to end, under sustained load, and driven entirely from a
-REST control plane including a real volatility halt and its recovery. Two genuine defects were found
-by doing so.
-
-**The caveat that still stands, narrowed again.** This system has never run **multi-node**. Failover,
-leader election and recovery from a snapshot across nodes are the reasons Aeron Cluster was chosen
-and not one of them has been exercised — which also means the instrumentation and allocation results
-below describe a single node doing no replication work beyond its own log.
-
-Everything below is also **one security**. Every run to date has driven a single book, where the
-design claims ten per shard. That caveat now has a sharper edge than it used to: §2c shows the engine
-owning 1.4% of a round trip for one book, and nobody knows what that fraction becomes at ten.
+**Moved to [`Status.md`](Status.md) §1.** Kept as a pointer so the section numbering below is stable.
 
 ---
 
@@ -866,173 +784,13 @@ Change any of these and something breaks in a way that is hard to trace back.
 
 ## 4. Open issues
 
-From `Design.md` §8 and what the last session added, ordered by what would block a real deployment
-first.
-
-### Blocking
-
-1. ~~**No authentication on the control plane.**~~ **Done.** Session-cookie login for the SPA, HTTP
-   Basic for scripts, BCrypt hashes in `control_user`, CSRF on every mutating call, and
-   `operator_audit` recording who asked for each market-moving command. What is *not* done: one role
-   with full access, so authorisation is still all-or-nothing; and a command refused locally (before
-   the send attempt) is not audited, because the audit is written on the way out of the REST layer.
-2. ~~**No market data snapshot.**~~ **Done.** A periodic per-security image on its own stream, spliced
-   onto the incremental feed by `DepthFeedAssembler` at `l2SeqNum`. Verified with a late-joining
-   subscriber in the e2e and in the Docker stack over dynamic MDC. Still open underneath it: no
-   request-response recovery for a consumer that cannot wait a cycle, and **no L1 snapshot** — a
-   top-of-book-only subscriber still has nothing to join to.
-3. ~~**Participant-to-session binding is inferred from traffic.**~~ **Done** (§2g), and its
-   authoring gap closed in §2h: the control plane owns `gateway` and `gateway_participant` and
-   renders the registry into every release, so the database and the file cannot disagree. Two things
-   are left and are stated rather than hidden: **no enforcement** — the engine binds routes but does
-   not refuse an order whose `participantId` is not bound to the sending session, so
-   `UNAUTHORIZED_PARTICIPANT` is still raised by nothing, and note that it cannot simply read the
-   hot-reloaded registry (§2h); and **the identity is the gateway's, not the end participant's** — a
-   process authenticates, and the participant ids it claims are trusted because a file says so.
-4. **Execution reports are dropped under load.** The gateway's outbound leg has no back-channel —
-   egress cannot be left unconsumed the way ingress can, or the cluster session stalls — so a
-   subscriber that falls behind loses reports. Measured at ~8% (`droppedToClient=267853` of 3.26M)
-   across a sweep reaching 333k/s. Retrying was tried and made it worse (see §6). The remedy is a
-   larger term buffer or a faster subscriber, and it needs deciding deliberately.
-
-5. **`feedGaps` / `eventsMissed` over-report in the control plane, so real loss cannot be seen.**
-   `ClusterLink.onBookEvent` calls `accept()` — which feeds `FeedSequenceTracker` — only in the four
-   branches it decodes, ignoring order add/reduce/remove with `else -> Unit`. But `seqNum` counts
-   *every* book event, so each ignored order event reads as a gap. Seen live in the Docker stack:
-   one trade after two resting orders reported `feedGaps=1 eventsMissed=1` with nothing lost. On a
-   busy book these cry loss continuously, which is worse than not counting — the counters exist to
-   distinguish a real gap from a quiet feed. The fix is to call `accept()` for every book event
-   before the `when`, and it is small.
-
-### Design decisions still open
-
-5a. ~~**Market data has no book after a snapshot recovery.**~~ **Done** (§2e). The engine
-   republishes each book as a level image on a restore and on request, and `e2e/run-restart.sh`
-   asserts both paths. Still open underneath it: **no per-order L3 recovery.** The image is
-   deliberately level-aggregated, so an MBO consumer that joins or reconnects after a restart has
-   nothing to rebuild per-order state from. Nothing needs it today, which is exactly why the cheap
-   answer was the right one — but a FIX market data adapter carrying order-level detail would.
-
-5b. **Archive growth is unbounded now that the directories persist.** Nothing truncates the recorded
-   log. Aeron 1.53's post-snapshot behaviour for the consensus module log and the archive segments
-   needs establishing before a retention procedure or a volume size can be written down — this was
-   deliberately not assumed.
-
-5c. ~~**The gateway's `origQty` does not survive its own restart.**~~ **Done twice, and the second
-   time by deletion** (§2h). It was first solved with a memory-mapped journal in the gateway; the
-   engine holds `origQty` now and states it on every report, so the journal is gone and with it both
-   of the caveats this entry recorded — no `msync`, and nothing reaping a pending order. What
-   replaces it is a smaller and stranger gap: **the directory advertises one order-entry endpoint
-   per shard**, so a shard served by several gateways cannot name them all. `ShardEntry` carries one
-   channel and `DirectoryClient` keeps one `ShardRoute` per shard. A virtual address in front of the
-   gateway tier works today; naming them individually is a wire change nobody has needed yet.
-
-5d. ~~**A gateway cannot journal a fill it is never told about.**~~ **Done** (§2g), by exactly the
-   fix this entry predicted: binding the participant from the authenticated session at open. The
-   sentence is still true — the journal can only preserve what the gateway was told — but the
-   gateway is now told. `e2e/run-restart.sh` §4c rests an offer, restarts the gateway, crosses the
-   offer and checks the maker's cancel reports `cum 4 of 10`.
-
-6. **A `SecurityDefinition` cannot be confirmed.** Nothing on any feed acknowledges one, and a
-   rejection only increments `rejectedDefinitions`. The control plane checks what it can before
-   sending and reports `confirmed: false` honestly, but an ack message in the schema would close it.
-7. **`SecurityDefinition` conflates boot-time geometry with runtime reconfiguration.**
-8. **Collars in the auction** — the uncross is uncollared. Deliberate, but confirm.
-9. **Closing auction** — whether it exists, and whether it resets `staticReference`.
-10. **Order modify/replace** — unsupported (cancel/new only). Confirm this is intended.
-11. **Reference price on a day with no trades** — carry forward or re-seed operationally.
-12. **Fingerprints are printed, never compared.** Narrowed but not closed. The snapshot now carries
-    the fingerprint it was taken under, so a *snapshot-versus-node* mismatch is loud. A
-    *node-versus-node* mismatch with no snapshot between them still diverges silently on the first
-    order. Also still open, and adjacent: **`auctionMaxPasses` is in no fingerprint at all**, though
-    it bounds the SMP fixed point and so can change an uncross result. It cannot be folded into
-    `ShardSpec.fingerprint()` — that hash is stored by the control plane and published in releases,
-    so changing it invalidates every recorded value — and wants a separate engine-level one.
-
-    The original text follows. The release manifest publishes the expected value
-    per shard; making the four processes fail fast on a mismatch is a small, high-value change that
-    was deliberately kept out of the control-plane slices because it touches four boot paths.
-
-### Needs measurement
-
-13. **Auction SMP pass limit** — currently 64, still a guess.
-14. **Net resting depth** — confirms the 1M order pool and the capacity high-water mark.
-15. **`SecurityDefinition` distribution to market data** — it learns reference prices only
-    implicitly from trades.
-16. ~~**The engine's internal budget.**~~ **Answered** (§2c). §2 estimated ~0.5 µs/order; the engine
-    measures 0.42 µs at the median for a whole new order, and owns 1.4% of a client round trip. The
-    remaining 98.6% is consensus, the archive write and the wire — so the thing worth tuning was
-    never the matching engine. `e2e/run-attribution.sh` reproduces it.
-17. **The aggregate, which is the number the design actually claims.** Every run so far has driven
-    **one** security. One book sustains 200k/s in Docker and 100k/s cleanly on a host, but the target
-    is 100k/s/security across **ten** — 1M/s per shard. Issue 16 is answered for one book and says
-    the engine is nowhere near the limit there; whether that survives a tenfold fan-out through a
-    single-threaded shard is exactly what has never been tried. Driving ten securities at once is
-    cheap, and `run-attribution.sh` now exists to say where the time went when it falls short.
-18. **Whether the console should keep up rather than resynchronise.** Above roughly 25k/s the control
-    plane's depth subscriber takes gaps and rebuilds from snapshots — correct, survivable, and
-    measured (15 rebuilds through 1.35M orders, both books right at the end). The cost is that a
-    console's book can be up to a snapshot cycle behind after a burst. If that is not acceptable the
-    knobs are the idle strategy (`SleepingIdleStrategy` today), the fragment limit and the publish
-    interval. Nobody has decided whether it matters, and it is a decision, not a defect.
+**Moved to [`Status.md`](Status.md) §2.**
 
 ---
 
 ## 5. To do next
 
-In the order I would tackle them.
-
-0. ~~**Bind a participant to its session at session open.**~~ **Done** (§2g), and ~~**publish the
-   registry from the control plane**~~ **done** (§2h). What is left of this thread is **enforcement**:
-   an `UNAUTHORIZED_PARTICIPANT` reject on an order whose `participantId` is not bound to the sending
-   session. It is a deliberate change rather than a small one, for two reasons now. Every existing
-   config, e2e script and Docker stack would have to name its participants first — and, new since
-   §2h, **a reject is replicated state, so it cannot be decided from a file each node re-reads on
-   its own schedule.** The binding it would refuse on is node-local by design, which is exactly what
-   makes the hot reload safe; enforcement has to come through the log, which probably means a
-   sequenced command that installs a registry version rather than a poller. Worth deciding that
-   shape before writing any of it.
-
-0b. **Advertise several gateways per shard** (5c). The gateways themselves are done — stateless,
-   their own tier, two of them proven against one shard in `run-restart.sh` §4d — but `ShardEntry`
-   carries one order-entry channel and `DirectoryClient` keeps one `ShardRoute` per shard, so the
-   directory cannot name them all. A virtual address in front of the tier is the interim answer.
-   Small, and it is what makes the topology in `ProdDeployment.md` §2 fully self-describing.
-
-0a. **Decide the archive retention policy** (5b). The directories persist now, which is the point,
-   and nothing truncates them. This is cheap to establish and expensive to discover.
-
-1. **Run the Docker stack on native containers, on an x86-64 host.** Both builds are done (§2a) —
-   the local binaries pass e2e and the `linux/amd64` image assembles. What has never happened is a
-   trade *through* native containers, because a `x86-64-v3` binary cannot start under Apple
-   Silicon's amd64 emulation. On a real x86-64 host this is a `CORE_TARGET=native docker compose up`
-   and a repeat of the §9 benchmark.
-2. **Run a long soak, then enable Epsilon.** Every path is now measured, snapshot included (§2b);
-   what is missing is duration. Run `e2e/run-epsilon-soak.sh` shaped for hours rather than seconds,
-   to bound the Aeron client conductor's per-duty-cycle allocation — it shares this heap and would
-   be invisible in a 20-second run. With that and a CI to run the assertion in (item 3),
-   `engine.useEpsilonGc=true` is a one-line change backed by measurement rather than assumption.
-3. **Set up CI** — build, test and `e2e/run-e2e.sh` if a runner can host it. The allocation
-   assertion §7 asks for already exists and runs in the ordinary build; what is missing is a CI to
-   run it in. Note `control`'s tests need Docker.
-4. **Drive ten securities at once** (open issue 17). An afternoon's work, and it is the first
-   measurement that tests the number the design actually claims rather than a tenth of it.
-5. **Attribute the *aggregate* run.** The per-stage instrumentation exists (§2c) and says the engine
-   owns 1.4% of a round trip for one security. Item 4 drives ten at once; re-run
-   `e2e/run-attribution.sh` against that and the same subtraction says whether the shard's ceiling
-   is the engine or the archive. That is the question §2c answered for one book and cannot yet
-   answer for ten.
-6. **Bring up a three-node cluster.** Failover, leader election and snapshot recovery are the reasons
-   Aeron Cluster was chosen and none has been exercised. Expect the fixed single-node member string
-   in `ClusterCommand.kt` to need generalising. Snapshot *restore* is now exercised single-node by
-   `e2e/run-restart.sh`, so what is left untested here is specifically the multi-node part: whether
-   a snapshot taken through consensus on one member restores on another, and whether a rejoining
-   node catches up from the archive rather than from genesis.
-7. **Fingerprint enforcement at boot** (open issue 12) — cheap, and closes a silent-divergence path.
-8. **Reconcile `Design.md` §6 with the code**, or cut it. Still outstanding from last time.
-9. **Tests for the `discovery` process** itself. Also still outstanding.
-10. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put
-    it in; and serving the built SPA from the control jar rather than a dev proxy.
+**Moved to [`Status.md`](Status.md) §3.**
 
 ---
 
@@ -1581,63 +1339,5 @@ inexplicable, verify the environment before debugging the code.**
 
 ## 7. Picking this up
 
-* [`Architecture.drawio`](Architecture.drawio) is the fastest way to see the shape of the system.
-  Open it at [app.diagrams.net](https://app.diagrams.net) or in the draw.io desktop app / VS Code
-  extension. Edges bind to shapes by id, so boxes can be dragged without detaching anything. There is
-  deliberately **no committed PNG or SVG**: draw.io inlines fonts and both come out at ~2.6 MB, and a
-  generated file that large will drift from its source. Regenerate one when you need it:
-  `"/Applications/draw.io.app/Contents/MacOS/draw.io" -x -f png -s 1 -o /tmp/arch.png docs/Architecture.drawio`
-* [`Design.md`](Design.md) is authoritative — read it before changing behaviour. §8 is the open list.
-* [`ControlPlane.md`](ControlPlane.md) covers the database, releases, live cluster control and
-  scheduling, and explains why the database is not on the boot path.
-* [`LocalTesting.md`](LocalTesting.md) gets the system running on one machine; §9 is the benchmark
-  and §9a splits a round trip by stage.
-* `e2e/run-e2e.sh` is the fastest confidence check after a wire-format change.
-* `e2e/run-attribution.sh` says where a round trip went — gateway, engine, or everything else. Run
-  it either side of a change to the core; the `.hgrm` files it writes exist to be diffed.
-* `e2e/run-epsilon-soak.sh` measures steady-state allocation against a real cluster. It needs a
-  binary built with `-Pengine.useEpsilonGc=true`, and tells you so if it is missing.
-* `CLAUDE.md` holds the traps worth knowing before touching the code.
-* **Writing a market data consumer — a FIX adapter, a recorder, a screen?** Everything needed is in
-  `reference` and is already used by two independent consumers: `DepthFeedAssembler` (the snapshot
-  and increment splice, and the recovery state machine), `DepthFeedDecoder` (which template ids
-  matter and which fields carry the splice) and `AggregatedBook` (the price-keyed book itself).
-  Subscribe to **all three** feeds — L2 for increments, the snapshot stream for the images that make
-  them applicable, L1 for `LastTrade` — and call `book(securityId)`, which returns null until the
-  book can be trusted. `tools/BookCommand.kt` and `control/DepthMonitor.kt` are the two worked
-  examples, and they produce identical books level for level, which is the point of sharing the
-  code.
-
-Things that will waste time if unknown:
-
-1. Any JVM running this needs `--add-opens java.base/jdk.internal.misc=ALL-UNNAMED` and
-   `--add-opens java.base/sun.nio.ch=ALL-UNNAMED` (Agrona 2.x, Aeron driver). Already set on the
-   `test` and `run` tasks, and on `control` since it embeds an Aeron client.
-2. `ClientSession.tryClaim` reserves the cluster session header — encode at
-   `claim.offset() + AeronCluster.SESSION_HEADER_LENGTH`. **A plain `Publication` does not**, which
-   is why `most load` encodes at `claim.offset()`; applying the cluster rule there would shift every
-   message by 32 bytes.
-3. Byte offsets are never hand-written. Edit `sbe/src/main/resources/message-schema.xml`; the codecs
-   regenerate. Keep it in step with `Design.md` §5.
-4. **Anything printed at shutdown must be inside the `ShutdownSignalBarrier` block.** Closing the
-   barrier releases the signal and the process exits at once, so a print after it is racing the
-   exit — a short one usually wins and a histogram write does not. The gateway is the worked
-   example. In a native image this additionally needs `--install-exit-handlers`, without which
-   SIGTERM kills the process outright and nothing is printed at all.
-5. **The engine may read `nanoTime` only for metrics, and the histograms must stay write-only.**
-   The invariant is that enabling metrics on one node and not another cannot change the log, the
-   books or a snapshot; `MetricsDeterminismTest` checks it. That is also why metrics are excluded
-   from `EngineConfig.fingerprint()`. If a probe you add would fail that test, it is not
-   instrumentation.
-6. **Do not widen a tolerance in `AllocationTest` to make it pass.** A failure there is either a
-   real per-operation allocation or a workload too light for the blip; the fix is more rounds. The
-   three `inline` keywords those tests guard — `matchAggressive`, `offerToSnapshot`,
-   `publishBookEvent` — can each be removed without a compiler warning.
-7. `control`'s tests need Docker running (Testcontainers Postgres). `./gradlew build` fails without
-   it, which is easy to mistake for a code problem.
-8. `deploy/`'s `client-aeron` volume is a **1 GB** tmpfs and needs to be. Every Aeron subscription
-   image is a log buffer of three terms, and the control plane alone holds five subscriptions. When
-   it was 256 MB a 100k/s load run exhausted it and the media driver died with
-   `InternalError: a fault occurred in an unsafe memory access operation` — SIGBUS on a mapped file,
-   which reads like a JVM bug and is a full mount. If that error appears, check `df -h /aeron`
-   inside the driver's container before reading the stack trace.
+**Moved to [`Status.md`](Status.md) §4**, together with the list of things that waste time if
+unknown.

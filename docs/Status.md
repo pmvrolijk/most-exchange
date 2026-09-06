@@ -25,6 +25,7 @@ gateway's order journal (Handover §2h).
 | Admin SPA | [`../web/README.md`](../web/README.md) — Vue 3 + Vite, read and write, live books |
 | Local setup | [`LocalTesting.md`](LocalTesting.md) — §9 benchmarks, §9a attributes by stage |
 | Measurements | [`Measurements.md`](Measurements.md) — every figure with its machine, load and rate |
+| CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; needs a runner |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/) |
@@ -50,7 +51,8 @@ that authors reference data and drives the market over REST, and a console that 
 - **Native images build and pass e2e.** All four core processes, plus a `linux/amd64` container
   (§2a). Untested: a trade *through* native containers, which needs an x86-64 host.
 - **Zero allocation is proven**, by three measurements that are each mutation-validated (§2b).
-  `--gc=epsilon` is still off for want of CI and an hours-long soak, not for want of a measured path.
+  `--gc=epsilon` is still off for want of a runner and an hours-long soak, not for want of a
+  measured path — the pipeline that would run the assertion now exists.
 - **Latency is attributed.** The exchange's own code is **1.4%** of a client round trip; the rest is
   consensus, the archive write and the wire. Design.md §2's 0.5 µs/order estimate holds at 0.42 µs
   (§2c).
@@ -149,9 +151,13 @@ In the order I would tackle them.
    has to come through the log, which probably means a sequenced command that installs a registry
    version rather than a poller. Every existing config, e2e script and Docker stack would also have
    to name its participants. Worth deciding the shape before writing any of it.
-1. **Set up CI** — build, test, and `e2e/run-e2e.sh` if a runner can host it. The allocation
-   assertion already exists and runs in the ordinary build; what is missing is somewhere to run it.
-   This is the stated blocker on three separate items. Note `control`'s tests need Docker.
+1. **Get a GitLab runner onto the pipeline.** [`.gitlab-ci.yml`](../.gitlab-ci.yml) is written and
+   validated: build, `test:core` (which is where the allocation proofs live), `test:control`,
+   `test:web`, `e2e`, `e2e:restart`, a native build that greps the binary for the exports a missing
+   `--add-exports` would have silently dropped, and two manual measurement jobs. What is missing is
+   a runner — `test:control` needs one that can run `docker:dind` privileged, and the e2e jobs need
+   ~4 GB for five JVMs. Nothing here has ever executed on GitLab; the first pipeline should be
+   treated as the test of the pipeline.
 2. **Drive ten securities at once** (open issue 13). An afternoon's work, and the first measurement
    that tests the number the design actually claims rather than a tenth of it. Then re-run
    `e2e/run-attribution.sh` against it: the same subtraction says whether the shard's ceiling is the
@@ -165,8 +171,8 @@ In the order I would tackle them.
    `CORE_TARGET=native docker compose up` and a repeat of the §9 benchmark.
 6. **Run a long soak, then enable Epsilon.** Shaped for hours rather than seconds, to bound the
    Aeron client conductor's per-duty-cycle allocation — it shares this heap and would be invisible
-   in a 20-second run. With that and CI, `engine.useEpsilonGc=true` is a one-line change backed by
-   measurement.
+   in a 20-second run. With that and a runner on the pipeline, `engine.useEpsilonGc=true` is a
+   one-line change backed by measurement.
 7. **Bring up a three-node cluster.** Expect the fixed single-node member string in
    `ClusterCommand.kt` to need generalising. What is untested is specifically the multi-node part:
    whether a snapshot taken through consensus on one member restores on another, and whether a

@@ -298,7 +298,8 @@ memory footprint, which makes huge pages mandatory, not optional.
   process outright and no shutdown counter is ever printed. → R§10
 - **Pin `-march=x86-64-v3`, never `-march=native`** — a mismatched build host SIGILLs in production.
 - Native knobs live in `gradle.properties`: `engine.march` (CI/prod must set it) and
-  `engine.useEpsilonGc` (off until a long soak and a CI exist).
+  `engine.useEpsilonGc` (off until a long soak runs and a GitLab runner is attached to
+  `.gitlab-ci.yml`, whose `test:core` job is where the allocation proofs run).
 - Run the Aeron `MediaDriver` as a separate process; it allocates.
 - Snapshots must serialize only *occupied* orders by walking the ladders, never the whole 1M-slot
   pool.

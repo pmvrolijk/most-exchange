@@ -1,0 +1,266 @@
+# GitLab CI for most-exchange.
+#
+# The point of this pipeline is not "does it compile". It is that three proofs the project already
+# owns stop depending on somebody remembering to run them:
+#
+#   * **zero allocation** -- AllocationTest and AeronAllocationTest, inside `test:core`. Removing
+#     any of the four load-bearing `inline` keywords compiles in silence and is caught by nothing
+#     else (CLAUDE.md, "Zero allocation"). docs/Status.md names the absence of a CI to run this in
+#     as the reason `engine.useEpsilonGc` is still off.
+#   * **the wire** -- `e2e/run-e2e.sh`, which has caught five defects unit tests could not.
+#   * **durability** -- `e2e/run-restart.sh`, the only check that state survives a restart and the
+#     only one that exercises the geometry-change refusals.
+#
+# Measurement jobs (sweep, attribution) are deliberately `manual` and `allow_failure`. A shared
+# runner is not a machine you can quote a latency from, and a number without its conditions is
+# worse than no number (docs/Measurements.md). They are here to be *runnable*, not to gate a merge.
+#
+# Runner requirements:
+#   * `test:control` needs Docker (Testcontainers Postgres), so a runner that can run the dind
+#     service in privileged mode. Without it that job fails and no other job is affected.
+#   * `e2e` and `e2e:restart` start five JVMs. Budget ~4 GB. They need no Docker and no network.
+#   * `native:*` needs the GraalVM image and is slow; it is manual outside the default branch.
+
+stages:
+  - build
+  - test
+  - verify
+  - measure
+
+workflow:
+  # Merge request pipelines and default-branch pipelines only -- without this, pushing to a branch
+  # with an open MR runs the whole thing twice.
+  rules:
+    - if: $CI_PIPELINE_SOURCE == "merge_request_event"
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - if: $CI_COMMIT_TAG
+
+variables:
+  # Keep the Gradle home inside the project so it can be cached; GitLab cannot cache ~/.
+  GRADLE_USER_HOME: "$CI_PROJECT_DIR/.gradle"
+  # A daemon in a container that is discarded after every job is pure startup cost.
+  GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+default:
+  image: eclipse-temurin:21-jdk
+  interruptible: true
+  before_script:
+    - chmod +x gradlew e2e/*.sh
+  cache:
+    # Keyed on the wrapper and the version catalogue: the cache is only invalid when the toolchain
+    # or a dependency version actually moves.
+    key:
+      files:
+        - gradle/wrapper/gradle-wrapper.properties
+        - gradle/libs.versions.toml
+    paths:
+      - .gradle/wrapper
+      - .gradle/caches
+    policy: pull
+
+# ------------------------------------------------------------------------------ build
+
+build:
+  stage: build
+  cache:
+    key:
+      files:
+        - gradle/wrapper/gradle-wrapper.properties
+        - gradle/libs.versions.toml
+    paths:
+      - .gradle/wrapper
+      - .gradle/caches
+    policy: pull-push
+  script:
+    - ./gradlew assemble installDist
+  artifacts:
+    name: "dists-$CI_COMMIT_SHORT_SHA"
+    paths:
+      - "*/build/install/"
+    expire_in: 1 day
+
+# ------------------------------------------------------------------------------- test
+
+test:core:
+  stage: test
+  needs: []
+  # Everything except control, which is the only module needing Docker. Splitting them means a
+  # Docker outage cannot stop the engine's proofs from running.
+  #
+  # This job is where zero allocation is proven. AllocationTest and AeronAllocationTest are
+  # timing-sensitive by design -- the criterion is a strict majority of eight windows reading
+  # exactly zero -- so on a noisy shared runner they are the most likely thing here to flake.
+  # If one does, the fix is more rounds in the test, never a wider tolerance (CLAUDE.md).
+  script:
+    - ./gradlew test -x :control:test
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - "*/build/test-results/test/TEST-*.xml"
+    paths:
+      - "*/build/reports/tests/"
+    expire_in: 1 week
+
+test:control:
+  stage: test
+  needs: []
+  services:
+    - name: docker:27-dind
+      alias: docker
+  variables:
+    DOCKER_HOST: "tcp://docker:2375"
+    # dind over plain TCP; the runner must allow privileged mode for this to come up at all.
+    DOCKER_TLS_CERTDIR: ""
+    # Testcontainers otherwise maps published ports to localhost, which in this topology is the
+    # job container rather than the daemon.
+    TESTCONTAINERS_HOST_OVERRIDE: "docker"
+    # Ryuk's reaper cannot always see the job container's lifetime under dind, and the daemon is
+    # thrown away with the job anyway.
+    TESTCONTAINERS_RYUK_DISABLED: "true"
+  script:
+    - ./gradlew :control:test
+  artifacts:
+    when: always
+    reports:
+      junit:
+        - "control/build/test-results/test/TEST-*.xml"
+    expire_in: 1 week
+
+test:web:
+  stage: test
+  needs: []
+  image: node:22
+  before_script: []
+  cache:
+    key:
+      files:
+        - web/package-lock.json
+    paths:
+      - web/node_modules
+    policy: pull-push
+  script:
+    - cd web
+    - npm ci
+    # `build` runs vue-tsc --noEmit first, so this is the type check as well as the bundle.
+    - npm run build
+  rules:
+    - changes:
+        - web/**/*
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+
+# ----------------------------------------------------------------------------- verify
+
+.e2e:
+  stage: verify
+  needs: ["build"]
+  # The scripts write everything under build/, including their Aeron directory -- so no /dev/shm
+  # sizing is needed, unlike the Docker dev stack. Both read $E2E_DIR, defaulting to build/e2e and
+  # build/e2e-restart respectively; do not set it here or the two would share one directory.
+  artifacts:
+    when: on_failure
+    paths:
+      - build/e2e/logs/
+      - build/e2e-restart/logs/
+    expire_in: 1 week
+
+e2e:
+  extends: .e2e
+  # The wire check. Run after anything that crosses a process boundary; it has caught a clobbered
+  # session header, a cumQty derived from a terminal report, an unenforced ladder invariant, a
+  # cluster session that died after 10s idle, and processes that ignored SIGTERM.
+  script:
+    - ./e2e/run-e2e.sh
+
+e2e:restart:
+  extends: .e2e
+  # Durability. run-e2e.sh wipes everything and starts fresh, so it has never once shown that
+  # anything survives. This one rests orders, snapshots, stops the node and brings it back -- on
+  # the same security file, on one with a populated security removed (must refuse), on one with an
+  # emptied security removed (must start), and on one with a security added.
+  #
+  # Slower than it looks: a node cannot restart until the previous one's mark file ages out, about
+  # ten seconds each time, and this script restarts several times.
+  timeout: 30m
+  script:
+    - ./e2e/run-restart.sh
+
+# The native check that cannot be made by running the binary.
+native:engine:
+  stage: verify
+  needs: []
+  image:
+    name: ghcr.io/graalvm/native-image-community:21
+    # This image's entrypoint is `native-image` itself. GitLab runs the job script through the
+    # image's entrypoint, so without clearing it the job never gets a shell.
+    entrypoint: [""]
+  before_script:
+    - chmod +x gradlew
+  variables:
+    # Design.md §7: pin -march explicitly. -march=native SIGILLs when the build host's CPU differs
+    # from production, which is exactly what a CI runner guarantees.
+    ENGINE_MARCH: "x86-64-v3"
+  script:
+    - ./gradlew :engine:nativeCompile -Pengine.march=$ENGINE_MARCH
+    - BIN=engine/build/native/nativeCompile/matching-engine
+    - test -x "$BIN" || { echo "no binary produced"; exit 1; }
+    # A missing --add-exports=java.base/jdk.internal.misc=ALL-UNNAMED does NOT fail the build. It
+    # silently omits the class and the binary dies on its first UnsafeBuffer -- and only once a real
+    # Aeron CnC file exists, so starting it without a media driver passes either way. This grep is
+    # the only check that works on an image you cannot run: 0 when the exports were dropped, 3 when
+    # they were not (CLAUDE.md, "Build and deployment").
+    - COUNT=$(grep -c 'jdk.internal.misc.Unsafe' "$BIN" || true)
+    - echo "jdk.internal.misc.Unsafe references in the image: $COUNT (expected 3, must not be 0)"
+    - test "$COUNT" -gt 0 || { echo "FAIL: the --add-exports were dropped from the native build"; exit 1; }
+  artifacts:
+    paths:
+      - engine/build/native/nativeCompile/matching-engine
+    expire_in: 1 week
+  rules:
+    # Slow. Automatic on the default branch, one click on a merge request.
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+    - when: manual
+      allow_failure: true
+
+# ---------------------------------------------------------------------------- measure
+#
+# Neither of these gates anything. A shared CI runner is not idle, is not a known machine, and its
+# numbers must not be pasted into docs/Measurements.md as if they were -- the `idle` column would
+# be a lie and the `machine` column would be a runner tag. They exist so a sweep is one click away
+# when someone wants the shape, and so the scripts themselves keep working.
+
+measure:sweep:
+  stage: measure
+  needs: ["build"]
+  when: manual
+  allow_failure: true
+  timeout: 30m
+  variables:
+    # Smaller than the default 300k: a shared runner is slow and this is a shape check, not a
+    # capacity plan.
+    ORDERS: "100000"
+    WARMUP_ORDERS: "50000"
+  script:
+    - ./e2e/run-sweep.sh
+  artifacts:
+    when: always
+    paths:
+      - build/sweep/
+    expire_in: 1 week
+
+measure:attribution:
+  stage: measure
+  needs: ["build"]
+  when: manual
+  allow_failure: true
+  timeout: 30m
+  variables:
+    ORDERS: "500000"
+  script:
+    - ./e2e/run-attribution.sh
+  artifacts:
+    when: always
+    paths:
+      - build/attribution/*.hgrm
+      - build/attribution/logs/
+    expire_in: 1 month

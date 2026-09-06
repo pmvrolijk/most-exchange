@@ -5,6 +5,7 @@ import com.engine.sbe.Phase as SbePhase
 import com.engine.sbe.SnapshotBookEncoder
 import com.engine.sbe.SnapshotEndEncoder
 import com.engine.sbe.SnapshotEngineStateEncoder
+import com.engine.sbe.SnapshotOrderEncoder
 import io.aeron.Aeron
 import io.aeron.ExclusivePublication
 import io.aeron.Image
@@ -285,6 +286,33 @@ class SnapshotRestoreTest {
         assertContains(failure.message!!, "too old to say whether its book was empty")
     }
 
+    /**
+     * A version 2 snapshot predates the engine holding `origQty`, so a restored order has none.
+     *
+     * That has to come back as 0 = unknown and travel to the client as `Enrichment.UNKNOWN`. The
+     * plausible mistake is to fill it in from `leavesQty`, which is right only for an order that
+     * never traded and silently understates every order that did.
+     */
+    @Test
+    fun `an order from a version 2 snapshot restores with an unknown original quantity`() {
+        val target = Harness(arrayOf(serviceBook(securityId = 1)))
+        target.restore(
+            publish { pub ->
+                state(pub, FINGERPRINT)
+                bookHeader(pub, securityId = 1, claimedOrders = 1)
+                writeVersionTwoOrder(pub, securityId = 1, price = 100L, leavesQty = 6L)
+                end(pub, 1L)
+            }
+        )
+
+        val book = target.books[0]
+        assertEquals(1, book.restingOrderCount())
+        var node = -1
+        book.forEachRestingOrder { node = it }
+        assertEquals(6L, book.leavesQtyOf(node))
+        assertEquals(0L, book.origQtyOf(node), "0 means unknown, not zero quantity")
+    }
+
     // ------------------------------------------------------------------ support
 
     /** A harness with a book that accepts orders: defined, and trading. */
@@ -404,6 +432,36 @@ class SnapshotRestoreTest {
         end(publication, 0L)
     }
 
+    /**
+     * A `SnapshotOrder` as schema version 2 wrote it: the same body, one field shorter, and a
+     * header that says so. Hand-written because the current encoder cannot produce it.
+     */
+    private fun writeVersionTwoOrder(
+        publication: ExclusivePublication,
+        securityId: Int,
+        price: Long,
+        leavesQty: Long,
+    ) {
+        val buffer = UnsafeBuffer(ByteArray(256))
+        MessageHeaderEncoder().wrap(buffer, 0)
+            .blockLength(V2_ORDER_BLOCK_LENGTH)
+            .templateId(SnapshotOrderEncoder.TEMPLATE_ID)
+            .schemaId(SnapshotOrderEncoder.SCHEMA_ID)
+            .version(2)
+        val body = MessageHeaderEncoder.ENCODED_LENGTH
+        buffer.putLong(body, 10L)              // participantId
+        buffer.putLong(body + 8, 10L)          // smpId
+        buffer.putLong(body + 16, 1L)          // clOrdId
+        buffer.putLong(body + 24, 1L)          // exchangeOrderId
+        buffer.putLong(body + 32, price)
+        buffer.putLong(body + 40, leavesQty)
+        buffer.putInt(body + 48, securityId)
+        buffer.putInt(body + 52, 0)            // expireDate
+        buffer.putByte(body + 56, Side.BUY)
+        buffer.putByte(body + 57, SmpStrategy.CANCEL_AGGRESSOR)
+        offer(publication, buffer, body + V2_ORDER_BLOCK_LENGTH)
+    }
+
     private fun assertBooksMatch(expected: OrderBook, actual: OrderBook) {
         val from = mutableListOf<String>()
         expected.forEachRestingOrder { from += describe(expected, it) }
@@ -424,6 +482,7 @@ class SnapshotRestoreTest {
         append(" side=").append(book.sideOfOrder(node))
         append(" price=").append(book.orderPrice(node))
         append(" leaves=").append(book.leavesQtyOf(node))
+        append(" orig=").append(book.origQtyOf(node))
         append(" expire=").append(book.expireDateOfOrder(node))
         append(" smp=").append(book.smpStrategyOfOrder(node))
     }
@@ -458,5 +517,8 @@ class SnapshotRestoreTest {
         // The block lengths these two messages shipped with, before the geometry fields.
         const val V1_STATE_BLOCK_LENGTH = 16
         const val V1_BOOK_BLOCK_LENGTH = 40
+
+        /** SnapshotOrder's blockLength before origQty was added in schema version 3. */
+        const val V2_ORDER_BLOCK_LENGTH = 64
     }
 }

@@ -164,36 +164,7 @@ fun main(args: Array<String>) {
                 }
             }
             val metrics = if (config.metricsEnabled) GatewayMetrics(SystemNanoClock.INSTANCE) else null
-            val store = try {
-                OrderStateStore(
-                    file = config.journalFile?.let(::File),
-                    slotCount = config.journalSlots,
-                    shardFingerprint = config.shard.fingerprintValue(),
-                )
-            } catch (e: OrderJournalUnusable) {
-                // Same rule as the engine refusing a snapshot it cannot faithfully restore: the
-                // orders in that file are live as far as their owners know, and adopting half of
-                // them would be worse than not starting.
-                System.err.println(e.message)
-                return@use
-            }
-            // Deliberately not closed at shutdown. Closing unmaps the file, and unmapping memory
-            // another thread might still be reading is a segfault rather than an exception -- the
-            // poller is interrupted, not joined. Process exit unmaps it, and there is nothing to
-            // flush: the pages are the operating system's and outlive this process either way.
-            if (config.journalFile == null) {
-                println(
-                    "gateway: no order journal (${GatewayConfig.JOURNAL_FILE} unset). A restart " +
-                        "will report cumQty as unknown for every order in flight."
-                )
-            } else {
-                println(
-                    "gateway: order journal ${config.journalFile} " +
-                        "slots=${config.journalSlots} recovered=${store.recoveredOrders} " +
-                        "(live=${store.liveOrders} pending=${store.pendingOrders})"
-                )
-            }
-            service = GatewayService(config.shard.securityIds, sink, store, metrics = metrics)
+            service = GatewayService(config.shard.securityIds, sink, metrics = metrics)
 
             // Controlled, so a message the cluster cannot take right now is left in the
             // subscription rather than consumed and lost. COMMIT rather than CONTINUE on the
@@ -246,9 +217,6 @@ fun main(args: Array<String>) {
                         "clusterBackpressure=${sink.clusterBackpressure} " +
                         "sentToClient=${sink.sentToClient} " +
                         "droppedToClient=${sink.droppedToClient} " +
-                        "liveOrders=${service.liveOrders} " +
-                        "pendingOrders=${service.pendingOrders} " +
-                        "journalExhausted=${service.journalExhausted} " +
                         "rejectedLocally=${service.rejectedLocally} " +
                         "unreachableRejects=${service.unreachableRejects} " +
                         "undeliverableCommands=${service.undeliverableCommands} " +
@@ -292,23 +260,6 @@ data class GatewayConfig(
     val clientInboundStreamId: Int,
     val clientOutboundChannel: String,
     val clientOutboundStreamId: Int,
-    /**
-     * Where to keep the order journal, or null to keep order state in memory only.
-     *
-     * Null is the default and is the behaviour that shipped before the journal existed: a restart
-     * loses every in-flight order's `origQty`, and each report for one comes back marked
-     * `Enrichment.UNKNOWN`. **A production gateway sets this.** `origQty` exists nowhere else —
-     * the engine does not store it — so nothing else can recover it.
-     */
-    val journalFile: String? = null,
-    /**
-     * Slots in the journal, one per order this gateway is tracking.
-     *
-     * Defaults to the shard's own total order pool, which makes exhaustion unreachable for resting
-     * orders: the engine answers `BOOK_CAPACITY` before the gateway runs out of slots. Sixty-four
-     * bytes each, and file-backed, so the pages are only resident once touched.
-     */
-    val journalSlots: Int,
     /** Hot-path timing: two clock reads per message on each leg. Off unless asked for. */
     val metricsEnabled: Boolean = false,
     /** Where to write percentile distributions at shutdown, for diffing against a later run. */
@@ -370,8 +321,6 @@ data class GatewayConfig(
         const val GATEWAY_ID = "gateway.gatewayId"
         const val CREDENTIAL_TOKEN = "gateway.credentialToken"
         const val CREDENTIAL_TOKEN_FILE = "gateway.credentialTokenFile"
-        const val JOURNAL_FILE = "gateway.journalFile"
-        const val JOURNAL_SLOTS = "gateway.journalSlots"
         const val METRICS_ENABLED = "gateway.metrics"
         const val METRICS_FILE = "gateway.metrics.file"
 
@@ -394,12 +343,6 @@ data class GatewayConfig(
                 ?: "aeron:ipc",
             clientOutboundStreamId =
                 properties.getProperty("gateway.client.outbound.streamId")?.toInt() ?: 21,
-            journalFile = properties.getProperty(JOURNAL_FILE),
-            journalSlots = properties.getProperty(JOURNAL_SLOTS)?.toInt()
-                // Summed as a Long first: ten securities at a million orders each overflows an Int
-                // by a factor of two, and an overflowed capacity would be a negative slot count.
-                ?: shard.securities.sumOf { it.maxOrders.toLong() }
-                    .coerceAtMost(Int.MAX_VALUE.toLong()).toInt(),
             metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
             participantRegistry = registry,

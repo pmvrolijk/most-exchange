@@ -92,10 +92,13 @@ GATEWAY_SECRET="restart-e2e-secret"
 printf '%s\n' "$GATEWAY_SECRET" > "$RUN/gateway.secret"
 cat > "$RUN/participants.properties" <<EOF
 shard.id=0
-registry.gateways=gw-0
+registry.gateways=gw-0,gw-1
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
+gateway.gw-1.secret=$(sha256 "$GATEWAY_SECRET-b")
+gateway.gw-1.participants=14
 EOF
+printf '%s\n' "$GATEWAY_SECRET-b" > "$RUN/gateway-b.secret"
 
 write_engine_config() { # write_engine_config <securities file>
   cat > "$RUN/engine.properties" <<EOF
@@ -111,17 +114,50 @@ EOF
 cat > "$RUN/gateway.properties" <<EOF
 gateway.securitiesFile=$RUN/securities.properties
 gateway.aeronDir=$AERON_DIR
-gateway.clientInboundChannel=aeron:ipc
-gateway.clientInboundStreamId=20
-gateway.clientOutboundChannel=aeron:ipc
-gateway.clientOutboundStreamId=21
+gateway.client.inbound.channel=aeron:ipc
+gateway.client.inbound.streamId=20
+gateway.client.outbound.channel=aeron:ipc
+gateway.client.outbound.streamId=21
 gateway.ingressChannel=aeron:udp
 gateway.ingressEndpoints=0=localhost:20110
 gateway.egressChannel=aeron:udp?endpoint=localhost:0
-gateway.journalFile=$RUN/gateway-orders.jrnl
 gateway.participantRegistry=$RUN/participants.properties
 gateway.gatewayId=gw-0
 gateway.credentialTokenFile=$RUN/gateway.secret
+EOF
+
+# A second gateway on the same shard, with its own client endpoints. Two gateways subscribed to
+# ONE inbound channel would each receive every order and forward both -- duplicate orders, not
+# redundancy -- so the endpoints are what has to be disjoint, not the state. There is no state.
+cat > "$RUN/gateway-b.properties" <<EOF
+gateway.securitiesFile=$RUN/securities.properties
+gateway.aeronDir=$AERON_DIR
+gateway.client.inbound.channel=aeron:ipc
+gateway.client.inbound.streamId=40
+gateway.client.outbound.channel=aeron:ipc
+gateway.client.outbound.streamId=41
+gateway.ingressChannel=aeron:udp
+gateway.ingressEndpoints=0=localhost:20110
+gateway.egressChannel=aeron:udp?endpoint=localhost:0
+gateway.participantRegistry=$RUN/participants.properties
+gateway.gatewayId=gw-1
+gateway.credentialTokenFile=$RUN/gateway-b.secret
+EOF
+
+# Its own directory cycle, on its own stream, advertising gateway B's endpoints. The directory
+# carries one order-entry channel per shard, so advertising two gateways for one shard is a second
+# discovery rather than a second entry -- see docs/ProdDeployment.md 11.
+cat > "$RUN/discovery-b.properties" <<EOF
+discovery.shards=0
+discovery.shard.0.securitiesFile=$RUN/securities.properties
+discovery.shard.0.orderEntryChannel=aeron:ipc
+discovery.shard.0.orderEntryStreamId=40
+discovery.shard.0.executionReportChannel=aeron:ipc
+discovery.shard.0.executionReportStreamId=41
+discovery.aeronDir=$AERON_DIR
+discovery.channel=aeron:ipc
+discovery.streamId=101
+discovery.intervalMs=1000
 EOF
 
 cat > "$RUN/market-data.properties" <<EOF
@@ -361,15 +397,16 @@ pass "most image rebuilt it without restarting the engine"
 
 # ------------------------------------------------------------------------- 4b
 echo
-echo "== 4b. restart ONLY the gateway -- its order journal is the only place origQty lives"
-# The engine does not store origQty (an order is one cache line), so nothing can hand it back to a
-# gateway that forgot it. Without the journal every report for an order in flight comes back marked
-# UNKNOWN -- honest, but not the number the client wants.
-# The partially filled order is the AGGRESSOR's remainder rather than the resting side, which used
-# to be forced: a maker's fill was routed by participantId to the session that participant last
-# spoke on, so a maker that had gone quiet across the restart was never told about its own fill and
-# the gateway had nothing to journal. Step 4c is that case, and it now works -- this step keeps the
-# aggressor shape so the two are measured separately.
+echo "== 4b. restart ONLY the gateway -- a replacement holds no state and needs none"
+# The engine states origQty and cumQty on every execution report (Design.md 3.1), so a gateway that
+# has never seen an order still reports it correctly. This step used to prove the opposite thing:
+# that the gateway's own memory-mapped journal handed the numbers back across its restart. That
+# journal is gone, and the assertion below is the same one -- which is the point. The gateway is
+# configured with no state file of any kind, so there is nothing here that could be recovering it.
+# The partially filled order is the AGGRESSOR'"'"'s remainder rather than the resting side, which used
+# to be forced: a maker'"'"'s fill was routed by participantId to the session that participant last
+# spoke on, so a maker that had gone quiet across the restart was never told about its own fill.
+# Step 4c is that case; this step keeps the aggressor shape so the two are measured separately.
 # Participant 11, which has traded nothing here: the offer it will cross belongs to participant 7,
 # and an aggressor that shares an smpId with the resting side is cancelled rather than filled.
 # Sized past the whole offer, so what is left over rests with a real cumQty behind it.
@@ -385,28 +422,26 @@ kill "$GATEWAY_PID" 2>/dev/null; wait "$GATEWAY_PID" 2>/dev/null; sleep 1
 $GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway-alone.log" 2>&1 &
 GATEWAY_PID=$!; PIDS+=("$GATEWAY_PID")
 wait_for "$LOGS/gateway-alone.log" "gateway: started" 45 "gateway" || fail "gateway did not restart"
-grep -o "gateway: order journal .*" "$LOGS/gateway-alone.log"
-grep -q "recovered=[1-9]" "$LOGS/gateway-alone.log" \
-  || { tail -10 "$LOGS/gateway-alone.log" >&2; fail "the gateway recovered no orders"; }
 sleep 1
 
 # Cancelling is the cheapest way to make the engine report on that order again. The reply has to
-# carry both numbers the gateway alone knows: what was ordered, and how much of it filled.
+# carry both numbers: what was ordered, and how much of it filled. Neither is derivable from the
+# report'"'"'s own leavesQty, which a cancel sets to zero whatever happened.
 $MOST cancel --symbol AAPL --side buy --order-id "$REST_ID" --orig-clordid 3002 --participant 11 \
   --follow 3 $CONN > "$RUN/cancel.out" 2>&1 || fail "cancel after gateway restart"
 cat "$RUN/cancel.out"
 grep -q "CANCELED" "$RUN/cancel.out" || fail "the order was not cancelled"
 grep -q "cum unknown" "$RUN/cancel.out" \
-  && fail "the gateway lost the order across its restart; the journal recovered nothing"
+  && fail "the engine did not state origQty; a replacement gateway cannot invent it"
 grep -q "cum 20 of 26" "$RUN/cancel.out" \
   || { cat "$RUN/cancel.out" >&2; fail "origQty and cumQty did not survive the gateway restart"; }
-pass "the cancel reports cum 20 of 26 -- both numbers survived"
+pass "the cancel reports cum 20 of 26 -- from a gateway that never saw the order"
 
 # ------------------------------------------------------------------------- 4c
 echo
 echo "== 4c. a maker that has been quiet since the gateway restarted is still sent its fill"
-# The other half of 4b, and the one the journal cannot rescue on its own: a gateway can only
-# journal a fill it is told about. Participant 12 rests an offer and stops listening; the gateway
+# The other half of 4b, and the one holding origQty never addressed: a report has to reach a
+# gateway at all. Participant 12 rests an offer and stops listening; the gateway
 # is then restarted, so the session the engine learned participant 12 on is gone. Its route comes
 # back only because the replacement session authenticates as gw-0 and the engine binds every
 # participant the registry gives that gateway at session open.
@@ -447,6 +482,98 @@ grep -q "cum 4 of 10" "$RUN/quiet-cancel.out" \
        grep -ho "undeliverableReports=[0-9]*" "$LOGS"/engine-*.log >&2
        fail "the quiet maker was never told about its fill"; }
 pass "the maker's fill reached the gateway across a restart it slept through"
+
+# ------------------------------------------------------------------------- 4d
+echo
+echo "== 4d. two gateways at once -- place through one, cancel through the other"
+# The check that gateway HA is actually solved rather than merely documented. Nothing in this repo
+# ran two gateways against one shard before, because it could not usefully: origQty lived in one
+# gateway's memory-mapped journal, so a second could only ever report UNKNOWN for an order the
+# first had taken. The engine states both quantities now, so the second reports the same numbers
+# as the first without having seen the order.
+$GATEWAY "$RUN/gateway-b.properties" > "$LOGS/gateway-b.log" 2>&1 &
+GATEWAY_B_PID=$!; PIDS+=("$GATEWAY_B_PID")
+wait_for "$LOGS/gateway-b.log" "gateway: started" 45 "gateway B" || fail "second gateway"
+$DISCOVERY "$RUN/discovery-b.properties" > "$LOGS/discovery-b.log" 2>&1 &
+DISCOVERY_B_PID=$!; PIDS+=("$DISCOVERY_B_PID")
+sleep 2
+
+CONN_B="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 101"
+
+# Placed through gateway A, partially filled, then cancelled through gateway B.
+$MOST send --symbol AAPL --side sell --price 104.00 --qty 12 --clordid 5001 --participant 7 \
+  --follow 3 $CONN > "$RUN/two-a.out" 2>&1 || fail "send through gateway A"
+TWO_ID=$(grep -o "orderId=[0-9]*" "$RUN/two-a.out" | head -1 | cut -d= -f2)
+[ -n "$TWO_ID" ] || { cat "$RUN/two-a.out" >&2; fail "no orderId from gateway A"; }
+$MOST send --symbol AAPL --side buy --price 104.00 --qty 5 --clordid 5002 --participant 13 \
+  --follow 3 $CONN > "$RUN/two-fill.out" 2>&1 || fail "cross it"
+grep -q "TRADE" "$RUN/two-fill.out" || { cat "$RUN/two-fill.out" >&2; fail "no fill"; }
+
+$MOST cancel --symbol AAPL --side sell --order-id "$TWO_ID" --orig-clordid 5001 --participant 7 \
+  --follow 3 $CONN_B > "$RUN/two-b.out" 2>&1 || fail "cancel through gateway B"
+cat "$RUN/two-b.out"
+grep -q "cum unknown" "$RUN/two-b.out" \
+  && fail "gateway B could not report on an order gateway A took"
+grep -q "cum 5 of 12" "$RUN/two-b.out" \
+  || { cat "$RUN/two-b.out" >&2; fail "gateway B reported the wrong quantities"; }
+pass "gateway B reported cum 5 of 12 for an order it never saw gateway A take"
+
+# ------------------------------------------------------------------------- 4e
+echo
+echo "== 4e. rotate a gateway secret while the node runs -- no node restart"
+# The consensus module and the engine re-read the registry on a poll. Rotating gw-1's secret and
+# restarting only gateway B is the whole procedure; before this, changing who speaks for whom meant
+# restarting the cluster host and the engine as well, which is a maintenance event on the cluster
+# in order to add a client to it.
+kill "$GATEWAY_B_PID" 2>/dev/null; wait "$GATEWAY_B_PID" 2>/dev/null
+
+ROTATED="$GATEWAY_SECRET-rotated"
+cat > "$RUN/participants.properties" <<EOF
+shard.id=0
+registry.gateways=gw-0,gw-1
+gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
+gateway.gw-0.participants=7,8,9,11,12,13
+gateway.gw-1.secret=$(sha256 "$ROTATED")
+gateway.gw-1.participants=14
+EOF
+
+# Both node processes must say so. Waiting on the line rather than on a sleep is the point: a
+# reload that happened silently would be invisible at exactly the moment someone is debugging one.
+wait_for "$LOGS/cluster-same.log" "reloaded" 30 "cluster host registry reload" \
+  || fail "the consensus module did not reload the registry"
+wait_for "$LOGS/engine-same.log" "reloaded" 30 "engine registry reload" \
+  || fail "the engine did not reload the registry"
+grep -o "cluster: reloaded .*" "$LOGS/cluster-same.log" | tail -1
+
+# The negative control, and without it this step is a guess: the OLD secret must now be refused.
+# If the consensus module were still holding the file it booted with, this would connect happily.
+printf '%s\n' "$GATEWAY_SECRET-b" > "$RUN/gateway-b.secret"
+$GATEWAY "$RUN/gateway-b.properties" > "$LOGS/gateway-b-stale.log" 2>&1 &
+STALE_PID=$!; PIDS+=("$STALE_PID")
+i=0
+while [ "$i" -lt 60 ]; do
+  grep -q "gateway: started" "$LOGS/gateway-b-stale.log" 2>/dev/null \
+    && fail "the rotated secret was not in force: a gateway presenting the old one still connected"
+  sleep 0.25; i=$((i + 1))
+done
+kill "$STALE_PID" 2>/dev/null; wait "$STALE_PID" 2>/dev/null
+pass "a gateway presenting the superseded secret is refused"
+
+printf '%s\n' "$ROTATED" > "$RUN/gateway-b.secret"
+$GATEWAY "$RUN/gateway-b.properties" > "$LOGS/gateway-b-rotated.log" 2>&1 &
+GATEWAY_B_PID=$!; PIDS+=("$GATEWAY_B_PID")
+wait_for "$LOGS/gateway-b-rotated.log" "gateway: started" 45 "gateway B (rotated secret)" \
+  || { tail -10 "$LOGS/gateway-b-rotated.log" >&2
+       fail "the rotated secret does not authenticate"; }
+sleep 1
+$MOST send --symbol AAPL --side sell --price 105.00 --qty 3 --clordid 6001 --participant 14 \
+  --follow 3 $CONN_B > "$RUN/rotated.out" 2>&1 || fail "send through the rotated gateway B"
+grep -q "NEW" "$RUN/rotated.out" \
+  || { cat "$RUN/rotated.out" >&2; fail "the rotated gateway could not trade"; }
+pass "the new secret authenticates and trades, with no node restarted"
+
+kill "$GATEWAY_B_PID" "$DISCOVERY_B_PID" 2>/dev/null
+wait "$GATEWAY_B_PID" "$DISCOVERY_B_PID" 2>/dev/null
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

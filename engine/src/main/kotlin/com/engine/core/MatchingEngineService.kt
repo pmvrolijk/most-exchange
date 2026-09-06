@@ -90,8 +90,14 @@ class MatchingEngineService(
      * gateway's participants bound to it the moment the session opens -- so a maker that has said
      * nothing since the gateway last connected is still reachable when its resting order fills.
      * Every node must hold an identical copy; see [ParticipantRegistry].
+     *
+     * Read through a supplier rather than held, so a [ParticipantRegistrySource] can replace it
+     * under a running node. That is legal here and nowhere near as free as it looks: the map this
+     * feeds is node-local egress routing, is not snapshotted, and only the leader's egress reaches
+     * anyone, so two nodes holding different versions cannot diverge the log or the books. See
+     * [ParticipantRegistrySource] for the line that must not be crossed.
      */
-    private val participantRegistry: ParticipantRegistry? = null,
+    private val participantRegistry: () -> ParticipantRegistry? = { null },
     /**
      * Hot-path timing, or null to compile it out of the path entirely. Null is the default and the
      * production posture; see [EngineMetrics] for why an engine may read a clock at all.
@@ -304,7 +310,7 @@ class MatchingEngineService(
      * on the message path -- so it costs nothing that `AllocationTest` measures. Keep it that way.
      */
     private fun declaredParticipantsOf(session: ClientSession): LongArray? {
-        val registry = participantRegistry ?: return null
+        val registry = participantRegistry() ?: return null
         val principal = session.encodedPrincipal()
         if (principal == null || principal.isEmpty()) return null
         return registry.participantsOf(String(principal, Charsets.US_ASCII))
@@ -320,7 +326,7 @@ class MatchingEngineService(
      * visible, not an order to reject.
      */
     private fun bindDeclaredParticipants(session: ClientSession) {
-        val registry = participantRegistry ?: return
+        val registry = participantRegistry() ?: return
         val principal = session.encodedPrincipal()
         if (principal == null || principal.isEmpty()) return
         val participants = registry.participantsOf(String(principal, Charsets.US_ASCII))
@@ -427,7 +433,7 @@ class MatchingEngineService(
 
         val reason = validateNewOrder(book, qty, price, expireDate)
         if (reason != RejectReason.NONE) {
-            reject(participantId, clOrdId, securityId, side, price, reason)
+            reject(participantId, clOrdId, securityId, side, price, reason, origQty = qty)
             if (stages) metrics.admit.record(metrics.nanoTime() - stageStart)
             return
         }
@@ -438,6 +444,7 @@ class MatchingEngineService(
         sendExecutionReport(
             participantId, clOrdId, orderId, securityId, ExecType.NEW, side,
             price = price, lastQty = 0L, leavesQty = qty, rejectReason = RejectReason.NONE,
+            origQty = qty, cumQty = 0L,
         )
 
         val admitted = if (stages) metrics.nanoTime() else 0L
@@ -445,7 +452,10 @@ class MatchingEngineService(
 
         if (book.phase != Phase.CONTINUOUS) {
             // Booked in every phase except CLOSED; only matching is gated (Design.md §4.1).
-            book.book(orderId, participantId, smpId, clOrdId, price, qty, expireDate, side, smpStrategy)
+            book.book(
+                orderId, participantId, smpId, clOrdId, price, qty,
+                origQty = qty, expireDate = expireDate, side = side, smpStrategy = smpStrategy,
+            )
             publishOrderAdded(securityId, orderId, price, qty, side)
             // No matching happened, so this booking is the whole of the settle stage.
             if (stages) metrics.settle.record(metrics.nanoTime() - admitted)
@@ -466,17 +476,20 @@ class MatchingEngineService(
                 val makerParticipant = book.participantIdOf(maker)
                 val makerClOrdId = book.clOrdIdOf(maker)
                 val makerSide = book.sideOfOrder(maker)
+                val makerOrigQty = book.origQtyOf(maker)
 
                 // Taker's leavesQty is the RUNNING remainder, not origQty - thisFill.
                 sendExecutionReport(
                     participantId, clOrdId, orderId, securityId, ExecType.TRADE, side,
                     price = fillPrice, lastQty = fillQty, leavesQty = remaining,
                     rejectReason = RejectReason.NONE,
+                    origQty = qty, cumQty = qty - remaining,
                 )
                 sendExecutionReport(
                     makerParticipant, makerClOrdId, makerId, securityId, ExecType.TRADE, makerSide,
                     price = fillPrice, lastQty = fillQty, leavesQty = makerLeaves,
                     rejectReason = RejectReason.NONE,
+                    origQty = makerOrigQty, cumQty = cumQtyOf(makerOrigQty, makerLeaves),
                 )
                 publishTrade(securityId, fillPrice, fillQty, orderId, makerId, side)
                 if (makerLeaves > 0L) {
@@ -489,10 +502,13 @@ class MatchingEngineService(
                 val makerId = book.exchangeOrderIdOf(maker)
                 val makerPrice = book.orderPrice(maker)
                 val makerSide = book.sideOfOrder(maker)
+                val makerOrigQty = book.origQtyOf(maker)
                 sendExecutionReport(
                     book.participantIdOf(maker), book.clOrdIdOf(maker), makerId, securityId,
                     ExecType.CANCELED, makerSide, price = makerPrice, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.SELF_MATCH_PREVENTED,
+                    origQty = makerOrigQty,
+                    cumQty = cumQtyOf(makerOrigQty, book.leavesQtyOf(maker)),
                 )
                 publishOrderRemoved(
                     securityId, makerId, makerPrice, book.leavesQtyOf(maker), makerSide,
@@ -508,7 +524,8 @@ class MatchingEngineService(
             MatchStatus.COMPLETE -> if (remaining > 0L) {
                 book.book(
                     orderId, participantId, smpId, clOrdId, price, remaining,
-                    expireDate, side, smpStrategy,
+                    origQty = qty, expireDate = expireDate, side = side,
+                    smpStrategy = smpStrategy,
                 )
                 publishOrderAdded(securityId, orderId, price, remaining, side)
             }
@@ -517,6 +534,7 @@ class MatchingEngineService(
                 participantId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
                 price = price, lastQty = 0L, leavesQty = 0L,
                 rejectReason = RejectReason.SELF_MATCH_PREVENTED,
+                origQty = qty, cumQty = qty - remaining,
             )
 
             MatchStatus.COLLAR_BREACH -> {
@@ -524,6 +542,7 @@ class MatchingEngineService(
                     participantId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
                     price = price, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.VOLATILITY_HALT,
+                    origQty = qty, cumQty = qty - remaining,
                 )
                 haltSecurity(book, side)
             }
@@ -591,9 +610,13 @@ class MatchingEngineService(
 
         val price = cancelOutcome.price
         val cancelSide = cancelOutcome.side
+        // Read before the slot is released, and reported as cumQty rather than left as
+        // origQty - leavesQty: the report below carries leavesQty = 0.
+        val origQty = book.origQtyOf(cancelOutcome.nodeIndex)
         sendExecutionReport(
             participantId, clOrdId, exchangeOrderId, securityId, ExecType.CANCELED, cancelSide,
             price = price, lastQty = 0L, leavesQty = 0L, rejectReason = RejectReason.NONE,
+            origQty = origQty, cumQty = cumQtyOf(origQty, cancelOutcome.leavesQty),
         )
         publishOrderRemoved(
             securityId, exchangeOrderId, price, cancelOutcome.leavesQty, cancelSide,
@@ -627,10 +650,12 @@ class MatchingEngineService(
                 val orderId = book.exchangeOrderIdOf(node)
                 val orderPrice = book.orderPrice(node)
                 val side = book.sideOfOrder(node)
+                val origQty = book.origQtyOf(node)
                 sendExecutionReport(
                     book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
                     ExecType.CANCELED, side, price = orderPrice, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.SELF_MATCH_PREVENTED,
+                    origQty = origQty, cumQty = cumQtyOf(origQty, book.leavesQtyOf(node)),
                 )
                 publishOrderRemoved(
                     securityId, orderId, orderPrice, book.leavesQtyOf(node), side,
@@ -661,10 +686,12 @@ class MatchingEngineService(
         val orderId = book.exchangeOrderIdOf(node)
         val side = book.sideOfOrder(node)
         val leaves = book.leavesQtyOf(node)
+        val origQty = book.origQtyOf(node)
         sendExecutionReport(
             book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
             ExecType.TRADE, side, price = fillPrice, lastQty = fillQty, leavesQty = leaves,
             rejectReason = RejectReason.NONE,
+            origQty = origQty, cumQty = cumQtyOf(origQty, leaves),
         )
         if (leaves > 0L) {
             publishOrderReduced(securityId, orderId, fillPrice, fillQty, leaves, side)
@@ -681,10 +708,12 @@ class MatchingEngineService(
                 val orderId = book.exchangeOrderIdOf(node)
                 val price = book.orderPrice(node)
                 val side = book.sideOfOrder(node)
+                val origQty = book.origQtyOf(node)
                 sendExecutionReport(
                     book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
                     ExecType.EXPIRED, side, price = price, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.NONE,
+                    origQty = origQty, cumQty = cumQtyOf(origQty, book.leavesQtyOf(node)),
                 )
                 publishOrderRemoved(
                     securityId, orderId, price, book.leavesQtyOf(node), side, RemoveReason.EXPIRED,
@@ -799,6 +828,7 @@ class MatchingEngineService(
                         .expireDate(book.expireDateOfOrder(node))
                         .side(SbeSide.get(book.sideOfOrder(node)))
                         .smpStrategy(SbeSmpStrategy.get(book.smpStrategyOfOrder(node)))
+                        .origQty(book.origQtyOf(node))
                 }
             }
         }
@@ -1013,6 +1043,10 @@ class MatchingEngineService(
                             clOrdId = orderDecoder.clOrdId(),
                             price = price,
                             leavesQty = orderDecoder.leavesQty(),
+                            // Absent on a version 2 snapshot; 0 means unknown and travels to the
+                            // client as Enrichment.UNKNOWN rather than as an invented number.
+                            origQty = if (orderDecoder.origQty() == SnapshotOrderDecoder.origQtyNullValue()) 0L
+                            else orderDecoder.origQty(),
                             expireDate = orderDecoder.expireDate(),
                             side = orderDecoder.side().value(),
                             smpStrategy = orderDecoder.smpStrategy().value(),
@@ -1096,6 +1130,17 @@ class MatchingEngineService(
 
     // ---------------------------------------------------------------- egress
 
+    /**
+     * `origQty - leavesQty`, except that an [origQty] of 0 means unknown (an order restored from
+     * a version 2 snapshot) and must stay 0 rather than becoming a negative accumulated quantity.
+     */
+    private fun cumQtyOf(origQty: Long, leavesQty: Long): Long =
+        if (origQty == 0L) 0L else origQty - leavesQty
+
+    /**
+     * [origQty] is the quantity of the order that was refused, which is known for a new order and
+     * not for a cancel of an order the engine never accepted; 0 means unknown (Design.md §3.1).
+     */
     private fun reject(
         participantId: Long,
         clOrdId: Long,
@@ -1103,9 +1148,11 @@ class MatchingEngineService(
         side: Byte,
         price: Long,
         rejectReason: Int,
+        origQty: Long = 0L,
     ) = sendExecutionReport(
         participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
         price = price, lastQty = 0L, leavesQty = 0L, rejectReason = rejectReason,
+        origQty = origQty, cumQty = 0L,
     )
 
     /**
@@ -1127,6 +1174,8 @@ class MatchingEngineService(
         lastQty: Long,
         leavesQty: Long,
         rejectReason: Int,
+        origQty: Long,
+        cumQty: Long,
     ) {
         val sessionId = participantToSession.get(participantId)
         val session = if (sessionId == NULL_SESSION) null else cluster.getClientSession(sessionId)
@@ -1156,6 +1205,11 @@ class MatchingEngineService(
                         .rejectReason(SbeRejectReason.get(rejectReason))
                         .execType(execType)
                         .side(SbeSide.get(side))
+                        // Stated, not left to the gateway to subtract: a terminal report carries
+                        // leavesQty = 0 whether the order filled or was cancelled, so
+                        // origQty - leavesQty is wrong on exactly the reports that matter.
+                        .origQty(origQty)
+                        .cumQty(cumQty)
                     claim.commit()
                 }
                 return

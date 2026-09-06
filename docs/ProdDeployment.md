@@ -56,7 +56,14 @@ hiccup is invisible.
                                                                      │
                         ══════════════ trading VLAN (L2, routed UDP) ═╪═══════════════════
                                                                      │
-        ┌──────────────────────┐  ┌──────────────────────┐  ┌────────┴─────────────┐
+                    ┌────────────────────┐  ┌────────────────────┐   │
+   order entry ───► │  gw-a              │  │  gw-b              │ ◄─┘  each on its own
+   (partitioned     │  gateway           │  │  gateway           │      client endpoints,
+    across them)    │   + media driver   │  │   + media driver   │      no state, any number
+                    └─────────┬──────────┘  └─────────┬──────────┘
+                              └───── cluster ingress ─┴──────────┐
+                                                                 │
+        ┌──────────────────────┐  ┌──────────────────────┐  ┌────┴─────────────────┐
         │  shard0-a  (member 0)│  │  shard0-b  (member 1)│  │  shard0-c (member 2) │
         │                      │  │                      │  │                      │
         │  cluster-host        │  │  cluster-host        │  │  cluster-host        │
@@ -65,8 +72,7 @@ hiccup is invisible.
         │   └ consensus module │◄─┼──┤ consensus module  │◄─┼──┤ consensus module  │
         │  engine (service)    │  │  engine (service)    │  │  engine (service)    │
         │  market-data         │  │  market-data         │  │  market-data         │
-        │  gateway     ACTIVE  │  │  gateway    standby  │  │  gateway    standby  │
-        │  discovery   ACTIVE  │  │  discovery  standby  │  │  discovery  standby  │
+        │  discovery           │  │  discovery           │  │  discovery           │
         └──────────────────────┘  └──────────────────────┘  └──────────────────────┘
                  │                                                     │
                  └──────── L1/L2/L3 + snapshot, multicast ─────────────┘
@@ -85,20 +91,29 @@ market-data process is subscribed to a silent stream and publishes nothing. On f
 leader's engine starts publishing and its co-located market-data picks up. No standby logic to
 write, and no cross-machine hop for a stream that was deliberately made shared-memory.
 
-**`gateway` and `discovery` are active/standby, and this is the weakest part of the design.**
+**`gateway` is not on these machines at all, and is not active/standby.** It was, and that was the
+weakest part of the design: one gateway per shard could be active, because its memory-mapped journal
+was the only place `origQty` lived, so a standby on another machine had no copy and a failover
+marked every in-flight order `UNKNOWN`. The engine holds `origQty` now (Design.md §3.1) and states
+both quantities on every execution report, so a gateway holds no state. Two things follow:
 
-- `gateway.client.inbound.channel` is a single address that adapters publish to. Two gateways
-  subscribed to it would each receive every order and forward both — duplicate orders, not
-  redundancy. So exactly one gateway is active.
-- The gateway's journal is a memory-mapped local file, and it is the *only* place `origQty` lives
-  (the engine has no room for it — the order is one cache line). A standby on another machine has no
-  copy, so a gateway failover marks every in-flight order `UNKNOWN` in exactly the way
-  `OrderJournal`'s doc comment describes.
-- `discovery` is a stateless repeating broadcast, and a duplicate cycle is harmless — each cycle is
-  staged and replaces the table wholesale. Running it on all three would actually be safe. It is
-  listed as active/standby only for symmetry; running three is a legitimate choice.
+- **Co-locating a gateway with a cluster node buys nothing.** An `AeronCluster` client lists every
+  member and follows the leader, so a gateway on its own machine reaches the leader exactly as one
+  sitting beside it does. It is its own tier, sized and restarted independently of the Raft group.
+- **What must be disjoint is endpoints, not state.** `gateway.client.inbound.channel` is a single
+  address; two gateways subscribed to *one* would each receive every order and forward both, which
+  is duplicate orders rather than redundancy. So each gateway gets its own client endpoints and
+  adapters are partitioned across them. Losing one costs its adapters a reconnect and nothing else —
+  a replacement, or a peer, reports correctly on orders it never saw. `e2e/run-restart.sh` §4d is
+  the check: an order placed through one gateway, cancelled through another, reporting the right
+  `cumQty`.
 
-Gateway HA is an open design question, not a solved one. See §11.
+The gap that remains is advertisement, not correctness: `ShardEntry` carries **one** order-entry
+channel per shard, so the directory cannot name several gateways for one shard. A virtual address in
+front of the tier is the interim answer. See §11.
+
+**`discovery` may run on all three.** It is a stateless repeating broadcast and a duplicate cycle is
+harmless — each cycle is staged and replaces the table wholesale.
 
 ---
 
@@ -246,20 +261,25 @@ gateway.ingressEndpoints=0=shard0-a:20110,1=shard0-b:20110,2=shard0-c:20110
 This is what the comment in `deploy/config/gateway.properties` anticipates when it says "One member
 here; production lists three or five."
 
-### 4.4 The journal must be on the NVMe, not on tmpfs
+### 4.4 The gateway needs no storage
+
+There is nothing to configure here, and that is the point. A gateway keeps no per-order state: the
+engine holds `origQty` and states it, with `cumQty`, on every execution report (Design.md §3.1). It
+used to want a memory-mapped journal on the NVMe — `gateway.journalFile`, sized to the shard's own
+order pool — and those keys no longer exist. If you are migrating a configuration that sets them,
+delete them; the gateway rejects nothing but they do nothing.
+
+The registry is the one file it reads, and it reads it once:
 
 ```properties
-gateway.journalFile=/var/lib/most/gateway-orders.jrnl
-gateway.journalSlots=1000000
+gateway.participantRegistry=/etc/most/current/shard-0-participants.properties
+gateway.gatewayId=gw-a
+gateway.credentialTokenFile=/etc/most/gw-a.secret
 ```
 
-`journalSlots` defaulting to the shard's own order pool is what makes exhaustion unreachable for
-resting orders — the engine answers `BOOK_CAPACITY` first. Leave it at the default unless you have a
-reason.
-
-Remember what the journal does and does not buy: a **process** crash recovers in full because the
-mapped pages belong to the OS; a **machine** power loss can lose the last writes, and those orders
-come back `UNKNOWN`. There is no `msync` on the hot path, deliberately.
+`current` is a symlink to a published release directory. The consensus module and the engine re-read
+the same path while they run (§9.5), so a change to who speaks for whom costs a gateway restart and
+no node restart.
 
 ---
 
@@ -456,10 +476,13 @@ systemctl start most-engine
 
 # 4. The rest, on their assigned nodes.
 systemctl start most-market-data     # all three; followers stay silent
-systemctl start most-gateway         # active node only
-systemctl start most-discovery       # active node only
+systemctl start most-discovery       # all three is safe: a duplicate cycle is harmless
 
-# 5. Control plane last -- it is a client of everything above.
+# 5. Gateways, on their own machines. Order does not matter and neither does how many:
+#    they hold no state and each has its own client endpoints.
+systemctl start most-gateway
+
+# 6. Control plane last -- it is a client of everything above.
 kubectl -n most rollout status deploy/control
 ```
 
@@ -528,15 +551,39 @@ joining — each logged with a line.
 So the procedure is: publish the release, drain or confirm the affected books are empty, then
 restart. A refusal is the system working.
 
-### 9.4 What to alarm on
+### 9.4 Changing who speaks for whom
+
+A participant list change does not restart a node. Publish the release, move the symlink, and the
+consensus module and engine pick it up within their poll interval — both announce the swap with the
+old and new fingerprint. Then restart the gateways, which is free because they hold no state.
+
+```sh
+# 1. Publish from the control plane, then point `current` at it on every machine.
+ansible shard0,gateways -a "ln -sfn /etc/most/releases/000042 /etc/most/current"
+
+# 2. Watch both node processes adopt it. No restart.
+journalctl -u most-engine -f | grep -m1 'registry: reloaded'
+
+# 3. Restart the gateways so their sessions re-open and re-derive their bindings.
+ansible gateways -a "systemctl restart most-gateway"
+```
+
+A registry that cannot be parsed, or one for another shard, is reported and **ignored** — the one in
+force keeps authenticating. That is deliberate: standing down on a bad file would turn a typo into a
+shard that authenticates nobody. Check `registryReloadFailures` rather than assuming a silent
+success. `--participants-reload-ms 0` and `engine.participantRegistry.reloadMs=0` turn the poll off
+if a deployment would rather restart.
+
+### 9.5 What to alarm on
 
 | Signal | Where | Meaning |
 | --- | --- | --- |
-| `pendingOrders` growing monotonically | gateway, printed at shutdown | Orders forwarded whose ack never came — a slot leak, not traffic |
 | `droppedToClient` | gateway | Undeliverable execution reports. The outbound leg drops and counts by design; a rising rate means a subscriber is gone |
+| `untrackedReports` | gateway | Reports the engine could not state an `origQty` for. Only orders restored from a pre-v3 snapshot should produce these; anything else is a version mismatch |
 | `gaps` | market-data | Feed sequence gaps. Expected occasionally under `MaxMulticastFlowControl`; sustained means a subscriber cannot keep up |
 | `rejectedDefinitions` | engine | A `SecurityDefinition` was refused. Operator commands are unacknowledged, so this counter is the only signal |
-| `exhausted` | gateway journal | Orders forwarded untracked. Should be unreachable at default sizing |
+| `registryReloadFailures` | engine, cluster-host | A participant registry that could not be read or was for another shard. The one in force still applies, so this is a quiet wrong rather than an outage |
+| `authenticatedGateways` = 0 | cluster-host, at shutdown | Every gateway connected anonymously despite a registry being configured. Looks identical to working until a maker goes quiet |
 | Leader changes | consensus | Any unexplained one is worth a look |
 
 `operator_audit` in the control plane records who asked for every market-moving command. Like the
@@ -574,11 +621,12 @@ Honest list. None of these are large; all of them are blocking.
 4. **`engine.march` is x86-only.** `gradle.properties` documents `x86-64-v3`; the build passes it
    straight to `native-image`. Fine for this deployment, but it means the property cannot be set
    globally once a second architecture exists.
-5. **Gateway HA is unsolved.** Single active gateway, journal on local disk, failover loses
-   `origQty` for in-flight orders. Options worth exploring: a shared/replicated journal, or
-   partitioning adapters across two gateways with disjoint client endpoints so each failure loses
-   only half. Needs a decision before this is a production exchange rather than a production
-   deployment.
+5. **The directory advertises one gateway per shard.** Gateway HA itself is solved — the gateways
+   hold no state, run in their own tier, and `e2e/run-restart.sh` §4d places an order through one
+   and cancels it through another — but `ShardEntry` carries a single order-entry channel and
+   `DirectoryClient` keeps one `ShardRoute` per shard, so several gateways for one shard cannot all
+   be advertised. A virtual address in front of the tier works today; naming them individually is a
+   wire change.
 6. **A feed is one channel.** `market-data` cannot publish the same feed as both multicast and
    dynamic MDC, which is what forces the single choice in §7.3.
 7. **No health endpoint on the core processes.** Everything above alarms on log lines and

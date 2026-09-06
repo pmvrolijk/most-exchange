@@ -1,6 +1,7 @@
 package com.engine.tools
 
 import com.engine.reference.ParticipantRegistry
+import com.engine.reference.ParticipantRegistrySource
 import com.engine.reference.RegistryAuthenticatorSupplier
 import io.aeron.Aeron
 import io.aeron.archive.Archive
@@ -13,6 +14,9 @@ import io.aeron.driver.MediaDriver
 import io.aeron.driver.ThreadingMode
 import org.agrona.concurrent.ShutdownSignalBarrier
 import java.io.File
+
+/** How often the consensus module re-reads its participant registry. */
+private const val DEFAULT_REGISTRY_RELOAD_MS = 5_000L
 
 /**
  * `most cluster` and its subcommands.
@@ -72,13 +76,23 @@ private fun runClusterHost(args: Args) {
     // participants at session open on every node (Design.md §1).
     val registryFile = args.optional("participants")
     val registry = registryFile?.let(ParticipantRegistry::load)
-    val authenticator = registry?.let(::RegistryAuthenticatorSupplier)
+    // Re-read while the module runs, so onboarding a participant or rotating a gateway secret is
+    // a gateway restart rather than a node restart. --participants-reload-ms 0 turns it off.
+    val reloadMs = args.optional("participants-reload-ms")?.toLong() ?: DEFAULT_REGISTRY_RELOAD_MS
+    val registrySource = registry?.let {
+        ParticipantRegistrySource(registryFile, it) { event -> println("cluster: $event") }
+            .also { source -> if (reloadMs > 0) source.startPolling(reloadMs) }
+    }
+    val authenticator = registrySource?.let { source ->
+        RegistryAuthenticatorSupplier(source::registry)
+    }
 
     println("cluster: aeronDir=$aeronDir archive=$archiveDir cluster=$clusterDir")
     println(
         if (registry == null) "cluster: no participant registry (pass --participants to authenticate gateways)"
         else "cluster: participants=$registryFile fingerprint=${registry.fingerprint()} " +
-            "gateways=${registry.gateways.map { it.gatewayId }}"
+            "gateways=${registry.gateways.map { it.gatewayId }} " +
+            (if (reloadMs > 0) "reload=${reloadMs}ms" else "reload=off")
     )
     println("cluster: members=$members")
     println(
@@ -120,6 +134,7 @@ private fun runClusterHost(args: Args) {
         // Inside nothing that races the exit, but still worth printing: an authenticated gateway
         // count of zero on a shard that configured a registry means every gateway connected
         // anonymously, which looks identical to it working until a maker goes quiet.
+        registrySource?.close()
         authenticator?.authenticator?.let {
             println(
                 "cluster: authenticatedGateways=${it.authenticatedGateways} " +

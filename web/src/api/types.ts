@@ -44,11 +44,29 @@ export interface Participant {
   enabled: boolean
 }
 
+/**
+ * A gateway process's identity on a shard. The secret is never carried here: only its SHA-256 is
+ * stored, and the plaintext exists exactly once, in a GatewaySecretIssued.
+ */
+export interface Gateway {
+  gatewayId: string
+  shardId: number
+  enabled: boolean
+  participants: number[]
+}
+
+export interface GatewaySecretIssued {
+  gatewayId: string
+  secret: string
+}
+
 export interface ShardView {
   shard: Shard
   securities: Security[]
   /** The value every process prints at boot. Differing values across nodes is a silent divergence. */
   fingerprint: string | null
+  /** The participant registry's own hash, deliberately separate from the geometry fingerprint. */
+  registryFingerprint: string | null
   problem: string | null
 }
 
@@ -72,6 +90,8 @@ export interface Release {
   directory: string
   note: string | null
   fingerprints: Record<string, string>
+  /** Present only for shards that registered a gateway; see Gateway. */
+  registryFingerprints?: Record<string, string>
 }
 
 export interface HaltState {

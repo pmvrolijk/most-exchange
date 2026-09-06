@@ -25,6 +25,16 @@ data class EngineConfig(
      * sent its own fills (Design.md §1).
      */
     val participantRegistry: ParticipantRegistry? = null,
+    /** Where [participantRegistry] was read from, so it can be re-read while the node runs. */
+    val participantRegistryFile: String? = null,
+    /**
+     * How often to re-read [participantRegistryFile]; 0 disables it and is the old behaviour.
+     *
+     * Onboarding a participant or rotating a gateway secret is then a gateway restart rather than
+     * a node restart. Node-local by design and therefore excluded from [fingerprint], for exactly
+     * the reason metrics are: two nodes polling on different schedules cannot diverge the log.
+     */
+    val registryReloadMs: Long = 0L,
     val aeronDirectoryName: String?,
     val clusterDir: File,
     val serviceId: Int,
@@ -83,6 +93,10 @@ data class EngineConfig(
     companion object {
         const val SECURITIES_FILE = "engine.securitiesFile"
         const val PARTICIPANT_REGISTRY = "engine.participantRegistry"
+        const val PARTICIPANT_REGISTRY_RELOAD_MS = "engine.participantRegistry.reloadMs"
+
+        /** Matches the consensus module's default, so the two see a new file at the same rate. */
+        const val DEFAULT_REGISTRY_RELOAD_MS = 5_000L
         const val AERON_DIR = "engine.aeronDir"
         const val CLUSTER_DIR = "engine.clusterDir"
         const val SERVICE_ID = "engine.serviceId"
@@ -98,9 +112,13 @@ data class EngineConfig(
             properties: Properties,
             shard: ShardSpec,
             participantRegistry: ParticipantRegistry? = null,
+            participantRegistryFile: String? = null,
         ): EngineConfig = EngineConfig(
             shard = shard,
             participantRegistry = participantRegistry,
+            participantRegistryFile = participantRegistryFile,
+            registryReloadMs = properties.getProperty(PARTICIPANT_REGISTRY_RELOAD_MS)?.toLong()
+                ?: DEFAULT_REGISTRY_RELOAD_MS,
             aeronDirectoryName = properties.getProperty(AERON_DIR),
             clusterDir = File(properties.getProperty(CLUSTER_DIR) ?: "cluster"),
             serviceId = properties.getProperty(SERVICE_ID)?.toInt() ?: 0,
@@ -138,7 +156,7 @@ data class EngineConfig(
                 "$PARTICIPANT_REGISTRY is for shard ${registry?.shardId}, " +
                     "but this node serves shard ${shard.shardId}"
             }
-            return from(properties, shard, registry)
+            return from(properties, shard, registry, registryFile)
         }
     }
 }

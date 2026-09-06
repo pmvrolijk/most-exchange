@@ -36,6 +36,8 @@ data class Report(
     val lastQty: Long,
     val leavesQty: Long,
     val rejectReason: Int,
+    val origQty: Long,
+    val cumQty: Long,
 )
 
 /**
@@ -115,6 +117,8 @@ class FakeSession(
                 decoder.lastQty(),
                 decoder.leavesQty(),
                 decoder.rejectReason().value(),
+                decoder.origQty(),
+                decoder.cumQty(),
             )
         }
         claimed.clear()
@@ -191,7 +195,7 @@ class Harness(
         bookEventStreamId = 12,
         levelCount = levelCount,
         auctionMaxPasses = auctionMaxPasses,
-        participantRegistry = participantRegistry,
+        participantRegistry = { participantRegistry },
         metrics = metrics,
     )
 

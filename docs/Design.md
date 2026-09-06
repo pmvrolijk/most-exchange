@@ -92,13 +92,18 @@ Its responsibilities:
 * **Validate `securityId`** against the shard map, rejecting malformed or out-of-shard orders before
   they reach the cluster. The engine range-checks defensively as well, but the gateway is where a bad
   security is meant to die (§4.7).
-* **Hold per-order state for the outbound leg.** The engine's `ExecutionReport` omits `origQty` and
-  therefore `cumQty`, because the packed order slot has no room for a field the boundary can
-  reconstruct (§3.1). The gateway retains the `origQty` it forwarded and restores the cumulative
-  quantity as `origQty − leavesQty` on every execution report it passes back.
-* **Perform any other outbound mapping** required by the client-facing shape — correlating
-  `exchangeOrderId` back to the submitting session, and enriching reports with anything the engine
-  deliberately does not carry.
+* **Perform any other outbound mapping** required by the client-facing shape — translating the
+  engine's `ExecutionReport` into the client-facing one, and carrying anything the engine
+  deliberately does not.
+
+**The gateway holds no per-order state, and that is a recent change.** It used to hold the `origQty`
+it had forwarded, because the packed order slot had no room for it, and reconstructed `cumQty` on
+the way back. The engine now keeps `origQty` in a cold word beside the line and states both
+quantities on every report (§3.1), so a gateway is disposable: restarting one loses nothing, a
+replacement reports correctly on orders it never saw, and several can serve one shard. What has to
+be disjoint between two gateways is their *client-facing endpoints* — two subscribed to one inbound
+channel would each receive every order and forward both, which is duplicate orders rather than
+redundancy — and nothing else.
 
 A cluster session belongs to a **gateway**, not to an end participant, and the maker side of a fill
 needs a route back that the inbound message cannot supply. The engine therefore keeps a
@@ -115,23 +120,45 @@ own snapshot, a service that restarts rebuilds the bindings in `onStart` from
 `Cluster.clientSessions()` and needs no snapshot state of its own.
 
 **Learned, from inbound traffic**, exactly as before — and traffic still wins for the order it
-arrived on. That is not a weaker fallback grudgingly kept: the gateway that forwarded an order is
-the one holding its `origQty`, and therefore the only one that can restore `cumQty` on the way back
-(§3.1). A report has to follow the order, not the registry. Correspondingly, closing a session drops
+arrived on. The original reason was that the gateway which forwarded an order was the only one
+holding its `origQty`; the engine holds that now (§3.1), so the surviving reason is the plainer one:
+a client following an order is listening to the gateway it sent that order through, and a report
+delivered to a different one is a report it never sees. Correspondingly, closing a session drops
 only the routes that session still owns; one that has since moved to a live gateway stays there.
 
 Learning alone was not enough, and the failure was quiet. A participant that had said nothing since
-its gateway last connected had no route at all, so its fills were counted undeliverable and dropped —
-and since a gateway cannot journal a fill it is never told about, the `cumQty` it reported for that
-order silently stopped advancing, with nothing downstream able to detect it. A gateway restart put
-every one of its quiet participants in that state at once.
+its gateway last connected had no route at all, so its fills were counted undeliverable and dropped,
+with nothing downstream able to detect it. A gateway restart put every one of its quiet participants
+in that state at once.
 
 The registry is a published file, read by the consensus module and by the engine, and each prints
 its `fingerprint()` at startup: two nodes disagreeing about it would route the same report to
 different places. It is deliberately **not** folded into `ShardSpec.fingerprint()`, which the control
 plane records in every release — rotating a gateway secret is not a change of shard geometry. A
 participant belongs to at most one gateway, because two claims on one participant would be resolved
-by whichever session happened to open last.
+by whichever session happened to open last. It is **authored in the control plane** and rendered
+into each release beside the shard security file, so the `participant` table and the file the
+cluster authenticates against cannot disagree (`docs/ControlPlane.md`).
+
+**The two node processes re-read it while they run.** Onboarding a participant, moving one between
+gateways or rotating a secret used to mean restarting the gateway, the consensus module *and* the
+engine — a maintenance event on the cluster in order to add a client to it. `ParticipantRegistrySource`
+polls the configured path, compares content by fingerprint (a release is published to a new
+directory and put in force by moving a symlink, so the path's own timestamp need never change) and
+swaps an immutable registry behind a volatile reference, announcing both fingerprints. A file that
+cannot be parsed, or one for another shard, is reported and ignored: the registry in hand is still
+correct, and standing down on a bad file would turn a typo into a shard that authenticates nobody.
+The gateway does not reload — it restarts, which now costs nothing, and its replacement session
+re-derives its bindings at open.
+
+**Why that is legal in the engine, and the line it must not cross.** What this feeds is node-local
+*egress routing*: the map is rebuilt in `onStart` from `Cluster.clientSessions()`, is deliberately
+not snapshotted, and only the leader's egress reaches anyone. Two nodes briefly holding different
+versions of the file cannot diverge the log, the books or a snapshot — they can only disagree about
+where to send a report, and only one of them is sending. That stops being true the moment the engine
+*rejects* an order on a binding, so `UNAUTHORIZED_PARTICIPANT` (§8) has to arrive through the log
+rather than from a file each node reads on its own schedule. The reload is node-local by the same
+argument that keeps metrics out of `EngineConfig.fingerprint()`.
 
 Both halves are optional and default to off, which is the behaviour that shipped before the registry
 existed. A client presenting **no** credentials — the control plane, the operator CLI — authenticates
@@ -145,8 +172,9 @@ so `UNAUTHORIZED_PARTICIPANT` remains unraised; see §8.
 A report for a participant with no live session is still counted and dropped — blocking the engine
 thread on an absent consumer is worse than losing the report.
 
-This is why the gateway is stateful: it is the only component that remembers an order's original
-quantity, and that memory is what lets the engine keep an order at exactly one cache line.
+This is the last thing that was ever gateway-resident state, and it is not per-order: the map lives
+in the engine, is derived from the authenticated principal the log carries, and is rebuilt from
+`Cluster.clientSessions()` on restart.
 
 #### Backpressure on the inbound leg
 
@@ -162,9 +190,7 @@ it. Successfully handled fragments return `Action.COMMIT`, not `Action.CONTINUE`
 the position only at the end of the whole poll, so a later `ABORT` would rewind past fragments
 already forwarded and send them to the cluster a second time.
 
-Two consequences follow. The pending `origQty` recorded before the offer has to be unwound when the
-offer does not send, or a retried order is recorded twice and a failed one leaks an entry nothing
-ever releases. And a genuinely dead session — `NOT_CONNECTED`, `CLOSED` — is not retryable, so the
+One consequence follows. A genuinely dead session — `NOT_CONNECTED`, `CLOSED` — is not retryable, so the
 order is rejected back to the client with `RejectReason.GATEWAY_UNAVAILABLE`, a reason no engine
 ever emits because a message the engine never saw cannot be rejected by it.
 
@@ -313,12 +339,29 @@ cache line and costs **one** miss. Access is `orders[nodeIdx * STRIDE + FIELD]`.
 partial-fill reporting bug in the previous revision and, more importantly, lets a partially filled
 resting order continue to participate in matching with its true remaining quantity.
 
-**`origQty` is deliberately not stored.** Self-match prevention (§4.5) requires an `smpId` on every
-resting order, and the eight words were already full. `origQty` served only to derive `cumQty` for
-execution reports — a value the **gateway** can reconstruct, since it sent `origQty` and the engine
-reports `leavesQty` on every fill. Pushing that derivation to the boundary, where the data already
-exists, keeps an order at exactly one cache line. `cumQty` is correspondingly absent from the
-engine's `ExecutionReport`; the gateway restores it on the outbound leg (§1, *Order Entry Gateway*).
+**`origQty` is stored, in a cold word beside the line rather than in it.** Self-match prevention
+(§4.5) requires an `smpId` on every resting order and the eight words are full, so a parallel
+`LongArray` — `ColdField`, stride 1 today — carries what matching does not read. It is touched only
+where an execution report is generated or the book is walked for a snapshot, never inside the
+matching loop, so it costs a cache miss on paths that were already taking one and nothing at all on
+the path the budget in §2 is about. Eight bytes an order: 8 MB per million-order book, 80 MB per
+shard against the ~0.9 GB of §2.
+
+That reverses an earlier decision, and the reason is worth stating. `origQty` used to live only in
+the gateway, which reconstructed `cumQty` from the `origQty` it had sent. It worked, and it made the
+gateway the one component in the system that could not be restarted or replaced without losing
+something — which is what made gateway HA an open question rather than a deployment choice
+(`docs/ProdDeployment.md` §2.1). The engine is the only party that knows both quantities at the
+moment a report is made, so it states both; the gateway holds no per-order state at all and several
+of them can serve one shard. `ColdField` is also where an order attribute matching does not read
+belongs in future — an at-open validity, say — so the hot 64 bytes stay 64 bytes.
+
+**`cumQty` is stated, never subtracted.** A terminal report carries `leavesQty = 0` whether the order
+filled or was cancelled, so `origQty - leavesQty` reports a cancelled order as fully filled. That
+defect shipped once already, in the gateway, and putting only `origQty` on the wire would have
+re-opened it one layer along. An `origQty` of **0 means unknown** — an order restored from a version
+2 snapshot, which predates the field — and travels to the client as `Enrichment.UNKNOWN` rather than
+as a number nobody can justify.
 
 **Trade-off, accepted:** the expiry sweep scans one field across many orders, which struct-of-arrays
 served better. That sweep now walks the price ladder instead (§4.3) and runs once per day outside
@@ -903,7 +946,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="2"
+                   package="com.engine.sbe" id="1" version="3"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -935,11 +978,12 @@ answers, and a consumer must not render the first when it means the second.
     <type name="SecurityName"    primitiveType="char" length="48"/>
     <type name="ChannelUri"      primitiveType="char" length="128"/>
 
-    <!-- Whether the gateway knew the order well enough to fill in origQty and cumQty. It cannot
-         after its own restart: it holds those in memory and the engine does not store origQty at
-         all (Design.md §3), so there is nothing to recover them from. Saying so is the point:
-         reporting cumQty = 0 for a half-filled order is a confident lie, and the client has no way
-         to tell it from the truth. Absent on a version 1 report, which is read as KNOWN. -->
+    <!-- Whether origQty and cumQty on this report are to be believed. Since version 3 the engine
+         states both (Design.md §3.1), so the answer is KNOWN for every order it has seen. It is
+         UNKNOWN for an order restored from a version 2 snapshot, which predates the engine holding
+         origQty and therefore has nothing to recover it from. Saying so is the point: reporting
+         cumQty = 0 for a half-filled order is a confident lie, and the client has no way to tell it
+         from the truth. Absent on a version 1 report, which is read as KNOWN. -->
     <enum name="Enrichment" encodingType="int8">
       <validValue name="KNOWN">0</validValue>
       <validValue name="UNKNOWN">1</validValue>
@@ -1042,8 +1086,14 @@ answers, and a consumer must not render the first when it means the second.
 
   <!-- ====================== Outbound: private ======================== -->
 
-  <!-- cumQty is intentionally absent: the gateway derives it from origQty - leavesQty. -->
-  <sbe:message name="ExecutionReport" id="10" blockLength="64">
+  <!-- origQty and cumQty are stated by the engine rather than reconstructed by the gateway. The
+       engine holds origQty in a cold word beside the order's cache line (Design.md §3.1), so it is
+       the only party that knows both numbers at the moment a report is generated. cumQty is carried
+       explicitly and not left as origQty - leavesQty: a terminal report carries leavesQty = 0
+       whether the order filled or was cancelled, which is exactly the defect that subtraction
+       produced when the gateway did it. origQty = 0 means unknown: an order restored from a
+       version 2 snapshot, which predates the field. -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="80">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="clOrdId"         id="2" type="ClOrdId"/>
     <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
@@ -1054,6 +1104,8 @@ answers, and a consumer must not render the first when it means the second.
     <field name="rejectReason"    id="8" type="RejectReason"/>
     <field name="execType"        id="9" type="ExecType"/>
     <field name="side"            id="10" type="Side"/>
+    <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
+    <field name="cumQty"          id="12" type="Quantity" offset="72" sinceVersion="3"/>
   </sbe:message>
 
   <!-- =================== Outbound: book events ======================= -->
@@ -1249,8 +1301,9 @@ answers, and a consumer must not render the first when it means the second.
 
   <!-- ================= Client-facing, published by the Gateway =================== -->
 
-  <!-- The engine omits cumQty and origQty (no room in a 64-byte order slot); the gateway
-       remembers origQty and restores both on the outbound leg. -->
+  <!-- Both quantities come from the engine, which holds origQty in the cold word beside the
+       order's cache line (Design.md §3.1). The gateway copies them across rather than deriving
+       anything, which is why it needs no per-order state of its own. -->
   <sbe:message name="ClientExecutionReport" id="50" blockLength="80">
     <field name="participantId"   id="1"  type="ParticipantId"/>
     <field name="clOrdId"         id="2"  type="ClOrdId"/>
@@ -1265,8 +1318,9 @@ answers, and a consumer must not render the first when it means the second.
     <field name="execType"        id="11" type="ExecType"/>
     <field name="side"            id="12" type="Side"/>
     <!-- Fits inside the block's existing padding, so blockLength is unchanged and a version 1
-         reader is unaffected. UNKNOWN means this gateway never saw the order, after its own
-         restart usually, so origQty and cumQty above are not to be believed. -->
+         reader is unaffected. UNKNOWN means the engine could not state origQty, which happens for
+         an order restored from a version 2 snapshot, so the two quantities above are not to be
+         believed. -->
     <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
   </sbe:message>
 
@@ -1344,7 +1398,10 @@ answers, and a consumer must not render the first when it means the second.
     <field name="restingOrderCount" id="12" type="OrderCount" offset="64" sinceVersion="2"/>
   </sbe:message>
 
-  <sbe:message name="SnapshotOrder" id="32" blockLength="64">
+  <!-- origQty is the cold word of §3.1, snapshotted so a restored order can still have its
+       cumQty stated on a report. Absent on a version 2 snapshot, which restores it as 0 = unknown
+       rather than inventing a value. -->
+  <sbe:message name="SnapshotOrder" id="32" blockLength="72">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="smpId"           id="2" type="SmpId"/>
     <field name="clOrdId"         id="3" type="ClOrdId"/>
@@ -1355,6 +1412,7 @@ answers, and a consumer must not render the first when it means the second.
     <field name="expireDate"      id="8" type="TradingDate"/>
     <field name="side"            id="9" type="Side"/>
     <field name="smpStrategy"     id="10" type="SmpStrategy"/>
+    <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
   </sbe:message>
 
   <sbe:message name="SnapshotEnd" id="33" blockLength="8">
@@ -2186,41 +2244,30 @@ subscribers care about most.
 Geometry (`priceFloor`, `tickSize`, `levelCount`) must match the engine's exactly: the same values
 that turn a price into a ladder level there turn it into a depth level here.
 
-### The gateway's order journal
+### The gateway holds no order state
 
-The gateway is stateful for one reason (§1): it holds the `origQty` it forwarded, so it can restore
-`cumQty` on the way back. That is what lets the engine omit `origQty` and keep an order at one cache
-line — and it means the value exists in exactly one place in the system. A gateway that forgets it
-cannot ask anyone for it.
+The gateway used to be stateful for exactly one reason: it held the `origQty` it had forwarded, so
+it could restore `cumQty` on the way back, and that value existed nowhere else in the system. It was
+kept in `OrderJournal`, a memory-mapped slot per live order that *was* the state rather than a log
+written beside it, so that a gateway restart handed the numbers back rather than reporting
+`UNKNOWN`.
 
-`OrderJournal` is a slot per tracked order, 64 bytes, optionally mapped to a file. It is not a log
-written *beside* the in-memory state; it **is** the state. `OrderStateStore` keeps only the two
-index maps that find a slot — pending by participant and `clOrdId`, live by `exchangeOrderId` — and
-every value is read out of the mapping. A durable copy maintained alongside a memory copy is a
-second bookkeeping that can drift from the first, and the drift would appear only after a restart,
-which is the one moment nobody is in a position to check it. It is also the engine's own idiom one
-layer out: a packed slot array plus a primitive id map.
+Both are gone. The engine keeps `origQty` in the cold word beside the order's cache line (§3.1) and
+states `origQty` and `cumQty` on every execution report, so there is nothing left for a gateway to
+remember. What that buys is not a smaller gateway but a *disposable* one:
 
-**Crash consistency without a flush.** The state word is written last and read first, so a write
-interrupted partway leaves a slot that reads as free — losing one order rather than inventing one
-out of stale bytes. Behind that, a slot is adopted only if its contents could have come from a
-completed write: every real order has a positive quantity and every acknowledged one has an id.
-`cumQty` is updated by a single aligned 8-byte store, which cannot tear. There is deliberately **no
-`msync`**: flushing per order would put a disk write on a leg measured at 0.2 µs, so a *process*
-crash recovers in full (the mapped pages belong to the operating system and outlive the process)
-while a *machine* power loss can lose the most recent writes. Those orders come back `UNKNOWN`,
-which is the same answer as never having journalled them.
+* **A restart loses nothing**, so restarting a gateway to pick up a new participant registry is a
+  reasonable operation rather than a cost to be avoided.
+* **A replacement reports correctly on orders it never saw**, which the journal could only do for
+  orders the previous process had already written down, and never after a machine lost power.
+* **Several gateways can serve one shard.** What has to be disjoint between them is their
+  client-facing endpoints — two subscribed to one inbound channel would each receive every order and
+  forward both — not any state. `docs/ProdDeployment.md` §2 draws the resulting topology.
 
-**Capacity is derived, and exhaustion is not an error.** `gateway.journalSlots` defaults to the sum
-of the shard's `maxOrders`, so the engine answers `BOOK_CAPACITY` before the gateway runs out of
-slots for resting orders. If it does run out, the order is forwarded **untracked** rather than
-rejected — refusing an order the engine would have accepted, to protect a bookkeeping structure, is
-the wrong trade — and its reports carry `Enrichment.UNKNOWN`.
-
-**A journal is refused rather than half-adopted.** A file written by a different shard, or for a
-different capacity, is refused while it holds orders and re-initialised when it is empty. Same rule,
-and the same reasoning, as the engine refusing a snapshot it cannot faithfully restore: those orders
-are live as far as their owners know.
+Two constraints the journal used to carry are gone with it and are worth recording as closed: there
+was no `msync` on the hot path, so a machine power loss could lose the most recent writes; and
+nothing reaped a pending order whose acknowledgement never arrived, which a bounded slot array
+turned from a heap leak into slots that were never returned.
 
 ### Where Reference Data Is Authored
 
@@ -2315,8 +2362,8 @@ from a genuine update without diffing.
 
 **What the directory publishes is the *gateway's* client endpoints**, not the cluster's ingress and
 egress. Those belong to the gateway process, which is the only thing holding a cluster session; an
-adapter that connected to them directly would bypass the validation and the `cumQty` reconstruction
-the gateway exists to perform. Each `ShardEntry` therefore carries an order entry channel and stream
+adapter that connected to them directly would bypass the `securityId` validation the gateway exists
+to perform, and the participant binding that decides where a maker's fills are delivered. Each `ShardEntry` therefore carries an order entry channel and stream
 and an execution report channel and stream.
 
 **The invariant discovery enforces is one shard per security.** Books are independent and nothing
@@ -2527,14 +2574,15 @@ It found three defects that unit tests could not:
   to prevent. It cannot simply be folded into `ShardSpec.fingerprint()`: that hash is over shard
   topology, is stored by the control plane, and appears in published releases, so changing it
   invalidates every recorded value. It wants a separate engine-level fingerprint.
-* ~~**The gateway's `origQty` does not survive its own restart.**~~ **Done.** `OrderStateStore` is
-  backed by `OrderJournal`, a memory-mapped slot per live order, and a restarted gateway hands back
-  the `origQty` and accumulated `cumQty` of everything in flight (§7, "The gateway's order
-  journal"). What is *not* covered, and is stated rather than hidden: there is no `msync` on the
-  hot path, so a machine power loss can lose the most recent writes and those orders come back
-  `UNKNOWN`; and **nothing reaps a pending order whose acknowledgement never arrives**, which a
-  bounded slot array turns from a heap leak into slots that are never returned. `pendingOrders` is
-  printed at shutdown so the second is visible.
+* ~~**The gateway's `origQty` does not survive its own restart.**~~ **Done, and then closed a
+  second time from the other end.** It was first solved with `OrderJournal`, a memory-mapped slot
+  per live order in the gateway. `origQty` is now held by the **engine**, in the cold word beside
+  the order's cache line, and stated on every execution report along with `cumQty` (§3.1), so the
+  gateway holds no order state at all and the journal is deleted. That closes the two caveats the
+  journal carried — no `msync`, so a machine power loss could lose the last writes; and nothing
+  reaping a pending order whose acknowledgement never arrived — by removing the structure they were
+  about. It also turns gateway HA from an open design question into a deployment choice: see §7,
+  "The gateway holds no order state", and `docs/ProdDeployment.md` §2.
 * **`SecurityDefinition` geometry.** The message carries `priceFloor`, `tickSize` and `levelCount`,
   but the ladders are pre-allocated, so geometry is fixed when a book is constructed. The engine
   accepts references and collars and **rejects the whole definition** if the geometry disagrees, on
@@ -2549,11 +2597,15 @@ It found three defects that unit tests could not:
   stated rather than hidden. **Enforcement:** the engine binds routes but does not yet *refuse* an
   order whose `participantId` is not bound to the sending session, so `UNAUTHORIZED_PARTICIPANT` is
   still raised by nothing and a gateway may still trade on behalf of a participant that is not its
-  own. **Authoring:** the registry is a hand-written published file; the control plane owns the
-  `participant` table but does not yet render or publish it the way it does shard security files, so
-  nothing checks that the registry and the database agree. **Granularity:** the identity is the
+  own. **Granularity:** the identity is the
   gateway's, not the end participant's — this is authentication of the process, and the participant
   ids it claims are trusted because the file says so, not because each client proved anything.
+* **The directory advertises one order-entry endpoint per shard.** `ShardEntry` carries a single
+  order-entry channel and `DirectoryClient` keeps one `ShardRoute` per shard, so a shard served by
+  several gateways cannot advertise them all. Nothing about the gateways themselves prevents it —
+  they hold no state and each needs only its own client endpoints — so the interim answer is a
+  virtual address in front of the gateway tier, and the real one is a wire change nobody has needed
+  yet.
 * **`SecurityDefinition` distribution:** the Market Data Process currently learns the reference
   prices only implicitly, from trades. If downstream needs the collars or tick size, a corresponding
   book event is required.

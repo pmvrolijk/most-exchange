@@ -53,11 +53,22 @@ class ReleasePublisher(
         }
         Files.writeString(directory.resolve(REGISTRY_FILE), universe.render(securitiesFile))
 
+        // A shard with no gateways publishes no registry rather than an empty one: its gateways
+        // connect anonymously and the engine learns routes from traffic, which is the behaviour
+        // that shipped before the registry existed and is a legitimate configuration.
+        val registries = specs.mapNotNull { spec ->
+            topology.participantRegistry(spec.shardId)?.let { spec.shardId to it }
+        }.toMap()
+        for ((shardId, registry) in registries) {
+            Files.writeString(directory.resolve(participantsFileName(shardId)), registry.render())
+        }
+
         val fingerprints = specs.associate { it.shardId to it.fingerprint() }
-        recordFingerprints(version, fingerprints)
+        val registryFingerprints = registries.mapValues { (_, registry) -> registry.fingerprint() }
+        recordFingerprints(version, fingerprints, registryFingerprints)
         Files.writeString(
             directory.resolve(MANIFEST_FILE),
-            manifest(version, universe, fingerprints, note),
+            manifest(version, universe, fingerprints, registryFingerprints, note),
         )
         updateDirectory(version, directory.toString())
 
@@ -68,22 +79,23 @@ class ReleasePublisher(
             directory = directory.toString(),
             note = note,
             fingerprints = fingerprints,
+            registryFingerprints = registryFingerprints,
         )
     }
 
     fun releases(): List<ReleaseRow> =
         jdbc.query("SELECT * FROM spec_release ORDER BY version DESC", RELEASE)
-            .map { it.copy(fingerprints = fingerprintsOf(it.version)) }
+            .map { it.withFingerprints() }
 
     fun release(version: Long): ReleaseRow? = jdbc.query(
         "SELECT * FROM spec_release WHERE version = :v",
         mapOf("v" to version),
         RELEASE,
-    ).firstOrNull()?.let { it.copy(fingerprints = fingerprintsOf(it.version)) }
+    ).firstOrNull()?.withFingerprints()
 
     fun latest(): ReleaseRow? =
         jdbc.query("SELECT * FROM spec_release ORDER BY version DESC LIMIT 1", RELEASE)
-            .firstOrNull()?.let { it.copy(fingerprints = fingerprintsOf(it.version)) }
+            .firstOrNull()?.withFingerprints()
 
     /** The rendered text of one artifact, served so a deploy step can pull rather than share a mount. */
     fun artifact(version: Long, name: String): String? {
@@ -123,20 +135,39 @@ class ReleasePublisher(
         )
     }
 
-    private fun recordFingerprints(version: Long, fingerprints: Map<Int, String>) {
+    private fun recordFingerprints(
+        version: Long,
+        fingerprints: Map<Int, String>,
+        registryFingerprints: Map<Int, String>,
+    ) {
         for ((shardId, fingerprint) in fingerprints) {
             jdbc.update(
-                "INSERT INTO spec_release_shard (version, shard_id, fingerprint) " +
-                    "VALUES (:v, :shardId, :fingerprint)",
-                mapOf("v" to version, "shardId" to shardId, "fingerprint" to fingerprint),
+                "INSERT INTO spec_release_shard (version, shard_id, fingerprint, registry_fingerprint) " +
+                    "VALUES (:v, :shardId, :fingerprint, :registryFingerprint)",
+                mapOf(
+                    "v" to version,
+                    "shardId" to shardId,
+                    "fingerprint" to fingerprint,
+                    "registryFingerprint" to registryFingerprints[shardId],
+                ),
             )
         }
     }
 
-    private fun fingerprintsOf(version: Long): Map<Int, String> = jdbc.query(
-        "SELECT shard_id, fingerprint FROM spec_release_shard WHERE version = :v ORDER BY shard_id",
-        mapOf("v" to version),
-    ) { rs, _ -> rs.getInt("shard_id") to rs.getString("fingerprint") }.toMap()
+    private fun ReleaseRow.withFingerprints(): ReleaseRow {
+        val rows = jdbc.query(
+            "SELECT shard_id, fingerprint, registry_fingerprint FROM spec_release_shard " +
+                "WHERE version = :v ORDER BY shard_id",
+            mapOf("v" to version),
+        ) { rs, _ ->
+            Triple(rs.getInt("shard_id"), rs.getString("fingerprint"), rs.getString("registry_fingerprint"))
+        }
+        return copy(
+            fingerprints = rows.associate { it.first to it.second },
+            registryFingerprints = rows.filter { it.third != null }
+                .associate { it.first to it.third },
+        )
+    }
 
     private fun createdAt(version: Long): String = jdbc.queryForObject(
         "SELECT created_at FROM spec_release WHERE version = :v",
@@ -152,6 +183,7 @@ class ReleasePublisher(
         version: Long,
         universe: Universe,
         fingerprints: Map<Int, String>,
+        registryFingerprints: Map<Int, String>,
         note: String?,
     ): String = buildString {
         appendLine("{")
@@ -162,9 +194,16 @@ class ReleasePublisher(
         val ordered = fingerprints.entries.sortedBy { it.key }
         ordered.forEachIndexed { index, (shardId, fingerprint) ->
             val comma = if (index == ordered.lastIndex) "" else ","
+            // The registry has its own fingerprint and its own file, and both are absent for a
+            // shard with no gateways. Widening `fingerprint` to cover it would have invalidated
+            // every value recorded in a release published so far.
+            val registry = registryFingerprints[shardId]?.let {
+                """, "registryFingerprint": "$it", """ +
+                    """"participantsFile": "${participantsFileName(shardId)}""""
+            } ?: ""
             appendLine(
                 """    { "shardId": $shardId, "fingerprint": "$fingerprint", """ +
-                    """"securitiesFile": "${shardFileName(shardId)}" }$comma""",
+                    """"securitiesFile": "${shardFileName(shardId)}"$registry }$comma""",
             )
         }
         appendLine("  ],")
@@ -180,6 +219,8 @@ class ReleasePublisher(
         fun directoryName(version: Long): String = "%06d".format(version)
 
         fun shardFileName(shardId: Int): String = "shard-$shardId-securities.properties"
+
+        fun participantsFileName(shardId: Int): String = "shard-$shardId-participants.properties"
 
         private val RELEASE = RowMapper { rs, _ ->
             ReleaseRow(

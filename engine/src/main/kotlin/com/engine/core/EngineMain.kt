@@ -3,6 +3,7 @@ package com.engine.core
 import io.aeron.cluster.service.ClusteredServiceContainer
 import io.aeron.exceptions.DriverTimeoutException
 import com.engine.reference.LatencyHistogram
+import com.engine.reference.ParticipantRegistrySource
 import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.SystemNanoClock
 import org.agrona.concurrent.ShutdownSignalBarrier
@@ -39,6 +40,15 @@ fun main(args: Array<String>) {
         return
     }
 
+    // Re-read while the node runs, so a participant list change costs a gateway restart rather
+    // than a node restart. Node-local: what it feeds is egress routing, not replicated state --
+    // see ParticipantRegistrySource for why that distinction is the whole argument.
+    val registrySource = config.participantRegistry?.let { initial ->
+        ParticipantRegistrySource(config.participantRegistryFile!!, initial) {
+            println("matching-engine: $it")
+        }.also { if (config.registryReloadMs > 0) it.startPolling(config.registryReloadMs) }
+    }
+
     val books = config.newBooks()
     val metrics =
         if (config.metricsEnabled) EngineMetrics(SystemNanoClock.INSTANCE, config.metricsStages)
@@ -52,7 +62,7 @@ fun main(args: Array<String>) {
         levelCount = config.maxLevelCount(),
         auctionMaxPasses = config.auctionMaxPasses,
         backpressureAlertThreshold = config.backpressureAlertThreshold,
-        participantRegistry = config.participantRegistry,
+        participantRegistry = { registrySource?.registry() },
         metrics = metrics,
     )
 
@@ -62,7 +72,9 @@ fun main(args: Array<String>) {
         "matching-engine: shard=${config.shard.shardId} fingerprint=${config.fingerprint()} " +
             "securities=${config.shard.securities.map { it.symbol }} " +
             "serviceId=${config.serviceId} clusterDir=${config.clusterDir} " +
-            "participantRegistry=${config.registryFingerprint()}"
+            "participantRegistry=${config.registryFingerprint()}" +
+            (if (registrySource != null && config.registryReloadMs > 0)
+                " reload=${config.registryReloadMs}ms" else "")
     )
     if (config.participantRegistry == null) {
         // Not an error -- it is the behaviour that shipped before the registry existed -- but it
@@ -128,7 +140,7 @@ fun main(args: Array<String>) {
 
     container.use {
         println("matching-engine: started, awaiting shutdown signal")
-        barrier.use {
+        registrySource.use { barrier.use {
             barrier.await()
             refused.get()?.let { refusal ->
                 // Nothing below applies: this engine restored nothing and processed nothing, so
@@ -152,7 +164,10 @@ fun main(args: Array<String>) {
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +
-                    "participantRoutes=${service.participantRoutes}"
+                    "participantRoutes=${service.participantRoutes}" +
+                    (registrySource?.let {
+                        " registryReloads=${it.reloads} registryReloadFailures=${it.failures}"
+                    } ?: "")
             )
             if (metrics != null) {
                 println("matching-engine: latency${metrics.summary()}")
@@ -169,7 +184,7 @@ fun main(args: Array<String>) {
                 }
             }
             System.out.flush()
-        }
+        } }
     }
     // After the container is closed, so the mark file is released before the process goes away.
     if (refused.get() != null) kotlin.system.exitProcess(1)

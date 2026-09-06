@@ -31,6 +31,7 @@ async function signOut() {
         <router-link to="/shards">Shards</router-link>
         <router-link to="/securities">Securities</router-link>
         <router-link to="/participants">Participants</router-link>
+        <router-link to="/gateways">Gateways</router-link>
         <router-link to="/releases">Releases</router-link>
         <div class="nav-gap"></div>
         <router-link to="/schedules">Schedules</router-link>

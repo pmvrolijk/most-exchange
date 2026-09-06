@@ -44,6 +44,7 @@ fun OrderBook.add(
     clOrdId: Long = 0L,
     expireDate: Int = 0,
     smpStrategy: Byte = SmpStrategy.CANCEL_AGGRESSOR,
+    origQty: Long = qty,
 ): Long {
     val id = ids.next()
     book(
@@ -53,6 +54,7 @@ fun OrderBook.add(
         clOrdId = if (clOrdId != 0L) clOrdId else id,
         price = price,
         leavesQty = qty,
+        origQty = origQty,
         expireDate = expireDate,
         side = side,
         smpStrategy = smpStrategy,

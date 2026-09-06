@@ -10,6 +10,7 @@ const routes = [
   { path: '/shards', name: 'shards', component: () => import('./views/ShardsView.vue') },
   { path: '/securities', name: 'securities', component: () => import('./views/SecuritiesView.vue') },
   { path: '/participants', name: 'participants', component: () => import('./views/ParticipantsView.vue') },
+  { path: '/gateways', name: 'gateways', component: () => import('./views/GatewaysView.vue') },
   { path: '/releases', name: 'releases', component: () => import('./views/ReleasesView.vue') },
   { path: '/schedules', name: 'schedules', component: () => import('./views/SchedulesView.vue') },
   { path: '/operators', name: 'operators', component: () => import('./views/UsersView.vue') },

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="2"
+                   package="com.engine.sbe" id="1" version="3"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -32,11 +32,12 @@
     <type name="SecurityName"    primitiveType="char" length="48"/>
     <type name="ChannelUri"      primitiveType="char" length="128"/>
 
-    <!-- Whether the gateway knew the order well enough to fill in origQty and cumQty. It cannot
-         after its own restart: it holds those in memory and the engine does not store origQty at
-         all (Design.md §3), so there is nothing to recover them from. Saying so is the point:
-         reporting cumQty = 0 for a half-filled order is a confident lie, and the client has no way
-         to tell it from the truth. Absent on a version 1 report, which is read as KNOWN. -->
+    <!-- Whether origQty and cumQty on this report are to be believed. Since version 3 the engine
+         states both (Design.md §3.1), so the answer is KNOWN for every order it has seen. It is
+         UNKNOWN for an order restored from a version 2 snapshot, which predates the engine holding
+         origQty and therefore has nothing to recover it from. Saying so is the point: reporting
+         cumQty = 0 for a half-filled order is a confident lie, and the client has no way to tell it
+         from the truth. Absent on a version 1 report, which is read as KNOWN. -->
     <enum name="Enrichment" encodingType="int8">
       <validValue name="KNOWN">0</validValue>
       <validValue name="UNKNOWN">1</validValue>
@@ -139,8 +140,14 @@
 
   <!-- ====================== Outbound: private ======================== -->
 
-  <!-- cumQty is intentionally absent: the gateway derives it from origQty - leavesQty. -->
-  <sbe:message name="ExecutionReport" id="10" blockLength="64">
+  <!-- origQty and cumQty are stated by the engine rather than reconstructed by the gateway. The
+       engine holds origQty in a cold word beside the order's cache line (Design.md §3.1), so it is
+       the only party that knows both numbers at the moment a report is generated. cumQty is carried
+       explicitly and not left as origQty - leavesQty: a terminal report carries leavesQty = 0
+       whether the order filled or was cancelled, which is exactly the defect that subtraction
+       produced when the gateway did it. origQty = 0 means unknown: an order restored from a
+       version 2 snapshot, which predates the field. -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="80">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="clOrdId"         id="2" type="ClOrdId"/>
     <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
@@ -151,6 +158,8 @@
     <field name="rejectReason"    id="8" type="RejectReason"/>
     <field name="execType"        id="9" type="ExecType"/>
     <field name="side"            id="10" type="Side"/>
+    <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
+    <field name="cumQty"          id="12" type="Quantity" offset="72" sinceVersion="3"/>
   </sbe:message>
 
   <!-- =================== Outbound: book events ======================= -->
@@ -346,8 +355,9 @@
 
   <!-- ================= Client-facing, published by the Gateway =================== -->
 
-  <!-- The engine omits cumQty and origQty (no room in a 64-byte order slot); the gateway
-       remembers origQty and restores both on the outbound leg. -->
+  <!-- Both quantities come from the engine, which holds origQty in the cold word beside the
+       order's cache line (Design.md §3.1). The gateway copies them across rather than deriving
+       anything, which is why it needs no per-order state of its own. -->
   <sbe:message name="ClientExecutionReport" id="50" blockLength="80">
     <field name="participantId"   id="1"  type="ParticipantId"/>
     <field name="clOrdId"         id="2"  type="ClOrdId"/>
@@ -362,8 +372,9 @@
     <field name="execType"        id="11" type="ExecType"/>
     <field name="side"            id="12" type="Side"/>
     <!-- Fits inside the block's existing padding, so blockLength is unchanged and a version 1
-         reader is unaffected. UNKNOWN means this gateway never saw the order, after its own
-         restart usually, so origQty and cumQty above are not to be believed. -->
+         reader is unaffected. UNKNOWN means the engine could not state origQty, which happens for
+         an order restored from a version 2 snapshot, so the two quantities above are not to be
+         believed. -->
     <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
   </sbe:message>
 
@@ -441,7 +452,10 @@
     <field name="restingOrderCount" id="12" type="OrderCount" offset="64" sinceVersion="2"/>
   </sbe:message>
 
-  <sbe:message name="SnapshotOrder" id="32" blockLength="64">
+  <!-- origQty is the cold word of §3.1, snapshotted so a restored order can still have its
+       cumQty stated on a report. Absent on a version 2 snapshot, which restores it as 0 = unknown
+       rather than inventing a value. -->
+  <sbe:message name="SnapshotOrder" id="32" blockLength="72">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="smpId"           id="2" type="SmpId"/>
     <field name="clOrdId"         id="3" type="ClOrdId"/>
@@ -452,6 +466,7 @@
     <field name="expireDate"      id="8" type="TradingDate"/>
     <field name="side"            id="9" type="Side"/>
     <field name="smpStrategy"     id="10" type="SmpStrategy"/>
+    <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
   </sbe:message>
 
   <sbe:message name="SnapshotEnd" id="33" blockLength="8">

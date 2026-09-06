@@ -1,5 +1,7 @@
 package com.engine.control
 
+import com.engine.reference.ParticipantRegistry
+import jakarta.servlet.http.HttpServletRequest
 import org.springframework.dao.DataIntegrityViolationException
 import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
@@ -125,6 +127,135 @@ class ParticipantController(private val topology: TopologyService) {
     fun delete(@PathVariable participantId: Long): ResponseEntity<Void> =
         if (topology.deleteParticipant(participantId)) ResponseEntity.noContent().build()
         else ResponseEntity.notFound().build()
+}
+
+/** A gateway's secret, sent once on create or rotate and never returned again. */
+data class GatewaySecretRequest(val secret: String? = null)
+
+/**
+ * The secret in plaintext, returned exactly once because it is unrecoverable afterwards.
+ *
+ * Only the SHA-256 is stored, and unlike an operator password that cannot be BCrypt: the consensus
+ * module verifies the digest against what a gateway presents, so it has to be reproducible.
+ */
+data class GatewaySecretIssued(val gatewayId: String, val secret: String)
+
+/**
+ * Gateway identity, and which participants each gateway speaks for.
+ *
+ * This is the authoring half of Design.md §1's participant registry, which was a hand-written
+ * published file until now — the database held the participants, the file held the claims, and
+ * nothing checked that the two agreed. Publishing a release renders the file from these rows.
+ *
+ * Audited, unlike the participant CRUD beside it: moving a participant between gateways decides
+ * where that participant's fills are delivered, which is a market-affecting change even though no
+ * order is refused by it.
+ */
+@RestController
+@RequestMapping("/api/gateways")
+class GatewayController(
+    private val topology: TopologyService,
+    private val audit: OperatorAudit,
+) {
+
+    @GetMapping
+    fun list(): List<GatewayRow> = topology.gateways()
+
+    @GetMapping("/{gatewayId}")
+    fun get(@PathVariable gatewayId: String): ResponseEntity<GatewayRow> =
+        topology.gateway(gatewayId)?.let { ResponseEntity.ok(it) }
+            ?: ResponseEntity.notFound().build()
+
+    /**
+     * Creates the gateway and issues a generated secret, which is the only time the plaintext
+     * exists anywhere.
+     *
+     * Deliberately not accepting one here. A caller that needs a *specific* secret — a deployment
+     * migrating an existing hand-written registry — follows with [rotate], which takes it in the
+     * request body: a secret in a query string is a secret in an access log.
+     */
+    @PostMapping
+    fun create(
+        @RequestBody row: GatewayRow,
+        http: HttpServletRequest,
+    ): ResponseEntity<GatewaySecretIssued> {
+        val issued = newSecret()
+        topology.createGateway(row.copy(secretSha256 = ParticipantRegistry.sha256Hex(issued)))
+        audit.record(
+            "gateway.create", "gateway:${row.gatewayId}",
+            "shard ${row.shardId}, participants ${row.participants.sorted()}", true, http,
+        )
+        return ResponseEntity.status(HttpStatus.CREATED)
+            .body(GatewaySecretIssued(row.gatewayId, issued))
+    }
+
+    @PutMapping("/{gatewayId}")
+    fun update(
+        @PathVariable gatewayId: String,
+        @RequestBody row: GatewayRow,
+        http: HttpServletRequest,
+    ): ResponseEntity<GatewayRow> {
+        val updated = topology.updateGateway(row.copy(gatewayId = gatewayId))
+            ?: return ResponseEntity.notFound().build()
+        audit.record(
+            "gateway.update", "gateway:$gatewayId",
+            "shard ${row.shardId}, participants ${row.participants.sorted()}, " +
+                "enabled ${row.enabled}", true, http,
+        )
+        return ResponseEntity.ok(updated)
+    }
+
+    /**
+     * Rotation, separate from the entity update for the reason a password is: an edit that
+     * happens to omit the secret must not silently clear it.
+     */
+    @PutMapping("/{gatewayId}/secret")
+    fun rotate(
+        @PathVariable gatewayId: String,
+        @RequestBody request: GatewaySecretRequest,
+        http: HttpServletRequest,
+    ): ResponseEntity<GatewaySecretIssued> {
+        val issued = request.secret ?: newSecret()
+        require(issued.length >= MIN_SECRET_LENGTH) {
+            "a gateway secret must be at least $MIN_SECRET_LENGTH characters"
+        }
+        if (!topology.rotateGatewaySecret(gatewayId, issued)) return ResponseEntity.notFound().build()
+        // The old secret keeps working until the release carrying the new one is published and the
+        // nodes have re-read it, which is the whole point of the reload: no node restart.
+        audit.record(
+            "gateway.rotateSecret", "gateway:$gatewayId",
+            "in force once the next release is published and reloaded", true, http,
+        )
+        return ResponseEntity.ok(GatewaySecretIssued(gatewayId, issued))
+    }
+
+    @DeleteMapping("/{gatewayId}")
+    fun delete(
+        @PathVariable gatewayId: String,
+        http: HttpServletRequest,
+    ): ResponseEntity<Void> {
+        if (!topology.deleteGateway(gatewayId)) return ResponseEntity.notFound().build()
+        audit.record("gateway.delete", "gateway:$gatewayId", null, true, http)
+        return ResponseEntity.noContent().build()
+    }
+
+    /** The registry this shard would publish, rendered exactly as the release will render it. */
+    @GetMapping("/registry/{shardId}", produces = [MediaType.TEXT_PLAIN_VALUE])
+    fun registry(@PathVariable shardId: Int): ResponseEntity<String> =
+        topology.participantRegistry(shardId)?.let { ResponseEntity.ok(it.render()) }
+            ?: ResponseEntity.notFound().build()
+
+    private companion object {
+        const val MIN_SECRET_LENGTH = 16
+        val RANDOM = java.security.SecureRandom()
+
+        /** 256 bits of entropy, hex, so it survives the `gatewayId:secret` credential encoding. */
+        fun newSecret(): String {
+            val bytes = ByteArray(32)
+            RANDOM.nextBytes(bytes)
+            return bytes.joinToString("") { "%02x".format(it) }
+        }
+    }
 }
 
 @RestController

@@ -62,6 +62,9 @@ class RecordingSink : GatewaySink {
     }
 }
 
+/** ExecutionReport's blockLength before origQty and cumQty were added. */
+private const val VERSION_2_BLOCK_LENGTH = 64
+
 class GatewayServiceTest {
 
     private val sink = RecordingSink()
@@ -108,14 +111,43 @@ class GatewayServiceTest {
         lastQty: Long = 0,
         leavesQty: Long = 0,
         rejectReason: RejectReason = RejectReason.NONE,
+        origQty: Long = 0,
+        cumQty: Long = 0,
     ) {
         val b = UnsafeBuffer(ByteArray(512))
         ExecutionReportEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
             .participantId(participantId).clOrdId(clOrdId).exchangeOrderId(exchangeOrderId)
             .price(100).lastQty(lastQty).leavesQty(leavesQty).securityId(1)
             .rejectReason(rejectReason).execType(execType).side(Side.BUY)
+            .origQty(origQty).cumQty(cumQty)
         service.onExecutionReport(
             b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH,
+        )
+    }
+
+    /**
+     * A report from an engine built before schema version 3, which carried neither quantity. The
+     * body is identical; only the header says how much of it to believe.
+     */
+    private fun versionTwoReport(
+        participantId: Long,
+        clOrdId: Long,
+        exchangeOrderId: Long,
+        execType: ExecType,
+        lastQty: Long = 0,
+        leavesQty: Long = 0,
+    ) {
+        val b = UnsafeBuffer(ByteArray(512))
+        val header = MessageHeaderEncoder()
+        ExecutionReportEncoder().wrapAndApplyHeader(b, 0, header)
+            .participantId(participantId).clOrdId(clOrdId).exchangeOrderId(exchangeOrderId)
+            .price(100).lastQty(lastQty).leavesQty(leavesQty).securityId(1)
+            .rejectReason(RejectReason.NONE).execType(execType).side(Side.BUY)
+        header.wrap(b, 0).blockLength(VERSION_2_BLOCK_LENGTH).version(2)
+            .templateId(ExecutionReportEncoder.TEMPLATE_ID)
+            .schemaId(ExecutionReportEncoder.SCHEMA_ID)
+        service.onExecutionReport(
+            b, 0, MessageHeaderEncoder.ENCODED_LENGTH + VERSION_2_BLOCK_LENGTH,
         )
     }
 
@@ -174,89 +206,70 @@ class GatewayServiceTest {
     }
 
     @Test
-    fun `the acknowledgement restores origQty and a zero cumQty`() {
+    fun `the engine's quantities are carried through untouched`() {
         newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
-        report(1, 100, exchangeOrderId = 500, execType = ExecType.NEW, leavesQty = 10)
+        report(1, 100, 500, ExecType.NEW, leavesQty = 10, origQty = 10, cumQty = 0)
 
         val ack = sink.toClient.single()
         assertEquals("NEW", ack.execType)
         assertEquals(10L, ack.origQty)
         assertEquals(0L, ack.cumQty)
-        assertEquals(1, service.liveOrders)
+        assertEquals(Enrichment.KNOWN, ack.enrichment)
     }
 
     @Test
-    fun `cumQty accumulates across partial fills`() {
-        // The whole reason the gateway is stateful: the engine cannot afford origQty in its slot.
-        newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(1, 100, 500, ExecType.TRADE, lastQty = 3, leavesQty = 7)
-        report(1, 100, 500, ExecType.TRADE, lastQty = 2, leavesQty = 5)
+    fun `a gateway that never saw the order still reports its quantities`() {
+        // The point of moving origQty into the engine: this gateway has no record of order 500
+        // and needs none. Before, this was the restart case that reported UNKNOWN.
+        report(1, 100, 500, ExecType.TRADE, lastQty = 3, leavesQty = 7, origQty = 10, cumQty = 3)
 
-        val fills = sink.toClient.filter { it.execType == "TRADE" }
-        assertEquals(listOf(3L, 5L), fills.map { it.cumQty })
-        assertEquals(listOf(10L, 10L), fills.map { it.origQty })
+        val fill = sink.toClient.single()
+        assertEquals(10L, fill.origQty)
+        assertEquals(3L, fill.cumQty)
+        assertEquals(Enrichment.KNOWN, fill.enrichment)
+        assertEquals(0L, service.untrackedReports)
     }
 
     @Test
-    fun `a fully filled order releases its state`() {
-        newOrder(1, 100, 1, qty = 10)
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(1, 100, 500, ExecType.TRADE, lastQty = 10, leavesQty = 0)
+    fun `a cancel reports the filled portion, not everything`() {
+        // A terminal report carries leavesQty = 0 whether the order filled or was cancelled, so
+        // origQty - leavesQty would say "fully filled". The engine states cumQty instead, and the
+        // gateway must not recompute it.
+        report(1, 101, 500, ExecType.CANCELED, leavesQty = 0, origQty = 10, cumQty = 4)
 
-        assertEquals(10L, sink.toClient.last().cumQty)
-        assertEquals(0, service.liveOrders)
-    }
-
-    @Test
-    fun `a cancel releases state and reports the filled portion`() {
-        newOrder(1, 100, 1, qty = 10)
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(1, 100, 500, ExecType.TRADE, lastQty = 4, leavesQty = 6)
-        report(1, 101, 500, ExecType.CANCELED, leavesQty = 0)
-
-        val cancel = sink.toClient.last()
+        val cancel = sink.toClient.single()
         assertEquals("CANCELED", cancel.execType)
-        // 4 filled, 6 cancelled. A terminal report carries leavesQty = 0 either way, so cumQty
-        // must come from the fills rather than from origQty - leavesQty.
         assertEquals(4L, cancel.cumQty)
         assertEquals(10L, cancel.origQty)
-        assertEquals(0, service.liveOrders)
     }
 
     @Test
-    fun `an expiry releases state and reports nothing filled`() {
-        newOrder(1, 100, 1, qty = 10)
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(1, 100, 500, ExecType.EXPIRED, leavesQty = 0)
+    fun `an engine rejection is forwarded and is not counted as unknown`() {
+        report(1, 100, 0, ExecType.REJECTED, rejectReason = RejectReason.MARKET_CLOSED,
+            origQty = 10)
 
-        assertEquals(0L, sink.toClient.last().cumQty)
-        assertEquals(0, service.liveOrders)
-    }
-
-    @Test
-    fun `an engine rejection discards the pending order`() {
-        newOrder(1, 100, 1, qty = 10)
-        report(1, 100, 0, ExecType.REJECTED, rejectReason = RejectReason.MARKET_CLOSED)
-
-        assertEquals(0, service.liveOrders)
         assertEquals(0L, service.untrackedReports)
-        assertEquals("REJECTED", sink.toClient.last().execType)
-
-        // The discarded order must not later bind to an acknowledgement.
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        assertEquals(0, service.liveOrders)
+        val rejection = sink.toClient.single()
+        assertEquals("REJECTED", rejection.execType)
+        assertEquals(Enrichment.KNOWN, rejection.enrichment)
     }
 
     @Test
-    fun `a report for an unknown order is forwarded, counted, and marked unknown`() {
-        // The usual cause is a gateway restart, not a fault: the client is still waiting.
-        //
-        // The quantities are zeros because there is nothing to reconstruct them from -- this
-        // gateway holds origQty in memory and the engine does not store it at all -- and the flag
-        // is what stops a client reading those zeros as facts. On a half-filled order "cumQty = 0"
-        // says nothing has filled, which is both false and indistinguishable from the truth.
-        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5)
+    fun `a rejected cancel has no quantity to know and is still marked known`() {
+        // The engine cannot state an origQty for an order it never accepted. That is not a loss
+        // of state, so it must not read as one.
+        report(1, 100, 0, ExecType.REJECTED, rejectReason = RejectReason.UNKNOWN_ORDER)
+
+        assertEquals(0L, service.untrackedReports)
+        assertEquals(Enrichment.KNOWN, sink.toClient.single().enrichment)
+    }
+
+    @Test
+    fun `a report whose origQty the engine could not state is marked unknown`() {
+        // The remaining case: an order restored from a version 2 snapshot, which predates the
+        // engine holding origQty. The zeros are not facts and the flag is what says so -- on a
+        // half-filled order "cumQty = 0" is both false and indistinguishable from the truth.
+        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5, origQty = 0)
 
         assertEquals(1L, service.untrackedReports)
         val forwarded = sink.toClient.single()
@@ -267,13 +280,15 @@ class GatewayServiceTest {
     }
 
     @Test
-    fun `an order the gateway tracked is marked known`() {
-        newOrder(1, 100, 1, qty = 10)
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(1, 100, 500, ExecType.TRADE, lastQty = 4, leavesQty = 6)
+    fun `a report from an engine older than schema version 3 is marked unknown`() {
+        // The field is absent, not zero, and the two must reach the same honest answer.
+        versionTwoReport(1, 100, 500, ExecType.TRADE, lastQty = 4, leavesQty = 6)
 
-        assertTrue(sink.toClient.all { it.enrichment == Enrichment.KNOWN })
-        assertEquals(4L, sink.toClient.last().cumQty)
+        val fill = sink.toClient.single()
+        assertEquals(Enrichment.UNKNOWN, fill.enrichment)
+        assertEquals(0L, fill.origQty)
+        assertEquals(0L, fill.cumQty)
+        assertEquals(1L, service.untrackedReports)
     }
 
     @Test
@@ -291,29 +306,15 @@ class GatewayServiceTest {
 
     @Test
     fun `an unknown order stays unknown as further fills arrive`() {
-        // It never re-heals: recordFill ignores an order with no origQty, so a gateway that
-        // started accumulating from the fills it happened to see would report a cumQty that is
-        // wrong by exactly what it missed -- worse than saying it does not know.
-        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5)
-        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 0)
+        // It cannot re-heal: nothing downstream of the engine can recover a quantity the engine
+        // itself does not have, and a gateway accumulating from the fills it happened to see
+        // would be wrong by exactly what it missed -- worse than saying it does not know.
+        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 5, origQty = 0)
+        report(1, 100, 999, ExecType.TRADE, lastQty = 5, leavesQty = 0, origQty = 0)
 
         assertEquals(2, sink.toClient.size)
         assertTrue(sink.toClient.all { it.enrichment == Enrichment.UNKNOWN })
         assertTrue(sink.toClient.all { it.cumQty == 0L })
-    }
-
-    @Test
-    fun `client order ids are scoped per participant`() {
-        // clOrdId is unique per participant, not globally; two participants may reuse one.
-        newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
-        newOrder(participantId = 2, clOrdId = 100, securityId = 1, qty = 25)
-
-        report(1, 100, 500, ExecType.NEW, leavesQty = 10)
-        report(2, 100, 501, ExecType.NEW, leavesQty = 25)
-
-        assertEquals(10L, sink.toClient[0].origQty)
-        assertEquals(25L, sink.toClient[1].origQty)
-        assertEquals(2, service.liveOrders)
     }
 
     @Test
@@ -331,22 +332,16 @@ class GatewayServiceTest {
     }
 
     @Test
-    fun `a retried order is recorded once, not twice`() {
-        // The retry re-delivers the same fragment, so the pending entry must have been unwound.
-        // Recording it twice would leave a stale entry that nothing ever releases.
+    fun `a retried order is forwarded once, not twice`() {
+        // The retry re-delivers the same fragment. Nothing is recorded either way -- which is the
+        // point of holding no state: there is no pending entry to unwind or to leak.
         sink.clusterOffer = ClusterOffer.RETRY
         newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
         sink.clusterOffer = ClusterOffer.SENT
         newOrder(participantId = 1, clOrdId = 100, securityId = 1, qty = 10)
 
         assertEquals(1, sink.toCluster.size)
-        report(1, 100, exchangeOrderId = 500, execType = ExecType.NEW, leavesQty = 10)
-        assertEquals(1, service.liveOrders)
-        assertEquals(10L, sink.toClient.single().origQty)
-
-        // And nothing is left pending under the old key.
-        report(1, 100, exchangeOrderId = 501, execType = ExecType.NEW, leavesQty = 10)
-        assertEquals(1L, service.untrackedReports)
+        assertTrue(sink.toClient.isEmpty())
     }
 
     @Test
@@ -363,8 +358,6 @@ class GatewayServiceTest {
         assertEquals(RejectReason.GATEWAY_UNAVAILABLE.value(), rejection.rejectReason)
         assertEquals(10L, rejection.origQty)
         assertEquals(1L, service.unreachableRejects)
-        // Nothing may be left pending, or liveOrders drifts up for the life of the process.
-        assertEquals(0, service.liveOrders)
     }
 
     @Test

@@ -46,12 +46,22 @@ class GatewayCredentialsSupplier(
  *    failure this is meant to prevent: it would connect, trade, and lose precisely the fills that
  *    binding exists to deliver.
  *  - **Credentials that verify** are authenticated with the gateway id as the principal.
+ *
+ * The registry is read through a supplier rather than held, so a [ParticipantRegistrySource] can
+ * replace it under a running consensus module: onboarding a participant or rotating a gateway
+ * secret then costs a gateway restart rather than a node restart. Each connect attempt reads it
+ * once, so a swap mid-authentication cannot see half of two registries.
  */
 class RegistryAuthenticator(
-    private val registry: ParticipantRegistry,
+    private val registrySupplier: () -> ParticipantRegistry,
     /** Where a rejection goes. Separate from the caller so a test can read it back. */
     private val onRejection: (String) -> Unit = { System.err.println("cluster: $it") },
 ) : Authenticator {
+
+    constructor(
+        registry: ParticipantRegistry,
+        onRejection: (String) -> Unit = { System.err.println("cluster: $it") },
+    ) : this({ registry }, onRejection)
 
     /**
      * The decision taken at connect, held until Aeron asks for it. A null value is the anonymous
@@ -78,7 +88,7 @@ class RegistryAuthenticator(
             return
         }
         val (gatewayId, token) = credentials
-        if (!registry.verify(gatewayId, token)) {
+        if (!registrySupplier().verify(gatewayId, token)) {
             onRejection(
                 "session $sessionId failed authentication as gateway '$gatewayId' " +
                     "(unknown gateway, or the wrong secret)"
@@ -121,8 +131,10 @@ class RegistryAuthenticator(
  * so the instance is shared and its counters are the module's.
  */
 class RegistryAuthenticatorSupplier(
-    registry: ParticipantRegistry,
+    registrySupplier: () -> ParticipantRegistry,
 ) : AuthenticatorSupplier {
-    val authenticator = RegistryAuthenticator(registry)
+    constructor(registry: ParticipantRegistry) : this({ registry })
+
+    val authenticator = RegistryAuthenticator(registrySupplier)
     override fun get(): Authenticator = authenticator
 }

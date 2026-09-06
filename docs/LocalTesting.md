@@ -676,28 +676,44 @@ The Aeron directory is the exception and is always recreated: it holds memory-ma
 rather than state, and keeping it would block the next start until the previous driver's liveness
 timeout expired.
 
-### The gateway's order journal
+### The gateway keeps nothing, and you can prove it
 
-`origQty` exists in one place in this system. The engine does not store it — an order is one cache
-line — so a gateway that forgets it cannot ask anyone, and every report for an order in flight comes
-back with `cum unknown`. Point the gateway at a file and that stops being true:
+There is no order journal and no state file to configure. `origQty` lives in the engine, in the cold
+word beside the order's cache line, and the engine states it and `cumQty` on every execution report.
+So a gateway is disposable:
 
-```
-gateway.journalFile=${RUN}/gateway-orders.jrnl
-```
-
-Unset by default, which is the behaviour that shipped before it existed. `gateway.journalSlots`
-defaults to the shard's own total order pool, so the engine rejects with `BOOK_CAPACITY` before the
-journal fills. The startup line says what came back:
-
-```
-gateway: order journal .../gateway-orders.jrnl slots=20000 recovered=4 (live=4 pending=0)
+```sh
+# Rest a partially filled order, then replace the gateway entirely.
+kill "$GATEWAY_PID"
+$GATEWAY "$RUN/gateway.properties" > "$RUN/gateway-2.log" 2>&1 &
+most cancel --symbol AAPL --side buy --order-id "$ID" --orig-clordid 3002 --participant 11 \
+  --follow 3 $CONN            # still prints `cum 20 of 26`
 ```
 
-A *process* crash recovers in full — the mapped pages are the operating system's — but there is no
-`msync` on the hot path, so a machine losing power can lose the last few writes; those orders report
-`cum unknown`, which is the honest answer. Changing the shard or the slot count is refused while the
-file holds orders, and adopted silently once it is empty.
+Two gateways at once work the same way, and the only thing that has to differ between them is their
+client-facing endpoints — two subscribed to *one* inbound channel would each receive every order and
+forward both:
+
+```
+gateway.client.inbound.streamId=40
+gateway.client.outbound.streamId=41
+```
+
+`e2e/run-restart.sh` §4b and §4d do both of these.
+
+### Changing who speaks for whom, without restarting a node
+
+The consensus module and the engine re-read `participants.properties` while they run, every five
+seconds by default. Edit it — add a participant to a gateway, rotate a secret — and watch the swap:
+
+```
+cluster: reloaded .../participants.properties: fingerprint 374f3ab39eab8714 -> 8c1d02aa4f10b933, gateways=[gw-0, gw-1]
+```
+
+Then restart the gateway, which costs nothing, so its new session re-derives its bindings. A file
+that cannot be parsed, or one for another shard, is reported and **ignored**: the registry in force
+keeps authenticating, because standing down on a bad file would leave a shard that authenticates
+nobody. `--participants-reload-ms 0` and `engine.participantRegistry.reloadMs=0` turn the poll off.
 
 `pendingOrders` at shutdown is worth a glance: nothing reaps an order whose acknowledgement never
 came, so a figure that only ever grows is a leak rather than traffic.
@@ -762,7 +778,7 @@ arrived — a different problem from a quiet feed.
 | `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f com.engine`. |
 | `refused to restore its snapshot` | The security file changed in a way that would destroy state. The report names the security and what it holds. Restart on the previous file to restore it, or empty the book first. |
 | `most book` shows nothing after a restart | Market data restarted without the engine and missed its book image. Run `most image --shard 0`. |
-| A client sees `cum unknown` | The gateway has no record of that order. With `gateway.journalFile` set that means it was never journalled — check `journalExhausted` at shutdown — or the machine lost power. With it unset, it means the gateway restarted; set it. |
+| A client sees `cum unknown` | The engine could not state an `origQty`. Only an order restored from a pre-v3 snapshot should do this; otherwise the engine and gateway are built from different schema versions. Check `untrackedReports` at gateway shutdown. |
 | Fingerprints differ between processes | They are reading different security files. |
 | `most send` prints no execution report | Increase `--follow`; or the gateway lost its cluster session — check `gateway.log`. |
 | `most load` reports every order `BOOK_CAPACITY` | `maxOrders` is too small for the rate, or the band is too wide to cross so nothing ever leaves the book. |

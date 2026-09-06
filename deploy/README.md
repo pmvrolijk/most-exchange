@@ -126,7 +126,8 @@ driver of its own the way `control-driver` does, and publishes its FIX listener 
 It learns which shard serves which symbol from the directory broadcast on `shard0:40000` rather than
 being configured with it — `DirectoryClient` in `reference` is what it embeds. It must talk to the
 **gateway's** endpoints and never to the cluster ingress: connecting to the cluster directly bypasses
-the validation and `cumQty` reconstruction the gateway exists to perform.
+the `securityId` validation the gateway exists to perform, and the participant binding that decides
+where a maker's fills are delivered.
 
 `deploy/most` is the working reference for what such a client's connection flags look like.
 
@@ -254,16 +255,17 @@ docker compose exec cluster-host most image --shard 0
 Safe to repeat: it changes no book and moves no market, which is why it is the one command on the
 operations screen with no warning about what it will do to a live market.
 
-The gateway keeps its own state on the same durable volume:
+The gateway keeps no state at all, so restarting it costs nothing:
 
 ```sh
 docker compose restart gateway     # in-flight orders keep their origQty and cumQty
 ```
 
-`gateway.journalFile=/cluster/gateway-orders.jrnl` is what makes that work, and it is on
-`cluster-data` rather than the tmpfs aeron volume for the obvious reason. Without it a restarted
-gateway reports `cumQty` as unknown for every order in flight — the engine does not store `origQty`,
-so nothing else can hand it back. The startup line says how many orders came back.
+`origQty` and `cumQty` are stated by the engine on every execution report (Design.md §3.1), so a
+replacement gateway hands back the same numbers as the one it replaced without having seen the
+order. It used to hold them in a memory-mapped journal on `cluster-data`, which is why that mount
+is gone; it is also why running two gateways against one shard is now a matter of giving each its
+own client endpoint rather than a design problem.
 
 ## Who speaks for whom
 
@@ -272,8 +274,20 @@ cluster-host authenticates the gateway against it and stamps `gw-0` on the sessi
 principal; the engine turns that back into a participant list and binds every one at session open.
 That is what keeps a participant reachable when it has said nothing since the gateway last connected
 — a `docker compose restart gateway`, most of all, which otherwise leaves every quiet participant of
-that gateway unable to be sent its own fills, and the gateway's `cumQty` for those orders quietly
-frozen (Design.md §1).
+that gateway unable to be sent its own fills (Design.md §1).
+
+**Changing it does not restart a node.** The cluster-host and the engine re-read the file every
+five seconds and announce the swap with both fingerprints, so editing it and running
+`docker compose restart gateway` is the whole procedure:
+
+```sh
+docker compose logs -f cluster-host | grep -m1 'reloaded'
+docker compose restart gateway
+```
+
+A file that cannot be parsed, or one for another shard, is reported and **ignored** — the registry in
+force keeps authenticating, because standing down on a bad file would leave a shard that
+authenticates nobody.
 
 Three files, three roles:
 

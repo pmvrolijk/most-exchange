@@ -60,12 +60,17 @@ interface GatewaySink {
  *
  * Two jobs. Inbound, it validates `securityId` against the shard map and rejects out-of-shard
  * orders locally, without spending a cluster round trip or a slot in the replicated log. Outbound,
- * it restores `cumQty` and `origQty` onto every execution report from the state it kept.
+ * it translates the engine's report into the client-facing shape.
+ *
+ * **It holds no per-order state**, and that is deliberate. It used to hold `origQty` for every
+ * live order, because the engine had no room for it; the engine now carries it in the cold word
+ * beside the order's cache line (Design.md §3.1) and states both `origQty` and `cumQty` on every
+ * report. So a gateway is disposable: restarting one loses nothing, and several can serve one
+ * shard without any of them holding something the others need.
  */
 class GatewayService(
     shardSecurityIds: IntArray,
     private val sink: GatewaySink,
-    private val state: OrderStateStore = OrderStateStore(),
     /** Hot-path timing, or null to keep the clock out of the path entirely. */
     private val metrics: GatewayMetrics? = null,
 ) {
@@ -81,6 +86,8 @@ class GatewayService(
 
     var rejectedLocally = 0L
         private set
+
+    /** Reports for an order the engine could not state an `origQty` for; see [Enrichment]. */
     var untrackedReports = 0L
         private set
 
@@ -91,17 +98,6 @@ class GatewayService(
     /** Operator commands lost the same way. They have no client to reject to. */
     var undeliverableCommands = 0L
         private set
-
-    val liveOrders: Int get() = state.liveOrders
-
-    /**
-     * Orders forwarded and not yet acknowledged. Worth watching because nothing reaps one whose
-     * acknowledgement never comes, so a number that only grows is a leak rather than traffic.
-     */
-    val pendingOrders: Int get() = state.pendingOrders
-
-    /** Orders the journal had no room to track, and which will therefore report `UNKNOWN`. */
-    val journalExhausted: Long get() = state.journalExhausted
 
     // ------------------------------------------------------------- inbound
 
@@ -175,19 +171,11 @@ class GatewayService(
             return ClientMessageAction.CONSUME
         }
 
-        // Recorded before forwarding: the acknowledgement can come back before this returns.
-        // An offer that does not send therefore has to unwind it, or a retried order would be
-        // recorded twice and a failed one would leak a pending entry that nothing ever releases.
-        state.recordPending(participantId, clOrdId, qty)
         return when (sink.toCluster(buffer, offset, length)) {
             ClusterOffer.SENT -> ClientMessageAction.CONSUME
-            ClusterOffer.RETRY -> {
-                state.discardPending(participantId, clOrdId)
-                ClientMessageAction.RETRY
-            }
+            ClusterOffer.RETRY -> ClientMessageAction.RETRY
 
             ClusterOffer.FAILED -> {
-                state.discardPending(participantId, clOrdId)
                 unreachableRejects++
                 emitClientReport(
                     participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
@@ -266,55 +254,27 @@ class GatewayService(
         val execType = execReport.execType()
         val leavesQty = execReport.leavesQty()
 
-        val origQty = when (execType) {
-            ExecType.NEW -> state.bind(participantId, clOrdId, exchangeOrderId)
-            ExecType.REJECTED -> {
-                state.discardPending(participantId, clOrdId)
-                NOT_FOUND
-            }
-
-            else -> state.origQtyOf(exchangeOrderId)
-        }
-
-        // An order this gateway never saw — the usual cause is a restart, not a fault. Forward
-        // it with what is known, marked as such, rather than dropping a report the client is
-        // waiting for or inventing a cumQty for it.
-        if (origQty == NOT_FOUND && execType != ExecType.REJECTED) untrackedReports++
-
-        // CumQty is accumulated from fills, never derived from leavesQty: a terminal report
-        // carries leavesQty = 0 whether the order filled or was cancelled, so deriving it would
-        // report a cancelled order as fully filled.
-        if (execType == ExecType.TRADE) state.recordFill(exchangeOrderId, execReport.lastQty())
-
-        // A rejected order was never bound, so having no origQty for it is the normal case rather
-        // than a loss of state; everything else with no origQty is this gateway not knowing.
-        val unknown = origQty == NOT_FOUND && execType != ExecType.REJECTED
-        val knownOrigQty = if (origQty == NOT_FOUND) 0L else origQty
-        val cumQty = if (origQty == NOT_FOUND) 0L else state.cumQtyOf(exchangeOrderId)
+        // Both stated by the engine. A version 2 report carries neither, and an order restored
+        // from a version 2 snapshot carries origQty = 0 -- in both cases the number is genuinely
+        // unknown, and saying so is the point: cumQty = 0 on a half-filled order is a confident
+        // lie the client has no way to detect. A rejected order has no accumulated quantity to
+        // know, so it is not counted as a loss.
+        val reportedOrigQty = execReport.origQty()
+        val known = reportedOrigQty != ORIG_QTY_ABSENT && reportedOrigQty != 0L
+        if (!known && execType != ExecType.REJECTED) untrackedReports++
 
         emitClientReport(
             participantId, clOrdId, exchangeOrderId, execReport.securityId(), execType,
             execReport.side(), price = execReport.price(), lastQty = execReport.lastQty(),
-            leavesQty = leavesQty, cumQty = cumQty, origQty = knownOrigQty,
+            leavesQty = leavesQty,
+            cumQty = if (known) execReport.cumQty() else 0L,
+            origQty = if (known) reportedOrigQty else 0L,
             rejectReason = execReport.rejectReason(),
-            // Said out loud rather than left to be inferred from a zero. This gateway holds
-            // origQty in memory and the engine does not store it at all, so after a gateway
-            // restart there is nothing to recover it from -- and `cumQty = 0` on a half-filled
-            // order is a confident lie the client has no way to detect. It never re-heals either:
-            // recordFill ignores an order it has no origQty for, so the value would stay wrong for
-            // the rest of that order's life.
-            enrichment = if (unknown) Enrichment.UNKNOWN else Enrichment.KNOWN,
+            enrichment = if (known || execType == ExecType.REJECTED) Enrichment.KNOWN
+            else Enrichment.UNKNOWN,
         )
 
-        if (isTerminal(execType, leavesQty)) state.release(exchangeOrderId)
         metrics?.outbound?.record(metrics.nanoTime() - started)
-    }
-
-    /** Terminal states free the order's state; anything else may still see further fills. */
-    private fun isTerminal(execType: ExecType, leavesQty: Long): Boolean = when (execType) {
-        ExecType.CANCELED, ExecType.EXPIRED, ExecType.REJECTED -> true
-        ExecType.TRADE -> leavesQty == 0L
-        else -> false
     }
 
     @Suppress("LongParameterList")
@@ -334,8 +294,8 @@ class GatewayService(
         /**
          * Defaults to KNOWN because every gateway-generated report is one it knows everything
          * about — it is rejecting an order it is holding in its hand. Only a report coming back
-         * from the engine for an order this gateway has no record of is UNKNOWN, and that one
-         * passes it explicitly.
+         * from an engine that could not state origQty is UNKNOWN, and that one passes it
+         * explicitly.
          */
         enrichment: Enrichment = Enrichment.KNOWN,
     ) {
@@ -362,5 +322,10 @@ class GatewayService(
     private fun indexOf(securityId: Int): Int {
         for (i in securityIds.indices) if (securityIds[i] == securityId) return i
         return -1
+    }
+
+    private companion object {
+        /** What an `origQty` decodes to on a report from an engine older than schema version 3. */
+        val ORIG_QTY_ABSENT: Long = ExecutionReportDecoder.origQtyNullValue()
     }
 }

@@ -2,6 +2,7 @@ package com.engine.control
 
 import com.fasterxml.jackson.databind.annotation.JsonSerialize
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
+import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ShardSpec
 import com.engine.reference.Universe
 import com.engine.reference.UniverseEntry
@@ -13,6 +14,8 @@ data class ShardView(
     val shard: ShardRow,
     val securities: List<SecurityRow>,
     val fingerprint: String?,
+    /** The participant registry's fingerprint, or null when the shard has no gateways. */
+    val registryFingerprint: String?,
     val problem: String?,
 )
 
@@ -121,6 +124,47 @@ class TopologyService(private val repository: TopologyRepository) {
 
     fun deleteParticipant(participantId: Long): Boolean = repository.deleteParticipant(participantId)
 
+    // --------------------------------------------------------------- gateways
+
+    fun gateways(): List<GatewayRow> = repository.gateways()
+
+    fun gateway(gatewayId: String): GatewayRow? = repository.gateway(gatewayId)
+
+    fun createGateway(row: GatewayRow): GatewayRow {
+        row.toIdentity()
+        requireShardExists(row.shardId)
+        repository.insertGateway(row)
+        return row
+    }
+
+    fun updateGateway(row: GatewayRow): GatewayRow? {
+        requireShardExists(row.shardId)
+        // Validated against the stored digest rather than the row's empty one: an update does not
+        // carry the secret, and constructing the identity is what checks the id and the claims.
+        val stored = repository.gateway(row.gatewayId) ?: return null
+        row.copy(secretSha256 = stored.secretSha256).toIdentity()
+        return if (repository.updateGateway(row)) row.copy(secretSha256 = stored.secretSha256)
+        else null
+    }
+
+    fun rotateGatewaySecret(gatewayId: String, secret: String): Boolean =
+        repository.updateGatewaySecret(gatewayId, ParticipantRegistry.sha256Hex(secret))
+
+    fun deleteGateway(gatewayId: String): Boolean = repository.deleteGateway(gatewayId)
+
+    /**
+     * The registry this shard would publish, or null when no gateway is registered for it.
+     *
+     * Null rather than an empty registry, because `ParticipantRegistry` requires at least one
+     * gateway -- a shard with none is not a broken registry, it is a shard whose gateways still
+     * connect anonymously, which is the behaviour that shipped before the registry existed.
+     */
+    fun participantRegistry(shardId: Int): ParticipantRegistry? {
+        val gateways = repository.gatewaysOfShard(shardId).filter { it.participants.isNotEmpty() }
+        if (gateways.isEmpty()) return null
+        return ParticipantRegistry(shardId, gateways.map { it.toIdentity() })
+    }
+
     // ------------------------------------------------------------- validation
 
     /**
@@ -165,8 +209,16 @@ class TopologyService(private val repository: TopologyRepository) {
             } catch (e: IllegalStateException) {
                 problem = e.message
             }
+            var registryFingerprint: String? = null
+            try {
+                registryFingerprint = participantRegistry(shard.shardId)?.fingerprint()
+            } catch (e: IllegalArgumentException) {
+                problem = problem ?: e.message
+            } catch (e: IllegalStateException) {
+                problem = problem ?: e.message
+            }
             problem?.let { problems += it }
-            ShardView(shard, members, fingerprint, problem)
+            ShardView(shard, members, fingerprint, registryFingerprint, problem)
         }
 
         // Cross-shard rules -- one shard per security, globally unique symbols and ISINs, a

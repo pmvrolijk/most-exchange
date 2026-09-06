@@ -149,6 +149,90 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
     fun deleteParticipant(participantId: Long): Boolean =
         jdbc.update("DELETE FROM participant WHERE participant_id = :id", mapOf("id" to participantId)) > 0
 
+    // ---------------------------------------------------------------- gateways
+
+    fun gateways(): List<GatewayRow> = withParticipants(
+        jdbc.query("SELECT * FROM gateway ORDER BY gateway_id", GATEWAY)
+    )
+
+    fun gatewaysOfShard(shardId: Int): List<GatewayRow> = withParticipants(
+        jdbc.query(
+            "SELECT * FROM gateway WHERE shard_id = :shardId AND enabled ORDER BY gateway_id",
+            mapOf("shardId" to shardId),
+            GATEWAY,
+        )
+    )
+
+    fun gateway(gatewayId: String): GatewayRow? = withParticipants(
+        jdbc.query(
+            "SELECT * FROM gateway WHERE gateway_id = :id",
+            mapOf("id" to gatewayId),
+            GATEWAY,
+        )
+    ).firstOrNull()
+
+    fun insertGateway(row: GatewayRow) {
+        jdbc.update(
+            """
+            INSERT INTO gateway (gateway_id, shard_id, secret_sha256, enabled)
+            VALUES (:gatewayId, :shardId, :secret, :enabled)
+            """.trimIndent(),
+            gatewayParameters(row),
+        )
+        replaceGatewayParticipants(row.gatewayId, row.participants)
+    }
+
+    /** Leaves the secret alone; rotating it is [updateGatewaySecret] and a separate endpoint. */
+    fun updateGateway(row: GatewayRow): Boolean {
+        val updated = jdbc.update(
+            "UPDATE gateway SET shard_id = :shardId, enabled = :enabled WHERE gateway_id = :gatewayId",
+            gatewayParameters(row),
+        ) > 0
+        if (updated) replaceGatewayParticipants(row.gatewayId, row.participants)
+        return updated
+    }
+
+    fun updateGatewaySecret(gatewayId: String, secretSha256: String): Boolean = jdbc.update(
+        "UPDATE gateway SET secret_sha256 = :secret WHERE gateway_id = :gatewayId",
+        mapOf("gatewayId" to gatewayId, "secret" to secretSha256),
+    ) > 0
+
+    fun deleteGateway(gatewayId: String): Boolean =
+        jdbc.update("DELETE FROM gateway WHERE gateway_id = :id", mapOf("id" to gatewayId)) > 0
+
+    private fun replaceGatewayParticipants(gatewayId: String, participants: List<Long>) {
+        jdbc.update(
+            "DELETE FROM gateway_participant WHERE gateway_id = :id",
+            mapOf("id" to gatewayId),
+        )
+        for (participantId in participants) {
+            // The primary key on participant_id is what refuses a second claim, so a participant
+            // already spoken for by another gateway fails here rather than at render time.
+            jdbc.update(
+                "INSERT INTO gateway_participant (participant_id, gateway_id) " +
+                    "VALUES (:participantId, :gatewayId)",
+                mapOf("participantId" to participantId, "gatewayId" to gatewayId),
+            )
+        }
+    }
+
+    private fun withParticipants(rows: List<GatewayRow>): List<GatewayRow> {
+        if (rows.isEmpty()) return rows
+        val claims = jdbc.query(
+            "SELECT gateway_id, participant_id FROM gateway_participant " +
+                "WHERE gateway_id IN (:ids) ORDER BY participant_id",
+            mapOf("ids" to rows.map { it.gatewayId }),
+        ) { rs, _ -> rs.getString("gateway_id") to rs.getLong("participant_id") }
+            .groupBy({ it.first }, { it.second })
+        return rows.map { it.copy(participants = claims[it.gatewayId] ?: emptyList()) }
+    }
+
+    private fun gatewayParameters(row: GatewayRow) = MapSqlParameterSource()
+        .addValue("gatewayId", row.gatewayId)
+        .addValue("shardId", row.shardId)
+        .addValue("secret", row.secretSha256)
+        .addValue("enabled", row.enabled)
+
     private fun participantParameters(row: ParticipantRow) = MapSqlParameterSource()
         .addValue("participantId", row.participantId)
         .addValue("name", row.name.trim())
@@ -183,6 +267,16 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
                 referencePrice = rs.getObject("reference_price") as Long?,
                 staticCollarBps = rs.getObject("static_collar_bps") as Int?,
                 dynamicCollarBps = rs.getObject("dynamic_collar_bps") as Int?,
+            )
+        }
+
+        val GATEWAY = RowMapper { rs, _ ->
+            GatewayRow(
+                gatewayId = rs.getString("gateway_id"),
+                shardId = rs.getInt("shard_id"),
+                enabled = rs.getBoolean("enabled"),
+                // CHAR(64) comes back space-padded on an empty tail; the domain type rejects it.
+                secretSha256 = rs.getString("secret_sha256").trim(),
             )
         }
 

@@ -30,6 +30,11 @@ function artifactNames(release: Release): string[] {
     'manifest.json',
     'discovery.properties',
     ...Object.keys(release.fingerprints).map((shard) => `shard-${shard}-securities.properties`),
+    // Only for the shards that have gateways: one with none publishes no registry rather than an
+    // empty one, so listing it unconditionally would offer a file that is not there.
+    ...Object.keys(release.registryFingerprints ?? {}).map(
+      (shard) => `shard-${shard}-participants.properties`,
+    ),
   ]
 }
 

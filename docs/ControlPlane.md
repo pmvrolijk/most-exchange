@@ -70,8 +70,11 @@ security(security_id, shard_id, symbol, isin, name, currency,
 
 participant(participant_id, name, smp_id, enabled)
 
+gateway(gateway_id, shard_id, secret_sha256, enabled)     -- published as the registry
+gateway_participant(participant_id, gateway_id)           -- participant_id is the PK
+
 spec_release(version, created_at, universe_version, directory, note)
-spec_release_shard(version, shard_id, fingerprint)
+spec_release_shard(version, shard_id, fingerprint, registry_fingerprint)
 
 session_schedule(name, zone, weekdays, purge_time, enabled)
 session_schedule_entry(schedule_name, at_time, phase)
@@ -90,9 +93,23 @@ what processes must agree on at boot — seeding a reference price must not inva
 does not. They record what an operator *seeded*, not what the engine currently holds, and cannot: an
 executing uncross moves `staticReference` with nobody asking.
 
-**Participants are authored but not yet enforced.** The engine has an `UNAUTHORIZED_PARTICIPANT`
-reject reason that nothing currently raises, and binding a participant to an authenticated session
-is an open item (`docs/Design.md` §8). The table is where that binding will be looked up.
+**Gateways and their participants are published; enforcement is still not.** `gateway` and
+`gateway_participant` render each shard's participant registry, which the consensus module
+authenticates connecting gateways against and the engine binds participants from at session open
+(`docs/Design.md` §1). What is still true is that nothing *refuses* an order for an unbound
+participant — `UNAUTHORIZED_PARTICIPANT` is raised by nothing — so this decides where a
+participant's fills are delivered, not whether it may trade.
+
+`participant_id` is the primary key of `gateway_participant`, so **a participant belongs to at most
+one gateway** is structural here rather than checked, the same way `security_id` being the primary
+key of `security` makes one-shard-per-security structural.
+
+**The secret is stored only as its SHA-256, and that cannot be BCrypt.** The cluster verifies the
+digest against what a gateway presents, so it has to be reproducible. The plaintext is returned
+exactly once, by `POST /api/gateways` or `PUT /api/gateways/{id}/secret`, and is unrecoverable
+afterwards — rotating issues a new one rather than reading the old one back. Create always
+*generates* one; a caller that needs a specific value follows with the rotate call, which takes it
+in the request body, because a secret in a query string is a secret in an access log.
 
 **One duplication this removes.** A gateway's client endpoints are declared today in
 `gateway.properties` *and* again in `discovery.properties`, with nothing checking they agree. They
@@ -154,6 +171,9 @@ GET                       /api/audit?limit=     who asked, what for, and whether
 GET  POST                 /api/shards           GET PUT DELETE /api/shards/{id}
 GET  POST                 /api/securities       GET PUT DELETE /api/securities/{id}
 GET  POST                 /api/participants     GET PUT DELETE /api/participants/{id}
+GET  POST                 /api/gateways         GET PUT DELETE /api/gateways/{id}
+PUT                       /api/gateways/{id}/secret   rotate; the plaintext is returned once
+GET                       /api/gateways/registry/{shardId}   the file this shard would publish
 
 GET                       /api/topology         the draft, its fingerprints, and what is wrong
 POST                      /api/import           seed from an existing shard security file
@@ -195,6 +215,11 @@ REL=/var/lib/most/releases/000007
 # engine.properties, gateway.properties, market-data.properties
 engine.securitiesFile=$REL/shard-0-securities.properties
 
+# The participant registry, read by the consensus module, the engine and the gateway. Point at a
+# symlink rather than the release: the two node processes re-read this path while they run, so
+# moving the symlink is how a new registry comes into force without restarting a node.
+engine.participantRegistry=/etc/most/current/shard-0-participants.properties
+
 # discovery.properties: the published registry, plus this node's own runtime settings
 cat $REL/discovery.properties         >  discovery.properties
 echo "discovery.channel=aeron:udp?endpoint=239.10.0.1:40000" >> discovery.properties
@@ -216,6 +241,18 @@ market-data:     shard=0 fingerprint=35c6b5d8c0238d8a ...
 
 The fingerprint is also written into the top of each shard file as a comment, so the artifact and
 the release record cannot drift apart.
+
+**A shard with gateways also gets `shard-N-participants.properties`, and its own fingerprint.** That
+value is a second column and a second manifest field, never folded into `fingerprint`: the shard
+hash is over geometry, is already recorded in every release published so far, and rotating a gateway
+secret is not a change of geometry. A shard with **no** gateways publishes no registry file rather
+than an empty one — `ParticipantRegistry` requires at least one gateway, and a shard whose gateways
+connect anonymously is a legitimate configuration, not a broken registry.
+
+**A registry change does not need a node restart.** The consensus module and the engine poll the
+path they were given and swap the registry behind a volatile reference, announcing both
+fingerprints; the gateway restarts, which costs nothing because it holds no state.
+`docs/ProdDeployment.md` §9.4 is the procedure.
 
 Comparing them is still the operator's job, as it is today. Making the four processes fail fast on a
 mismatch is the obvious next step and is deliberately **not** in this slice — it changes four

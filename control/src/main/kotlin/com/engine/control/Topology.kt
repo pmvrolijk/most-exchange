@@ -1,7 +1,9 @@
 package com.engine.control
 
+import com.fasterxml.jackson.annotation.JsonIgnore
 import com.fasterxml.jackson.databind.annotation.JsonSerialize
 import com.fasterxml.jackson.databind.ser.std.ToStringSerializer
+import com.engine.reference.GatewayIdentity
 import com.engine.reference.SecuritySpec
 import com.engine.reference.ShardRoute
 
@@ -108,6 +110,40 @@ data class ParticipantRow(
     }
 }
 
+/**
+ * A gateway process's identity on a shard, and the participants it speaks for.
+ *
+ * The editable shape of `reference`'s `GatewayIdentity`. [toIdentity] is the crossing point where
+ * the domain type validates -- the alphabet, the digest's shape, the participant list -- exactly as
+ * `SecurityRow.toSpec()` does. The secret is here only as its SHA-256: the cluster verifies that
+ * digest against what a gateway presents, so it must be reproducible, and it is never recoverable.
+ */
+data class GatewayRow(
+    val gatewayId: String,
+    val shardId: Int,
+    val enabled: Boolean = true,
+    /** Participants this gateway speaks for. At most one gateway may claim each. */
+    val participants: List<Long> = emptyList(),
+    /** Never serialised out; see [GatewayController]. */
+    @get:JsonIgnore
+    val secretSha256: String = "",
+) {
+    init {
+        require(shardId >= 0) { "shardId must be non-negative: $shardId" }
+        require(participants.all { it > 0L }) { "participant ids must be positive" }
+        require(participants.distinct().size == participants.size) {
+            "gateway $gatewayId claims a participant twice"
+        }
+    }
+
+    /** Builds the real domain type, which is what enforces every rule this row does not. */
+    fun toIdentity(): GatewayIdentity = GatewayIdentity(
+        gatewayId = gatewayId,
+        secretSha256 = secretSha256,
+        participants = participants.sorted(),
+    )
+}
+
 /** One published release, and the fingerprint each shard's processes should print. */
 data class ReleaseRow(
     val version: Long,
@@ -118,4 +154,12 @@ data class ReleaseRow(
     val directory: String,
     val note: String?,
     val fingerprints: Map<Int, String> = emptyMap(),
+    /**
+     * The participant registry's fingerprint per shard, for the shards that have one.
+     *
+     * Deliberately beside [fingerprints] rather than folded into it: that hash is over shard
+     * geometry and is already written down in every release published so far, and rotating a
+     * gateway secret is not a change of geometry.
+     */
+    val registryFingerprints: Map<Int, String> = emptyMap(),
 )

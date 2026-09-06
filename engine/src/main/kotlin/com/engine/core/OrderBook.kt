@@ -33,6 +33,11 @@ class OrderBook(
     var dynamicCollarBps: Int = 0
 
     @PublishedApi internal val orders = LongArray(maxOrders * OrderField.STRIDE)
+
+    // The cold word of Design.md §3.1, in its own array so the packed pool above stays exactly
+    // one cache line per order. Read where a report is generated or the book is snapshotted,
+    // never inside the matching loop.
+    @PublishedApi internal val cold = LongArray(maxOrders * ColdField.STRIDE)
     @PublishedApi internal val bids = PriceLadder(levelCount)
     @PublishedApi internal val asks = PriceLadder(levelCount)
     @PublishedApi internal var bestBidLevel = NULL_LEVEL
@@ -107,6 +112,9 @@ class OrderBook(
     fun expireDateOfOrder(node: Int): Int =
         expireDateOf(orders[node * OrderField.STRIDE + OrderField.META])
 
+    /** The quantity the order was entered with. 0 means unknown — see [ColdField]. */
+    fun origQtyOf(node: Int): Long = cold[node * ColdField.STRIDE + ColdField.ORIG_QTY]
+
     // ----------------------------------------------------------------- collars
 
     /**
@@ -149,6 +157,7 @@ class OrderBook(
         clOrdId: Long,
         price: Long,
         leavesQty: Long,
+        origQty: Long,
         expireDate: Int,
         side: Byte,
         smpStrategy: Byte,
@@ -166,6 +175,7 @@ class OrderBook(
         orders[base + OrderField.CL_ORD_ID] = clOrdId
         orders[base + OrderField.EXCHANGE_ORDER_ID] = exchangeOrderId
         orders[base + OrderField.META] = packMeta(expireDate, side, smpStrategy)
+        cold[node * ColdField.STRIDE + ColdField.ORIG_QTY] = origQty
 
         val ladder = if (side == Side.BUY) bids else asks
         val level = levelOf(price)

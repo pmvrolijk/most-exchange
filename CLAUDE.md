@@ -8,13 +8,13 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 update it alongside code when the design changes. §8 tracks the open questions.
 
 The Gradle skeleton is in place and green: eight modules (`sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`),
-SBE codegen wired, 300 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
+SBE codegen wired, 457 tests passing. **Implemented so far:** `Domain.kt` (packed layout, bit-packing
 helpers, reusable outcome scratch), `PriceLadder`, and `OrderBook` — booking, cancel validation,
 continuous matching with both gates, the auction (price selection, SMP fixed point, allocation), and
 the expiry purge; and `MatchingEngineService` — the full `ClusteredService`, message dispatch,
 execution-report egress, book-event publication, and snapshot/restore; and `EngineConfig` /
 `EngineMain` — the `ClusteredServiceContainer` wiring; `MarketDataService` / `DepthBook` — L1/L2/L3
-derivation; `GatewayService` / `OrderStateStore` — validation and `cumQty` reconstruction; and
+derivation; `GatewayService` — validation and translation, stateless; and
 `reference` / `discovery` — the shared shard security list and the tradable-universe directory; and
 `tools` — the `most` operator CLI, including `most load`, the paced load generator and latency
 harness; and `control` — the Postgres-backed control plane that authors reference data and publishes
@@ -114,37 +114,55 @@ image from the buffer on join — the oldest one still there — discards every 
 rescued by an increment happening to arrive. On a quiet book none does. `DepthFeedAssemblerTest`
 pins both directions; mutating either way fails a different test.
 
-**The gateway's order state is a memory-mapped slot array, and it *is* the store.**
-`OrderStateStore` keeps only the two index maps that find a slot; `origQty` and `cumQty` live in
-`OrderJournal`. That is deliberate — a journal maintained beside an in-memory copy is a second
-bookkeeping that can drift, and it would surface only after a restart, the one moment nobody can
-check it. Same idiom as the engine's packed pool plus id map, one layer out.
+**The engine holds `origQty`, and the gateway holds nothing.** `origQty` lives in a parallel
+`LongArray` beside the packed pool — `ColdField`, stride 1 — not in the 64-byte line, which stays
+exactly 64 bytes. It is read only where an execution report is generated or the book is walked for
+a snapshot, never inside the matching loop, so it costs a miss on paths already taking one. That is
+also where a future order attribute matching does not read belongs (an at-open validity, say)
+rather than evicting a field or doubling the stride.
 
-Set `gateway.journalFile` or a restart loses every in-flight order's `origQty`; the default is
-unset, which is the old behaviour. `gateway.journalSlots` defaults to the shard's own total order
-pool, which makes exhaustion unreachable for resting orders — the engine answers `BOOK_CAPACITY`
-first. **Exhaustion never rejects an order**: it forwards it untracked and the reports come back
-`UNKNOWN`, which is what that flag is for.
+This reversed a documented decision. `origQty` used to live only in the gateway, which is what made
+the gateway the one component that could not be restarted or replaced without losing something —
+and therefore what made gateway HA an open question. `OrderJournal` and `OrderStateStore` are
+deleted, `gateway.journalFile` and `gateway.journalSlots` no longer exist, and several gateways can
+serve one shard. What must be disjoint between two of them is their *client endpoints*: two
+subscribed to one inbound channel each receive every order and forward both, which is duplicate
+orders rather than redundancy. `e2e/run-restart.sh` §4d is the check — an order placed through one
+gateway and cancelled through another.
 
-Three rules the journal turns on, each with a test that fails when it is mutated away:
-- **The state word is written last** and read first, so an interrupted write leaves a slot that
-  reads as free — one order lost rather than one invented. `OrderJournalTest` pins the store *order*
-  through a recording buffer, because that is not visible from the file afterwards.
-- **A slot whose fields could not have come from a completed write is not adopted** — no quantity,
-  or acknowledged with no id. Defence behind the ordering, since being wrong there means handing a
-  client an order assembled from stale bytes.
-- **A journal from a different shard or capacity is refused while it holds orders**, and adopted
-  silently when empty. Same rule as the engine refusing a snapshot it cannot faithfully restore.
+**`cumQty` is stated by the engine, never subtracted by anyone.** A terminal report carries
+`leavesQty = 0` whether the order filled or was cancelled, so `origQty - leavesQty` reports a
+cancelled order as fully filled — that is the second row of Handover §6's defect table, and putting
+only `origQty` on the wire would have re-opened it one layer along. **`origQty = 0` means unknown**,
+which happens for an order restored from a version 2 snapshot, and travels to the client as
+`Enrichment.UNKNOWN` rather than as a number nobody can justify. `ExecutionReport` is `blockLength`
+80 at schema version 3; `ClientExecutionReport` is unchanged, because it already carried both.
 
-**There is no `msync` on the hot path**, and that bound is the point: a *process* crash recovers in
-full because the mapped pages belong to the OS, a *machine* power loss can lose the last writes and
-those orders come back `UNKNOWN`. `ClientExecutionReport.enrichment` says so rather than sending a
-`cumQty` of zero, in a field inside the message's existing block padding, so `blockLength` is
-unchanged and a version 1 reader is unaffected.
+**The participant registry is re-read while a node runs, and that is legal for one specific reason.**
+`ParticipantRegistrySource` polls the file, compares content by fingerprint (a release is published
+to a new directory and put in force by moving a symlink, so mtime says nothing) and swaps an
+immutable registry behind a volatile reference. The consensus module and the engine both read it
+through that; the gateway does not reload, it restarts, which now costs nothing. **A file that
+cannot be parsed, or one for another shard, is reported and ignored** — standing down on a bad file
+would turn a typo into a shard that authenticates nobody.
 
-**Nothing reaps a pending order whose acknowledgement never arrives.** Pre-existing, but a bounded
-slot array turns a heap leak into slots that are never returned. `pendingOrders` is printed at
-shutdown for exactly that reason: a number that only grows is a leak, not traffic.
+The reason it is legal in the engine: what it feeds is node-local *egress routing*. The map is
+rebuilt in `onStart` from `cluster.clientSessions()`, is deliberately not snapshotted, and only the
+leader's egress reaches anyone, so two nodes holding different versions can disagree about where to
+send a report and cannot diverge the log, the books or a snapshot. **That stops being true the
+moment the engine rejects an order on a binding**, so `UNAUTHORIZED_PARTICIPANT` has to arrive
+through the log rather than from a file each node reads on its own schedule. Same argument that
+keeps metrics out of `EngineConfig.fingerprint()`, and `engine.participantRegistry.reloadMs` is
+excluded from it for the same reason.
+
+**The control plane authors the registry.** `gateway` and `gateway_participant` (V5) hold gateway
+identity, the SHA-256 of its secret and its participant claims; `ReleasePublisher` renders
+`shard-N-participants.properties` beside the security file. The digest cannot be BCrypt — the
+cluster verifies it against what a gateway presents, so it must be reproducible — and the plaintext
+is returned exactly once. A shard with **no** gateways publishes no registry rather than an empty
+one; `ParticipantRegistry` requires at least one, and a shard whose gateways connect anonymously is
+a legitimate configuration. The registry fingerprint gets its own column and its own manifest field,
+never folded into the shard's.
 
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is
@@ -320,8 +338,7 @@ before it silently diverges the books.
 believes it placed, with no ack and no reject. The gateway uses `controlledPoll` and returns
 `Action.ABORT` so the fragment is offered again — and `Action.COMMIT`, never `Action.CONTINUE`, on
 the handled path, since `CONTINUE` commits only at the end of the poll and a later `ABORT` would
-rewind past fragments already forwarded and duplicate them. The pending `origQty` recorded before
-the offer must be unwound when the offer does not send. A dead session is not retryable, so it
+rewind past fragments already forwarded and duplicate them. A dead session is not retryable, so it
 rejects with `GATEWAY_UNAVAILABLE`. **The outbound leg cannot do this** — egress must keep being
 drained or the session dies — so it drops and counts; retrying there was measured and cost 10x on
 the p99 while still dropping.
@@ -335,9 +352,11 @@ the log, so every node derives the identical map — and because `ServiceSnapsho
 sessions *without* replaying `onSessionOpen`, the engine rebuilds the bindings in `onStart` from
 `cluster.clientSessions()` and the map needs **no snapshot state of its own**.
 
-- **Traffic still wins for the order it arrived on**, and that is not a leftover: the gateway that
-  forwarded an order holds its `origQty` and is the only one that can restore `cumQty` on the way
-  back. Correspondingly `onSessionClose` drops only routes that session **still owns** — a route
+- **Traffic still wins for the order it arrived on.** The original reason was that the forwarding
+  gateway held the order's `origQty`; the engine holds that now, so the surviving reason is plainer:
+  a client following an order listens to the gateway it sent it through, and a report delivered
+  elsewhere is one it never sees. Correspondingly `onSessionClose` drops only routes that session
+  **still owns** — a route
   traffic has moved to a live gateway stays there. Both directions are mutation-tested in
   `ParticipantBindingTest`.
 - **Wrong credentials are rejected, never downgraded to anonymous.** A gateway that connected
@@ -350,17 +369,16 @@ sessions *without* replaying `onSessionOpen`, the engine rebuilds the bindings i
   a change of geometry. It has its own `fingerprint()`, printed by the engine, the gateway and the
   cluster host.
 - **Everything here is optional and off by default.** Unset, the engine learns routes from traffic
-  exactly as before. What is *not* built: enforcement (`UNAUTHORIZED_PARTICIPANT` is still raised by
-  nothing, so a gateway may still trade for a participant that is not its own) and control-plane
-  authoring — the `participant` table exists but nothing renders or publishes this file.
+  exactly as before. What is *not* built: enforcement — `UNAUTHORIZED_PARTICIPANT` is still raised
+  by nothing, so a gateway may still trade for a participant that is not its own, and see the
+  reload note above for why that one cannot simply read the file.
 - `e2e/run-restart.sh` §4c is the check: rest an offer, restart the gateway, cross the offer, and
   the maker's cancel must report `cum 4 of 10`. Before the binding it read `cum 0 of 10`, because
-  the engine counted the maker's fill undeliverable and **a gateway cannot journal a fill it is
-  never told about**.
+  the engine counted the maker's fill undeliverable and never sent it anywhere.
 
 **The directory publishes the GATEWAY's client endpoints**, not the cluster ingress/egress — an
-adapter connecting to the cluster directly would bypass the gateway's validation and `cumQty`
-reconstruction.
+adapter connecting to the cluster directly would bypass the gateway's `securityId` validation and
+the participant binding that decides where a maker's fills go.
 
 **A gateway serves exactly one shard** — one cluster connection, and it rejects anything outside its
 list. `discovery` publishes the universe (security → shard → ingress channel) on a repeating
@@ -396,9 +414,8 @@ and snapshot re-synchronisation are subscriber responsibilities.
 
 **Both boundaries are binary SBE, not FIX.** The `gateway` module is protocol-agnostic; FIX and
 proprietary session protocols are handled by separate gateways upstream of it (and downstream of
-`market-data`) that are outside this project. The gateway is nonetheless **stateful**: it holds the
-`origQty` it forwarded so it can restore `cumQty = origQty - leavesQty` on the outbound leg, which is
-precisely what lets the engine omit `origQty` and keep an order at one cache line.
+`market-data`) that are outside this project. The gateway is **stateless**: it validates
+`securityId` inbound and translates the engine's report outbound, and holds nothing per order.
 
 **Two data structures carry the performance.**
 - *Packed order pool*: a single `LongArray` with a stride of 8 longs, so each order is exactly one
@@ -411,8 +428,8 @@ precisely what lets the engine omit `origQty` and keep an order at one cache lin
 
 `leavesQty` is a **stored field on the order**, not derived at publish time — partially filled
 resting orders match on their true remainder, and fill reports must track a running remainder rather
-than `origQty - thisFill`. `origQty` is deliberately *not* stored (the eight words are full); the
-gateway derives `cumQty` from the `origQty` it sent and the `leavesQty` the engine reports.
+than `origQty - thisFill`. `origQty` is stored too, but in the parallel `ColdField` array rather
+than in the line: the eight words are full and it is not read by matching.
 
 The inline matching and purge functions read the pool and ladders directly, so those members are
 `@PublishedApi internal`, not `private` — a public `inline fun` cannot touch private members.

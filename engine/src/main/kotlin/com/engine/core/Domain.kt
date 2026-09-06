@@ -25,8 +25,8 @@ const val BPS_DENOMINATOR = 10_000L
  * Field offsets within the packed order pool. Stride is 8 longs = 64 bytes = exactly one
  * cache line, so touching an order costs one cache miss rather than seven (Design.md §3.1).
  *
- * `origQty` is deliberately absent: SMP needs [SMP_ID] and the eight words are full. The
- * gateway derives cumQty from the origQty it sent and the leavesQty the engine reports.
+ * The eight words are full, so anything else an order needs goes in [ColdField] rather than
+ * evicting a field from here or doubling the stride.
  */
 object OrderField {
     const val STRIDE = 8
@@ -45,6 +45,25 @@ object OrderField {
 
     /** expireDate: int32 | side: byte 4 | smpStrategy: byte 5 */
     const val META = 7
+}
+
+/**
+ * A second, cold word per order, held in a parallel array rather than in the cache line above.
+ *
+ * It is touched only where an execution report is generated or the book is walked for a snapshot
+ * — never inside the matching loop — so it costs a cache miss on paths that were already taking
+ * one and nothing at all on the path the budget in Design.md §2 is about. This is where an order
+ * attribute that matching does not read belongs: a future validity (at-open, IOC) goes here, and
+ * the hot 64 bytes stay 64 bytes.
+ *
+ * [ORIG_QTY] is 0 for an order restored from a version 2 snapshot, which predates the field. That
+ * value means *unknown* and is carried through to `Enrichment.UNKNOWN` on the wire rather than
+ * being turned into a number nobody can justify.
+ */
+object ColdField {
+    const val STRIDE = 1
+
+    const val ORIG_QTY = 0
 }
 
 fun packLinks(next: Int, prev: Int): Long =

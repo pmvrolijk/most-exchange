@@ -210,8 +210,9 @@ native:engine:
     # the only check that works on an image you cannot run: 0 when the exports were dropped, 3 when
     # they were not (CLAUDE.md, "Build and deployment").
     - COUNT=$(grep -c 'jdk.internal.misc.Unsafe' "$BIN" || true)
-    - echo "jdk.internal.misc.Unsafe references in the image: $COUNT (expected 3, must not be 0)"
-    - test "$COUNT" -gt 0 || { echo "FAIL: the --add-exports were dropped from the native build"; exit 1; }
+    # Single-quoted: an unquoted colon-space in a YAML sequence entry makes it a map, not a string.
+    - 'echo "jdk.internal.misc.Unsafe references in the image: $COUNT (expected 3, must not be 0)"'
+    - 'test "$COUNT" -gt 0 || { echo "FAIL: the --add-exports were dropped from the native build"; exit 1; }'
   artifacts:
     paths:
       - engine/build/native/nativeCompile/matching-engine

@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 470" width="760" height="470" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="t" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5260"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#fff;stroke:#14181f;stroke-width:1.3}
+    .zone{fill:#f7f9fb;stroke:#8a919c;stroke-width:1;stroke-dasharray:4 3}
+    .t{font-size:11.5px;fill:#14181f;font-weight:600}
+    .s{font-size:9.5px;fill:#4a5260}
+    .m{font-size:9px;fill:#4a5260;font-family:Menlo,monospace}
+    .zl{font-size:9.5px;fill:#767e8c;letter-spacing:.09em}
+    .ln{stroke:#4a5260;stroke-width:1.2;fill:none;marker-end:url(#t)}
+    .pl{stroke:#4a5260;stroke-width:1.2;fill:none}
+  </style>
+
+  <!-- k8s -->
+  <rect x="14" y="14" width="732" height="94" rx="6" class="zone"/>
+  <text x="26" y="32" class="zl">KUBERNETES — no realtime requirement, ordinary rolling deploys</text>
+  <rect x="30" y="42" width="120" height="50" rx="4" class="box"/>
+  <text x="90" y="63" class="t" text-anchor="middle">web</text>
+  <text x="90" y="79" class="s" text-anchor="middle">nginx, SPA</text>
+  <rect x="170" y="42" width="150" height="50" rx="4" class="box"/>
+  <text x="245" y="63" class="t" text-anchor="middle">control</text>
+  <text x="245" y="79" class="s" text-anchor="middle">+ media driver sidecar</text>
+  <rect x="340" y="42" width="120" height="50" rx="4" class="box"/>
+  <text x="400" y="63" class="t" text-anchor="middle">postgres</text>
+  <text x="400" y="79" class="s" text-anchor="middle">CNPG or managed</text>
+  <rect x="500" y="42" width="150" height="50" rx="4" class="box"/>
+  <text x="575" y="63" class="t" text-anchor="middle">fix-oe-adapter</text>
+  <text x="575" y="79" class="s" text-anchor="middle">N replicas</text>
+
+  <!-- VLAN rule -->
+  <line x1="14" y1="126" x2="746" y2="126" stroke="#14181f" stroke-width="1.6"/>
+  <text x="14" y="140" class="zl">TRADING VLAN — routed UDP, multicast with an IGMP querier</text>
+
+  <!-- gateways -->
+  <rect x="14" y="156" width="180" height="80" rx="6" class="zone"/>
+  <text x="24" y="174" class="zl">GATEWAY TIER</text>
+  <rect x="26" y="184" width="72" height="42" rx="4" class="box"/>
+  <text x="62" y="203" class="t" text-anchor="middle">gw-a</text>
+  <text x="62" y="218" class="s" text-anchor="middle">+ driver</text>
+  <rect x="110" y="184" width="72" height="42" rx="4" class="box"/>
+  <text x="146" y="203" class="t" text-anchor="middle">gw-b</text>
+  <text x="146" y="218" class="s" text-anchor="middle">+ driver</text>
+  <text x="24" y="252" class="s">Stateless, any number. Each has its own</text>
+  <text x="24" y="265" class="s">client endpoints; adapters are partitioned.</text>
+
+  <!-- cluster nodes -->
+  <g>
+    <rect x="230" y="156" width="160" height="230" rx="6" class="box"/>
+    <text x="310" y="176" class="t" text-anchor="middle">shard0-a — member 0</text>
+    <rect x="244" y="188" width="132" height="46" rx="3" class="box"/>
+    <text x="310" y="206" class="s" text-anchor="middle">cluster-host</text>
+    <text x="310" y="222" class="m" text-anchor="middle">driver + archive + raft</text>
+    <rect x="244" y="242" width="132" height="34" rx="3" class="box" stroke-width="2"/>
+    <text x="310" y="263" class="s" text-anchor="middle">engine (service container)</text>
+    <rect x="244" y="284" width="132" height="30" rx="3" class="box"/>
+    <text x="310" y="303" class="s" text-anchor="middle">market-data</text>
+    <rect x="244" y="322" width="132" height="30" rx="3" class="box"/>
+    <text x="310" y="341" class="s" text-anchor="middle">discovery</text>
+    <text x="310" y="372" class="m" text-anchor="middle">NVMe: archive</text>
+  </g>
+  <g>
+    <rect x="404" y="156" width="160" height="230" rx="6" class="box"/>
+    <text x="484" y="176" class="t" text-anchor="middle">shard0-b — member 1</text>
+    <rect x="418" y="188" width="132" height="46" rx="3" class="box"/>
+    <text x="484" y="206" class="s" text-anchor="middle">cluster-host</text>
+    <text x="484" y="222" class="m" text-anchor="middle">driver + archive + raft</text>
+    <rect x="418" y="242" width="132" height="34" rx="3" class="box"/>
+    <text x="484" y="263" class="s" text-anchor="middle">engine</text>
+    <rect x="418" y="284" width="132" height="30" rx="3" class="box"/>
+    <text x="484" y="303" class="s" text-anchor="middle">market-data (silent)</text>
+    <rect x="418" y="322" width="132" height="30" rx="3" class="box"/>
+    <text x="484" y="341" class="s" text-anchor="middle">discovery</text>
+  </g>
+  <g>
+    <rect x="578" y="156" width="160" height="230" rx="6" class="box"/>
+    <text x="658" y="176" class="t" text-anchor="middle">shard0-c — member 2</text>
+    <rect x="592" y="188" width="132" height="46" rx="3" class="box"/>
+    <text x="658" y="206" class="s" text-anchor="middle">cluster-host</text>
+    <text x="658" y="222" class="m" text-anchor="middle">driver + archive + raft</text>
+    <rect x="592" y="242" width="132" height="34" rx="3" class="box"/>
+    <text x="658" y="263" class="s" text-anchor="middle">engine</text>
+    <rect x="592" y="284" width="132" height="30" rx="3" class="box"/>
+    <text x="658" y="303" class="s" text-anchor="middle">market-data (silent)</text>
+    <rect x="592" y="322" width="132" height="30" rx="3" class="box"/>
+    <text x="658" y="341" class="s" text-anchor="middle">discovery</text>
+  </g>
+
+  <path class="ln" d="M194,196 L226,196"/>
+  <path class="pl" d="M390,200 L404,200"/>
+  <path class="pl" d="M564,200 L578,200"/>
+  <text x="484" y="150" class="m" text-anchor="middle">consensus 20220 · log 20330 · catchup 20440</text>
+
+  <path class="ln" d="M245,108 L245,150 L226,150 L226,190"/>
+
+  <rect x="14" y="410" width="732" height="46" rx="6" class="zone"/>
+  <text x="26" y="428" class="zl">MARKET DATA SUBSCRIBERS</text>
+  <text x="26" y="446" class="s">L1 · L2 · L3 · snapshot, multicast from whichever node holds leadership. Slow subscribers take gaps and re-synchronise from the snapshot feed.</text>
+  <path class="ln" d="M310,386 L310,406"/>
+</svg>

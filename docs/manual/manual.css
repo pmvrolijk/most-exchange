@@ -1,0 +1,231 @@
+/* Print stylesheet for the Operator's Manual. Screen and print are the same design: the HTML in
+   build/ is meant to be readable on its own when someone wants to search it. */
+
+@page { size: A4; }
+
+:root {
+  --ink:      #14181f;
+  --ink-soft: #4a5260;
+  --ink-mute: #767e8c;
+  --rule:     #d8dde5;
+  --rule-soft:#e9edf2;
+  --paper:    #ffffff;
+  --code-bg:  #f5f7fa;
+  --accent:   #1f4f82;
+  --term:     #0f5f52;
+  --warn:     #8a4b0f;
+  --todo:     #7a2540;
+  --mono: "SF Mono", "JetBrains Mono", Menlo, Consolas, monospace;
+  --sans: -apple-system, "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  font-size: 9.6pt;
+  line-height: 1.52;
+  color: var(--ink);
+  background: var(--paper);
+  -webkit-font-smoothing: antialiased;
+}
+
+.pagebreak { break-after: page; }
+.chapter { break-before: page; }
+.chapter:first-of-type { break-before: auto; }
+
+/* ---------------------------------------------------------------- headings */
+
+h1, h2, h3, h4 { font-weight: 600; line-height: 1.22; color: var(--ink); }
+
+h1 {
+  font-size: 21pt;
+  margin: 0 0 1.4em;
+  padding-bottom: 0.35em;
+  border-bottom: 2px solid var(--ink);
+  letter-spacing: -0.01em;
+}
+h2 {
+  font-size: 13pt;
+  margin: 2.1em 0 0.7em;
+  padding-bottom: 0.25em;
+  border-bottom: 1px solid var(--rule);
+  break-after: avoid;
+}
+h3 { font-size: 10.6pt; margin: 1.7em 0 0.5em; break-after: avoid; }
+h4 { font-size: 9.6pt; margin: 1.3em 0 0.4em; color: var(--ink-soft); break-after: avoid; }
+
+p { margin: 0 0 0.75em; orphans: 2; widows: 2; }
+
+a { color: var(--accent); text-decoration: none; }
+
+strong { font-weight: 600; }
+
+hr { border: 0; border-top: 1px solid var(--rule); margin: 1.8em 0; }
+
+/* ---------------------------------------------------------------- lists */
+
+ul, ol { margin: 0 0 0.85em; padding-left: 1.3em; }
+li { margin-bottom: 0.28em; }
+li > ul, li > ol { margin-top: 0.28em; margin-bottom: 0.35em; }
+
+/* ---------------------------------------------------------------- code */
+
+code {
+  font-family: var(--mono);
+  font-size: 0.885em;
+  background: var(--code-bg);
+  border: 1px solid var(--rule-soft);
+  border-radius: 3px;
+  padding: 0.05em 0.3em;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--rule);
+  border-left: 3px solid var(--ink-soft);
+  border-radius: 3px;
+  padding: 0.7em 0.9em;
+  margin: 0 0 1em;
+  overflow-x: hidden;
+  break-inside: avoid;
+}
+pre code {
+  background: none;
+  border: 0;
+  padding: 0;
+  font-size: 7.9pt;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  display: block;
+}
+/* A long transcript is allowed to split; a short one never should. */
+pre.long { break-inside: auto; }
+
+/* ---------------------------------------------------------------- tables */
+
+/* Tables break across pages -- several here are a page long on their own, and forbidding a break
+   would push the whole table to the next page and leave a hole where it was. Rows do not break. */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0 0 1.1em;
+  font-size: 8.6pt;
+}
+thead { display: table-header-group; }
+tr { break-inside: avoid; }
+thead th {
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 1.5px solid var(--ink-soft);
+  padding: 0.4em 0.6em 0.35em;
+  vertical-align: bottom;
+}
+tbody td {
+  border-bottom: 1px solid var(--rule-soft);
+  padding: 0.38em 0.6em;
+  vertical-align: top;
+}
+tbody tr:last-child td { border-bottom: 1px solid var(--rule); }
+table code { font-size: 0.92em; background: none; border: 0; padding: 0; }
+
+/* ---------------------------------------------------------------- callouts */
+
+.callout {
+  break-inside: avoid;
+  margin: 1.1em 0;
+  padding: 0.65em 0.9em 0.5em;
+  border-radius: 3px;
+  border: 1px solid var(--rule);
+  border-left-width: 3px;
+  background: #fbfcfd;
+  font-size: 9.1pt;
+}
+.callout > :last-child { margin-bottom: 0; }
+.callout-title {
+  font-weight: 600;
+  font-size: 7.6pt;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  margin: 0 0 0.4em;
+}
+.callout-term    { border-left-color: var(--term); background: #f4faf8; }
+.callout-term    .callout-title { color: var(--term); }
+.callout-note    { border-left-color: var(--accent); background: #f5f8fc; }
+.callout-note    .callout-title { color: var(--accent); }
+.callout-warning { border-left-color: var(--warn); background: #fdf8f2; }
+.callout-warning .callout-title { color: var(--warn); }
+.callout-todo    { border-left-color: var(--todo); background: #fdf5f7; }
+.callout-todo    .callout-title { color: var(--todo); }
+.callout-todo    .callout-title::before { content: "\26A0  "; }
+
+blockquote {
+  margin: 1em 0;
+  padding: 0 0 0 1em;
+  border-left: 2px solid var(--rule);
+  color: var(--ink-soft);
+}
+
+/* ---------------------------------------------------------------- figures */
+
+.figure { margin: 1.2em 0 1.4em; break-inside: avoid; text-align: center; }
+.figure img { max-width: 100%; }
+.figure-screenshot img {
+  border: 1px solid var(--rule);
+  border-radius: 4px;
+  /* Kept short enough that a figure and the paragraph introducing it share a page. */
+  max-height: 132mm;
+}
+figcaption {
+  margin-top: 0.55em;
+  font-size: 8.1pt;
+  color: var(--ink-mute);
+  text-align: left;
+}
+
+/* ---------------------------------------------------------------- cover */
+
+.cover {
+  height: 247mm;
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  padding-top: 42mm;
+}
+.cover-title { font-size: 33pt; font-weight: 650; letter-spacing: -0.025em; margin: 0; }
+.cover-sub   { font-size: 14pt; color: var(--ink-soft); margin: 0.35em 0 0; font-weight: 400; }
+.cover-rule  { border-top: 3px solid var(--ink); width: 96px; margin: 1.6em 0; }
+.cover-lede  { font-size: 10.4pt; max-width: 108mm; color: var(--ink-soft); line-height: 1.6; }
+.cover-meta  { font-size: 8.6pt; color: var(--ink-mute); font-family: var(--mono); }
+.cover-meta div { margin-bottom: 0.25em; }
+
+/* ---------------------------------------------------------------- toc */
+
+.toc h1 { border-bottom-width: 2px; }
+.toc ul { list-style: none; padding: 0; margin: 0; }
+.toc li { margin: 0; }
+.toc a { display: flex; gap: 0.6em; color: var(--ink); padding: 0.16em 0; }
+.toc-num { font-family: var(--mono); font-size: 8.4pt; color: var(--ink-mute); min-width: 3.2em; }
+.toc-l1 > a { font-weight: 600; margin-top: 0.85em; border-top: 1px solid var(--rule-soft); padding-top: 0.5em; }
+.toc-l1:first-child > a { border-top: 0; margin-top: 0; }
+.toc-l2 > a { font-size: 9pt; color: var(--ink-soft); }
+.toc-l2 .toc-num { padding-left: 0.9em; }
+
+/* ---------------------------------------------------------------- index */
+
+.index-cols { column-count: 2; column-gap: 9mm; font-size: 8.8pt; }
+.index-cols h3 {
+  margin: 0.9em 0 0.3em;
+  font-size: 9pt;
+  color: var(--ink-mute);
+  break-after: avoid;
+  border-bottom: 1px solid var(--rule-soft);
+}
+.index-cols h3:first-child { margin-top: 0; }
+.index-cols ul { list-style: none; padding: 0; margin: 0; }
+.index-cols li { margin-bottom: 0.18em; break-inside: avoid; }
+.index-cols .ref { color: var(--ink-mute); font-family: var(--mono); font-size: 0.9em; }

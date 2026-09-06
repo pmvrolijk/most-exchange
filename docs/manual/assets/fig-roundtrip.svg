@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 300" width="760" height="300" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="r" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6.5" markerHeight="6.5" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5260"/>
+    </marker>
+  </defs>
+  <style>
+    .lane{stroke:#d8dde5;stroke-width:1}
+    .lname{font-size:10px;fill:#14181f;font-weight:600}
+    .msg{stroke:#4a5260;stroke-width:1.2;marker-end:url(#r)}
+    .mlbl{font-size:9.5px;fill:#14181f;font-family:Menlo,monospace}
+    .note{font-size:9px;fill:#767e8c}
+    .band{fill:#f4faf8;stroke:#0f5f52;stroke-width:1;stroke-dasharray:4 3}
+    .bandl{font-size:9.5px;fill:#0f5f52;font-weight:600}
+  </style>
+
+  <g class="lname">
+    <text x="10" y="46">client</text>
+    <text x="10" y="106">gateway</text>
+    <text x="10" y="166">consensus + archive</text>
+    <text x="10" y="226">engine</text>
+    <text x="10" y="278">market-data</text>
+  </g>
+  <g class="lane">
+    <line x1="150" y1="42" x2="748" y2="42"/>
+    <line x1="150" y1="102" x2="748" y2="102"/>
+    <line x1="150" y1="162" x2="748" y2="162"/>
+    <line x1="150" y1="222" x2="748" y2="222"/>
+    <line x1="150" y1="274" x2="748" y2="274"/>
+  </g>
+
+  <rect x="168" y="26" width="404" height="216" rx="4" class="band"/>
+  <text x="176" y="20" class="bandl">round trip measured by `most load` — 55 µs on a development machine</text>
+
+  <path class="msg" d="M190,42 L190,98"/>
+  <text x="196" y="72" class="mlbl">NewOrder (SBE)</text>
+
+  <path class="msg" d="M262,102 L262,158"/>
+  <text x="268" y="134" class="mlbl">forward, unchanged</text>
+
+  <path class="msg" d="M356,162 L356,218"/>
+  <text x="362" y="196" class="mlbl">sequenced log position</text>
+
+  <path class="msg" d="M418,226 L418,270"/>
+  <text x="424" y="266" class="mlbl">BookEvent (ipc:12)</text>
+
+  <path class="msg" d="M500,218 L500,106"/>
+  <text x="506" y="150" class="mlbl">ExecutionReport (cluster egress)</text>
+
+  <path class="msg" d="M560,102 L560,46"/>
+  <text x="566" y="76" class="mlbl">ClientExecutionReport</text>
+
+  <text x="176" y="292" class="note">Gateway and engine own 0.8 µs of that 55 µs (1.4%). The remainder is consensus, the archive write and the wire — see 5.7.</text>
+</svg>

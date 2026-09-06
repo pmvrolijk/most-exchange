@@ -70,7 +70,7 @@
         <mxCell id="shardnote" parent="shard0" style="text;html=1;strokeColor=none;fillColor=none;align=left;verticalAlign=middle;fontSize=11;fontColor=#5A6570;" value="Every process here boots from the &lt;b&gt;same&lt;/b&gt; shard security file and prints the same fingerprint. A mismatch would diverge the books rather than fail loudly —&lt;br&gt;the one class of misconfiguration consensus cannot catch. The participant registry has its &lt;b&gt;own&lt;/b&gt; fingerprint: rotating a secret is not a change of geometry." vertex="1">
           <mxGeometry height="44" width="1050" x="50" y="372" as="geometry" />
         </mxCell>
-        <mxCell id="e5" edge="1" parent="shard0" source="cluster0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#9673A6;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.835;exitDx=0;exitDy=0;exitPerimeter=0;" value="Book Event Stream&lt;br&gt;IPC 12 · &lt;i&gt;leader only&lt;/i&gt;">
+        <mxCell id="e5" edge="1" parent="shard0" source="cluster0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#9673A6;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=1;exitY=0.835;exitDx=0;exitDy=0;exitPerimeter=0;entryX=0.12;entryY=1;entryDx=0;entryDy=0;" value="Book Event Stream&lt;br&gt;IPC 12 · &lt;i&gt;leader only&lt;/i&gt;" target="mds0">
           <mxGeometry relative="1" x="0.1029" y="-20" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
@@ -78,7 +78,6 @@
               <mxPoint x="880" y="312" />
               <mxPoint x="880" y="266" />
             </Array>
-            <mxPoint x="880" y="266" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="shardN" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FAFBFC;strokeColor=#8FA8C8;dashed=1;fontSize=13;align=center;verticalAlign=middle;fontColor=#2C3E50;" value="&lt;b&gt;SHARD 1 … SHARD N&lt;/b&gt; — identical topology: its own cluster, security list and fingerprint.&lt;br&gt;Books are fully independent (no cross-instrument matching). Feed sequences are namespaced by shardId, so several shards can share one multicast group." vertex="1">
@@ -140,57 +139,51 @@
         <mxCell id="legend" parent="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#AEB6BF;align=left;verticalAlign=middle;spacingLeft=14;fontSize=12;fontColor=#4A5560;" value="&lt;b&gt;Legend&lt;/b&gt;   —→ order / execution path  ·  —→ market data (multicast)  ·  —→ control plane  ·  ···→ boot-time configuration  ·  dashed box = outside this project" vertex="1">
           <mxGeometry height="58" width="1080" x="1480" y="1146" as="geometry" />
         </mxCell>
-        <mxCell id="e1" edge="1" parent="1" source="upstream" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.12;exitY=1;exitDx=0;exitDy=0;" value="NewOrderSingle · OrderCancelRequest">
+        <mxCell id="e1" edge="1" parent="1" source="upstream" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.12;exitY=1;exitDx=0;exitDy=0;entryX=0.331;entryY=0;entryDx=-0.02;entryDy=0;" value="NewOrderSingle · OrderCancelRequest" target="gwa">
           <mxGeometry relative="1" as="geometry">
             <mxPoint y="-32" as="offset" />
             <Array as="points">
               <mxPoint x="203" y="268" />
             </Array>
-            <mxPoint x="203" y="268" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e4" edge="1" parent="1" source="gwa" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.7;exitY=0;exitDx=0;exitDy=0;" value="ClientExecutionReport">
+        <mxCell id="e4" edge="1" parent="1" source="gwa" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.7;exitY=0;exitDx=0;exitDy=0;entryX=0.2338;entryY=0.9677;entryDx=0.03;entryDy=0;entryPerimeter=0;" value="ClientExecutionReport" target="upstream">
           <mxGeometry relative="1" x="0.2593" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
               <mxPoint x="358" y="161" />
             </Array>
-            <mxPoint x="358" y="160" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e1b" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="gwb" value="">
+        <mxCell id="e1b" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=0.5;entryY=0;entryDx=0;entryDy=0;exitX=0.4956;exitY=1;exitDx=-0.02;exitDy=0;" target="gwb" value="" source="upstream">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="714" y="162" />
             </Array>
-            <mxPoint x="714" y="162" as="sourcePoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e2" edge="1" parent="1" source="gwa" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.25;exitY=1;exitDx=0;exitDy=0;" value="ingress · &lt;i&gt;follows the leader&lt;/i&gt;">
+        <mxCell id="e2" edge="1" parent="1" source="gwa" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.0949;entryY=0;entryDx=-0.06;entryDy=0;" value="ingress · &lt;i&gt;follows the leader&lt;/i&gt;" target="shard0">
           <mxGeometry relative="1" as="geometry">
             <mxPoint y="8" as="offset" />
             <Array as="points">
               <mxPoint x="169" y="478" />
             </Array>
-            <mxPoint x="169" y="478" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e3" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=0.62;entryY=1;entryDx=0;entryDy=0;" target="gwa" value="egress · &lt;i&gt;leader only&lt;/i&gt;">
+        <mxCell id="e3" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=0.62;entryY=1;entryDx=0;entryDy=0;exitX=0.2088;exitY=0;exitDx=0.03;exitDy=0;" target="gwa" value="egress · &lt;i&gt;leader only&lt;/i&gt;" source="shard0">
           <mxGeometry relative="1" x="-0.2" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
               <mxPoint x="324" y="478" />
               <mxPoint x="324" y="443" />
             </Array>
-            <mxPoint x="324" y="478" as="sourcePoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e2b" edge="1" parent="1" source="gwb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" value="">
+        <mxCell id="e2b" edge="1" parent="1" source="gwb" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.4956;entryY=0;entryDx=-0.02;entryDy=0;" value="" target="shard0">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="714" y="478" />
             </Array>
-            <mxPoint x="714" y="478" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="e6a" edge="1" parent="1" source="mds0" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="l1" value="">
@@ -223,20 +216,18 @@
             <mxPoint x="255" y="1140" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e7b" edge="1" parent="1" source="l2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" value="">
+        <mxCell id="e7b" edge="1" parent="1" source="l2" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.4853;entryY=0;entryDx=-0.01;entryDy=0;" value="" target="downstream">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="700" y="1144" />
             </Array>
-            <mxPoint x="700" y="1144" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e7c" edge="1" parent="1" source="l3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;" value="">
+        <mxCell id="e7c" edge="1" parent="1" source="l3" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.8272;entryY=0;entryDx=0.01;entryDy=0;" value="" target="downstream">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="1165" y="1144" />
             </Array>
-            <mxPoint x="1165" y="1144" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="e8" edge="1" parent="1" source="disc" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#D79B00;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;horizontal=0;" target="upstream" value="tradable universe&amp;nbsp;→ gateway endpoints">
@@ -266,7 +257,7 @@
             </Array>
           </mxGeometry>
         </mxCell>
-        <mxCell id="e11" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=1;entryY=0.75;entryDx=0;entryDy=0;" target="gwtier" value="operator commands">
+        <mxCell id="e11" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#0E8088;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=1;entryY=0.75;entryDx=0;entryDy=0;exitX=0.0011;exitY=0.66;exitDx=-0.02;exitDy=0;exitPerimeter=0;" target="gwtier" value="operator commands" source="ctl">
           <mxGeometry relative="1" x="-0.0013" y="10" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
@@ -274,7 +265,6 @@
               <mxPoint x="1420" y="380" />
               <mxPoint x="1420" y="381" />
             </Array>
-            <mxPoint x="1541" y="381" as="sourcePoint" />
             <mxPoint x="1410" y="380" as="targetPoint" />
           </mxGeometry>
         </mxCell>
@@ -287,18 +277,16 @@
             <Array as="points" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e16" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;" value="boot: shard file + participant registry&lt;br&gt;&lt;i&gt;engine · cluster-host · market-data&lt;/i&gt;">
+        <mxCell id="e16" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=1;exitPerimeter=0;entryX=1;entryY=0.5395;entryDx=0;entryDy=0.01;" value="boot: shard file + participant registry&lt;br&gt;&lt;i&gt;engine · cluster-host · market-data&lt;/i&gt;" source="rel" target="shard0">
           <mxGeometry relative="1" x="-0.4899" y="17" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
               <mxPoint x="2140" y="710" />
               <mxPoint x="1400" y="710" />
             </Array>
-            <mxPoint x="2140" y="641" as="sourcePoint" />
-            <mxPoint x="1400" y="710" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="e18" edge="1" parent="1" source="rel" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.234;exitY=0.998;exitDx=0;exitDy=0;exitPerimeter=0;" value="boot: shard file&amp;nbsp;+ its gateway id and secret">
+        <mxCell id="e18" edge="1" parent="1" source="rel" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.234;exitY=0.998;exitDx=0;exitDy=0;exitPerimeter=0;entryX=1;entryY=0.2955;entryDx=0;entryDy=-0.01;" value="boot: shard file&amp;nbsp;+ its gateway id and secret" target="gwtier">
           <mxGeometry relative="1" x="-0.6469" y="10" as="geometry">
             <mxPoint as="offset" />
             <Array as="points">
@@ -308,7 +296,6 @@
               <mxPoint x="1400" y="280" />
             </Array>
             <mxPoint x="1740" y="550" as="sourcePoint" />
-            <mxPoint x="1400" y="281" as="targetPoint" />
           </mxGeometry>
         </mxCell>
         <mxCell id="e17" edge="1" parent="1" source="rel" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#666666;dashed=1;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.628;exitY=1.024;exitDx=0;exitDy=0;entryX=1.006;entryY=0.166;entryDx=0;entryDy=0;exitPerimeter=0;entryPerimeter=0;" target="disc" value="boot: registry + every shard’s file&lt;br&gt;&lt;i&gt;the one process that needs them all&lt;/i&gt;">
@@ -327,13 +314,12 @@
             <mxPoint x="724" y="278" as="targetPoint" />
           </mxGeometry>
         </mxCell>
-        <mxCell id="ktTBNIOkrkbEwQF_umIv-2" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.526;entryY=0.993;entryDx=0;entryDy=0;entryPerimeter=0;" target="gwb" value="">
+        <mxCell id="ktTBNIOkrkbEwQF_umIv-2" edge="1" parent="1" style="edgeStyle=orthogonalEdgeStyle;rounded=1;html=1;strokeWidth=2;strokeColor=#2C3E50;fontSize=11;labelBackgroundColor=#FFFFFF;entryX=0.526;entryY=0.993;entryDx=0;entryDy=0;entryPerimeter=0;exitX=0.5029;exitY=0;exitDx=0.06;exitDy=0;" target="gwb" value="" source="shard0">
           <mxGeometry relative="1" as="geometry">
             <Array as="points">
               <mxPoint x="724" y="480" />
               <mxPoint x="725" y="480" />
             </Array>
-            <mxPoint x="724" y="418" as="sourcePoint" />
             <mxPoint x="724" y="488" as="targetPoint" />
           </mxGeometry>
         </mxCell>

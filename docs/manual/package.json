@@ -1,0 +1,15 @@
+{
+  "name": "most-operators-manual",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Build the Operator's Manual PDF from docs/manual/src",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "html": "node build.mjs --html-only"
+  },
+  "dependencies": {
+    "markdown-it": "^14.1.0",
+    "puppeteer-core": "^23.0.0"
+  }
+}

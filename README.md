@@ -6,6 +6,11 @@ replication and sequencing, generated SBE codecs on the wire.
 **[`docs/Design.md`](docs/Design.md) is the authoritative specification.** Read it before changing
 anything; §8 tracks the open questions.
 
+**[`docs/OperatorManual.pdf`](docs/OperatorManual.pdf) is the Operator's Manual** — installing,
+configuring and operating the exchange, with the full configuration reference and the daily
+procedures. Its source is in [`docs/manual/`](docs/manual/) and it is rebuilt with `npm run build`
+there.
+
 ## Modules
 
 | Module | Role |

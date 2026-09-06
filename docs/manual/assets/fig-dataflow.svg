@@ -1,0 +1,100 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 430" width="760" height="430" font-family="-apple-system, Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#4a5260"/>
+    </marker>
+    <marker id="ag" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#0f5f52"/>
+    </marker>
+  </defs>
+  <style>
+    .box{fill:#fff;stroke:#14181f;stroke-width:1.3}
+    .soft{fill:#f5f7fa;stroke:#8a919c;stroke-width:1;stroke-dasharray:4 3}
+    .t{font-size:12px;fill:#14181f;font-weight:600}
+    .s{font-size:10px;fill:#4a5260}
+    .m{font-size:9.5px;fill:#4a5260;font-family:Menlo,monospace}
+    .lbl{font-size:9.5px;fill:#4a5260;font-family:Menlo,monospace}
+    .glbl{font-size:9.5px;fill:#0f5f52;font-family:Menlo,monospace}
+    .ln{stroke:#4a5260;stroke-width:1.2;fill:none;marker-end:url(#a)}
+    .gln{stroke:#0f5f52;stroke-width:1.2;fill:none;marker-end:url(#ag)}
+    .zone{font-size:9.5px;fill:#767e8c;letter-spacing:.09em}
+  </style>
+
+  <!-- shard boundary -->
+  <rect x="150" y="52" width="440" height="300" rx="6" class="soft"/>
+  <text x="160" y="70" class="zone">ONE SHARD — five processes, one media driver</text>
+
+  <!-- adapters -->
+  <rect x="14" y="120" width="112" height="52" rx="4" class="box"/>
+  <text x="70" y="142" class="t" text-anchor="middle">Protocol</text>
+  <text x="70" y="157" class="t" text-anchor="middle">adapters</text>
+  <text x="70" y="186" class="s" text-anchor="middle">FIX, proprietary</text>
+  <text x="70" y="199" class="s" text-anchor="middle">(outside this project)</text>
+
+  <!-- gateway -->
+  <rect x="176" y="112" width="112" height="68" rx="4" class="box"/>
+  <text x="232" y="136" class="t" text-anchor="middle">gateway</text>
+  <text x="232" y="152" class="s" text-anchor="middle">validate securityId,</text>
+  <text x="232" y="165" class="s" text-anchor="middle">translate; stateless</text>
+
+  <!-- consensus -->
+  <rect x="330" y="112" width="112" height="68" rx="4" class="box"/>
+  <text x="386" y="136" class="t" text-anchor="middle">cluster-host</text>
+  <text x="386" y="152" class="s" text-anchor="middle">driver + archive +</text>
+  <text x="386" y="165" class="s" text-anchor="middle">consensus (Raft)</text>
+
+  <!-- engine -->
+  <rect x="330" y="222" width="112" height="68" rx="4" class="box" stroke-width="2"/>
+  <text x="386" y="246" class="t" text-anchor="middle">engine</text>
+  <text x="386" y="262" class="s" text-anchor="middle">one thread, one book</text>
+  <text x="386" y="275" class="s" text-anchor="middle">per security</text>
+
+  <!-- market data -->
+  <rect x="478" y="222" width="100" height="68" rx="4" class="box"/>
+  <text x="528" y="246" class="t" text-anchor="middle">market-data</text>
+  <text x="528" y="262" class="s" text-anchor="middle">derive L1/L2,</text>
+  <text x="528" y="275" class="s" text-anchor="middle">forward L3</text>
+
+  <!-- discovery -->
+  <rect x="478" y="112" width="100" height="52" rx="4" class="box"/>
+  <text x="528" y="134" class="t" text-anchor="middle">discovery</text>
+  <text x="528" y="150" class="s" text-anchor="middle">directory broadcast</text>
+
+  <!-- subscribers -->
+  <rect x="632" y="222" width="114" height="52" rx="4" class="box"/>
+  <text x="689" y="244" class="t" text-anchor="middle">Feed</text>
+  <text x="689" y="259" class="t" text-anchor="middle">subscribers</text>
+
+  <!-- control plane -->
+  <rect x="14" y="290" width="112" height="62" rx="4" class="box"/>
+  <text x="70" y="313" class="t" text-anchor="middle">control</text>
+  <text x="70" y="329" class="s" text-anchor="middle">+ Postgres, admin</text>
+  <text x="70" y="342" class="s" text-anchor="middle">UI, scheduler</text>
+
+  <!-- flows -->
+  <path class="ln" d="M126,138 L172,138"/>
+  <text x="149" y="131" class="lbl" text-anchor="middle">SBE</text>
+  <path class="ln" d="M172,162 L126,162"/>
+
+  <path class="ln" d="M288,132 L326,132"/>
+  <text x="307" y="125" class="lbl" text-anchor="middle">ingress</text>
+  <path class="ln" d="M326,160 L288,160"/>
+  <text x="307" y="175" class="lbl" text-anchor="middle">egress</text>
+
+  <path class="ln" d="M386,180 L386,218"/>
+  <text x="392" y="203" class="lbl">replicated log</text>
+
+  <path class="ln" d="M442,256 L474,256"/>
+  <text x="458" y="249" class="lbl" text-anchor="middle">ipc:12</text>
+
+  <path class="ln" d="M578,256 L628,256"/>
+  <text x="603" y="249" class="lbl" text-anchor="middle">multicast</text>
+  <text x="603" y="272" class="lbl" text-anchor="middle">L1 L2 L3 snap</text>
+
+  <path class="gln" d="M478,138 L134,138 " transform="translate(0,224)"/>
+  <text x="300" y="356" class="glbl" text-anchor="middle">directory: symbol → shard → gateway endpoints</text>
+
+  <path class="ln" d="M70,286 L70,178"/>
+  <text x="20" y="240" class="lbl">operator</text>
+  <text x="20" y="252" class="lbl">commands</text>
+</svg>

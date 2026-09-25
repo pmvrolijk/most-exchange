@@ -9,7 +9,11 @@ Section numbers are stable and are cited from `CLAUDE.md`, `docs/Design.md` and 
 so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and their headings are kept
 below as pointers.
 
-**The chronology this file records**, most recent first: the session that moved `origQty` into the
+**The chronology this file records**, most recent first: the session that fixed the control plane's
+feed-gap counting, drove ten securities at once for the first time and attributed the result —
+fan-out buys no throughput, Design.md §2's 1M/s/shard target is over-stated by about 2.9x, and the
+ceiling was the media driver's single shared thread — 1.6x of throughput behind one enum (§2i). Before that,
+the session that moved `origQty` into the
 engine, deleted the gateway's order journal, and thereby turned gateway HA from an open design
 question into a deployment choice (§2h) — along with a participant registry the control plane
 authors and both node processes re-read while they run. Before that, the session that bound a
@@ -698,6 +702,227 @@ step measures the reload rather than the weather.
 mechanics elided" and `return 0`. The real implementation in `OrderBook.kt` is complete. The
 document's code section has drifted behind the code and should either be trimmed to signatures and
 commentary or removed in favour of pointing at the source. **Unchanged from the last handover.**
+
+### 2i. The aggregate — measured, attributed, one ceiling found and the next one cornered
+
+Two items off the open list: the control plane's over-reported feed gaps, and the ten-security
+aggregate nobody had ever driven. They are in the same record because the first is what makes the
+second legible: a loss counter that always reads "loss" tells you nothing about a run.
+
+**The gap counter.** `ClusterLink.onBookEvent` called `accept()` in the four branches it decodes —
+`SessionChanged`, `VolatilityHalted`, `AuctionUncrossed`, `TradeExecuted` — while the engine stamps a
+sequence on all **seven** book events. The three order events the control plane deliberately ignores
+(depth is market-data's job, and shadowing a book in the control plane would be a second
+implementation of it) therefore advanced the engine's sequence without advancing the subscriber's
+expectation, and every one of them read as a gap. On a busy book `feedGaps` and `eventsMissed` cried
+loss continuously, which is strictly worse than not counting: real loss was indistinguishable from
+the noise.
+
+**It was extracted rather than patched.** The one-line fix is to call `accept()` before the `when`,
+and the reason the defect survived to be found by reading is that `onBookEvent` was a private method
+of a `@Component` that cannot be constructed without a media driver. Nothing tested it because
+nothing could. The decoding now lives in `BookEventReader`, a plain class over `ExchangeState` and a
+`FeedSequenceTracker`, and `ClusterLink` holds one and delegates. `BookEventReaderTest` drives it with
+the real SBE encoders and writes its expected values from Design.md §5: a mixed contiguous stream is
+zero gaps, a jump of three is one gap of three, a book image is a baseline and consumes nothing, two
+shards interleaved on one feed are tracked apart, a lower sequence is a replay rather than loss.
+Removing the three new `accept()` calls fails five of its six cases.
+
+**The image branch matters as much as the order branches.** Market-data does not forward
+`BookImageBegin`/`Level`/`End` onto L3 today — it returns before `publishL3` — but an image's `seqNum`
+is a baseline and consumes no sequence, so counting one would report a gap the size of the book's
+whole history. The `else -> Unit` branch is deliberate and the test pins it, against a change in
+market-data rather than against today's traffic.
+
+**Then ten securities, for the first time.** `e2e/run-sweep.sh` grew a `SECURITIES` knob (1–10, drawn
+in order from a table of ten real symbols and ISINs, because `reference` validates check digits and a
+generated ISIN is refused at boot) and `most load` already accepted `--symbol A,B,C`. `RATES` stayed
+the **aggregate**, which is the only reading that lets a fan-out sweep be compared against the
+one-book sweeps already in `Measurements.md`. Three runs, R2–R4.
+
+**The result is that fan-out buys nothing.** The knee sits between 300k/s and 350k/s aggregate
+(reproduced across two runs) — the *same aggregate* at which one security broke on this machine in
+R1, 200k–333k. Ten books did not multiply throughput; per security the ceiling is ~30k/s against a
+100k/s target, so Design.md §2's 1M orders/sec/shard is over-stated by about 3x on the measured path.
+(That knee figure is revised below: it was taken on a loaded machine and the idle number is ~350k/s,
+a 2.9x shortfall. The shape of the finding did not change.)
+
+That is not a matching result. §2c put the exchange's own code at 1.4% of a round trip, the engine
+finished every run with `droppedBookEvents=0` and `backpressureStalls=0`, and per-order matching cost
+is precisely what fan-out divides. What fan-out does not divide is the shared path every order
+crosses whichever book it lands on: one cluster ingress, one consensus module, one archive write, one
+replicated log, one service thread. **Which of those binds is not separated**, and that is the open
+item this closed one turned into — `run-attribution.sh` at ten securities is the measurement, and the
+answer is the difference between tuning the cluster and adding shards.
+
+**Above the knee it queues, and the harness now says so.** At 1M/s aggregate — 3x what the shard can
+serve — all 500,000 orders were answered, nothing rejected, nothing dropped, and the median was
+462 ms. The generator was not the problem: pacing lateness p99.9 stayed under 155 µs at every rate.
+So `achieved` above the knee is an **offer** rate, and the latency beside it is a queue draining after
+the offers stopped. The sweep's two validity checks (rejects, pacing) both passed on those rows and it
+printed `PASS`, which is how a 462 ms figure could have been quoted as a latency. A third check now
+marks such a row `SATURATED` — not invalid, because it is the measurement the sweep exists to find,
+but never a round trip — and the summary names the highest rate the shard actually kept up with.
+
+**A data point for the execution-report drops, which is what was asked for.** R4's gateway stopped
+with `droppedToClient=6` of `sentToClient=3,264,416` — 0.0002% — where the sweep behind open issue 1
+lost 267,853 of 3.26M reports, 8.2%, at a comparable report volume. `clusterBackpressure=11`,
+`rejectedLocally=0`, `untrackedReports=0`. Two of three sweeps on this machine now queue rather than
+drop. That strengthens the machine-dependence already recorded rather than resolving it: the remedy
+still has to be decided, but it cannot be decided from a machine that will not reproduce the failure.
+
+**One counter in those logs means nothing and should not be quoted.** Market-data finished R4 with
+`droppedL1=1,548,468 droppedL2=1,611,249 droppedL3=2,367,241`. The sweep attaches no depth
+subscriber, so every feed offer returns `NOT_CONNECTED` and is counted as a drop. `gaps=0 missed=0
+foreignShard=0` are the counters that mean something there, and they were clean.
+
+**Then the attribution, on an idle machine.** `run-attribution.sh` took the same `SECURITIES` knob,
+and three runs (A1–A3 in `Measurements.md`) turned R2–R4's shape into a cause. A1 re-baselined one
+security at 100k/s on a quiet machine: 38.1 µs round trip against the 55 µs in §2c, same 2% share, so
+the earlier figure was a loaded machine and not a different system. A2 spread the *same* 100k/s over
+ten books: a whole new order went 0.46 µs → 0.50 µs and the round trip 38.1 → 39.4 µs. **Fan-out costs
+8% of an order and nothing that matters.** A3 then raised the rate 2.5x to 250k/s aggregate, and this
+is the run that settles it: the engine got **faster** per order, 0.38 µs, because a busier poll
+amortises better — while the round trip grew to 61.2 µs and the gateway-plus-engine share fell to
+**0.9%**. Every microsecond the higher rate added landed outside the instrumented processes. A fixed
+cost does not grow with arrival rate, so something in the shared path saturates, and it is not
+matching.
+
+**Then the RAM disk, which eliminated a suspect and caught a wrong number.** Both scripts took a
+`CLUSTER_HOST` knob — `--dir` places the archive and consensus log, `--aeron-dir` places the media
+driver's buffers, so pointing the first at a RAM disk moves the durable writes and only those. A 4 GB
+**APFS** RAM disk, not the default HFS+, so the filesystem was not a second variable.
+
+The first comparison was A3 against A4 at 250k/s and it found 2.6% — the right answer reached
+invalidly, because 250k/s is a rate the shard serves comfortably and storage was never under pressure
+there. The experiment that decides it is a *throughput* comparison at the knee, and the first attempt
+at that one was worse: against R4's numbers the RAM disk appeared to take 350k/s from a saturated
+57.5 ms to 701 µs, an 82x win. **It was the browser.** R4 was taken with IntelliJ and Firefox open; an
+SSD sweep run the same hour, idle, did 350k/s in 392 µs. The RAM disk had done nothing.
+
+So two things came out of it. **The archive write is not the ceiling**: R6 saturates at exactly the
+rate R5 does — both comfortable at 300k, both gone at 400k — and the sub-knee figures are inside each
+other's noise. Put the durable writes in RAM and the shard stops in the same place. **And the knee
+itself was 15% low**: ~350k/s aggregate on an idle machine, comfortable at 300k, marginal at 350k
+(measured three times at 392 µs, 701 µs and 1.66 ms — an order of magnitude of spread, which is what
+the edge looks like), gone by 365k. R2–R4's 300k–350k had already reached four documents. The
+conclusion never changed — fan-out buys nothing, the target is over-stated, now by 2.9x rather than 3x
+— but the figure did, and `Measurements.md` now carries the R2–R4 analysis with a superseded note
+rather than a silent edit.
+
+**What the attribution cannot do, stated rather than glossed.** "Everything else" is Raft consensus,
+the archive write, the IPC hops and the poller wake-ups, and the subtraction lumps all four. Storage is now out by
+measurement, which leaves the single-threaded consensus module, the IPC hops and the poller wake-ups.
+The back-of-envelope that made storage an unlikely culprit in the first place — ~20 MB/s of log append
+at 250k/s, which no SSD notices — turned out to be right, which is pleasing and also exactly why it
+needed checking rather than asserting. What is left to try: Aeron's own driver and archive counters,
+exposed and read by nothing here; a gateway-stamped ingress timestamp read only under
+`engine.metrics`, which separates the hop from the consensus module and is a wire change because
+`NewOrderSingle` carries no timestamp; and the consensus module's idle strategy and
+`ingressFragmentLimit`, which are configuration — if the ceiling moves with them, this is tuning
+rather than architecture.
+
+**Then the counters, which found the ceiling.** `most counters` is new: it maps the driver's CnC file
+and reads what the driver, the archive and every cluster component already publish, with **no Aeron
+client**, so it can be pointed at a saturated shard without changing the answer. `--interval-ms`
+reports the rate of change, which is the mode that matters — a counter's value is rarely interesting
+and its slope usually is.
+
+One pass found it. At 400k/s against 300k/s every counter in the durable chain scaled **exactly 1.33x**
+with the offered rate — ingress publication, the log, `Cluster commit-pos`, `rec-pos`, archive write
+bytes, all 38.4 → 51.2 MB/s — so nothing there was capping in bytes. The archive's write *time* went
+*down*, 213 ms/s to 123 ms/s, while its byte rate rose by a third: a third independent statement that
+storage is not the constraint. The counter that exploded was sender flow-control back-pressure, ×89, on
+the cluster ingress channel — whose term length is `64k`, hard-coded in `ClusterCommand.kt`.
+
+**That was a decoy, and it is the most useful thing in this record.** Back-pressure on a channel is
+what a slow *consumer* looks like from the publisher's side, so a closing window is as likely to be
+symptom as cause. Tested: at `16m` the knee did not move at all — 350k/s either way — though p50 at
+350k/s improved 2.9x, from 6410 µs to 2226 µs. **256x more ingress buffer buys latency headroom at the
+edge and no capacity.** A counter that moves non-linearly names a place to look, not a cause.
+
+**What was the cause sat one layer down: `ThreadingMode.SHARED` on the media driver** — conductor,
+sender and receiver on one thread, moving ~190 MB/s of loopback UDP on a 14-core machine. A 2×2 over
+driver and archive threading (R7), `ack response` p50:
+
+| driver | archive | 350k/s | 450k/s | 500k/s | 550k/s | knee |
+| --- | --- | --- | --- | --- | --- | --- |
+| SHARED | SHARED | 6410 µs | saturated | — | — | ~350k/s |
+| SHARED | DEDICATED | 28.4 ms sat | saturated | — | — | <350k/s |
+| DEDICATED | SHARED | **79 µs** | **90.5 µs** | **118 µs** | 2029 µs | ~500–550k/s |
+| DEDICATED | DEDICATED | **74 µs** | **102 µs** | **114 µs** | 694 µs | ~550k/s |
+
+**1.6x the throughput and 81x the median at the edge, from one enum.** Per security ~55k/s rather than
+~35k/s, so the gap to Design.md §2's 100k/s narrows from 2.9x to 1.8x. **It was tuning, not
+architecture** — which is the opposite of what a 3x shortfall against a design target usually means,
+and worth remembering before anyone proposes sharding to fix a number.
+
+The second row is why the factorial was worth running rather than one cell. A `DEDICATED` archive
+behind a `SHARED` driver is *worse than both shared* — it takes a core from the component that needed
+it. Tested alone it would have read as "dedicated threads make things worse" and closed off the
+setting that mattered.
+
+**The default stays `SHARED`,** asked and answered 2026-09-25 and written into Design.md §7 "Driver
+threading". Three busy-spinning threads are wrong for a laptop already running five JVMs, and flipping
+the default would have silently re-based every figure in `Measurements.md`. `--driver-threading` and
+`e2e/run-sweep.sh`'s `DRIVER_THREADING` are the knob, and a benchmark or a production node sets it.
+The consequence, stated rather than buried: **every row in R1–R6 was taken 1.6x below what the shard
+can do.** No ratio drawn from them changes, each having been measured within one configuration.
+
+**Pointed at the next knee, the same tool came back empty — and that is a result.** `most counters`
+against a `DEDICATED` driver in genuine saturation (a 15M-order run, so the window is steady state and
+not a draining queue) shows every stage scaling *exactly* with the offered rate: ingress, log,
+`commit-pos`, `rec-pos`, archive bytes, egress and both IPC streams all ×1.20 for a ×1.20 rate rise, the
+archive's write time *halving* while its bytes rose a fifth, and every duty-cycle and error counter —
+driver conductor, sender, receiver, archive conductor, Cluster, Cluster container — at **zero**. Beside a
+478 ms median. Aeron reports queues, positions, stalls and errors; **a stage that is merely full
+produces none of those**, so a clean sheet narrows the answer to "not a buffer, a window, a disk or a
+stall" and no further. The counters also confirmed R7 from their own side: the back-pressure that
+exploded ×89 under `SHARED` is gone from the moving set entirely.
+
+**Then the CPU sample, and the mistake it nearly produced.** With the counters exhausted, the remaining
+shape is a thread at 100% of a core, which no counter can see — so per-process CPU. `engine`, `gateway`
+and `market-data` each read ~100%, and the first reading of that was "three single-threaded stages
+pinned at once", written up as the finding. **It was wrong.** All three use `BusySpinIdleStrategy` and
+read ~100% whether they are working or idling. The control that caught it was running the same sample
+under `SHARED`, where the same three read ~100% at a rate 1.7x lower — a number that cannot be
+saturation in both places. The one signal that *is* real: the cluster-host takes ~1.6 cores under
+`SHARED` and ~3.7 under `DEDICATED`, which is R7's conclusion arrived at by a second instrument.
+`Measurements.md` records the wrong reading beside the corrected one rather than only the answer,
+because the trap is reusable and the answer is not.
+
+**What is known about the engine comes from its own histograms.** 0.38 µs per order × 600k/s = 0.23 s
+per second, so **matching is ~23% of the engine's core** and roughly three quarters of that thread is the
+`ClusteredServiceContainer`'s Aeron work — polling the log, publishing egress, publishing book events.
+The engine process can be busy while the matching engine this project tuned is three-quarters idle.
+
+**And one item changed status because of it.** The gateway is a single thread carrying every order
+inbound and every report outbound — ~1.3M messages/sec at the measured ceiling. Whether or not it is
+*the* cap, it has the least headroom by construction and it is the only saturating stage that scales
+sideways **today**: gateways are stateless, `origQty` lives in the engine (§2h), and `run-restart.sh`
+§4c already exercises the multi-gateway case. The sole blocker is that `ShardEntry` carries one channel
+and `DirectoryClient` one `ShardRoute` per shard. That was filed as small tidying; it is now the
+cheapest throughput lever the system has, and `Status.md` promotes it accordingly.
+
+**What is open is a narrower question than when the session started**: what binds at ~550k/s, with the
+engine, storage, ingress buffering, the driver's threads and every Aeron counter eliminated. The next
+instruments are the loops' own metrics, or one run deliberately switched to a yielding idle strategy so
+that CPU% means something.
+
+**What the check is.** 463 tests pass (457 + 6). `most counters` has no test — it is a read-only
+diagnostic whose output was validated by the experiment it enabled, and that is worth saying out loud
+rather than implying. Two figures in this record were wrong before they were right and are kept both
+ways: R2–R4's knee (a loaded machine) and the "three stages pinned" reading of the CPU sample (busy-spin
+mistaken for saturation). Both were caught the same way — by running the control that should have been
+run first. The gap fix is unit-proven and mutation-checked and
+has **not** been seen against a live control plane — no e2e script runs one, which is itself worth
+noting. R2–R4 were taken on a machine that was **not idle**, with a browser on ~1.5 of 14 cores; that
+cannot explain a 3x shortfall but it can move a knee, so 300k/s is the shape and not the constant.
+A1–A4 and R5–R6 were taken after closing the IDE and the browser and stopping Docker, at load average
+1.4–3.4, which is why A1 exists at all: without it the 38.1 µs would have read as an improvement rather
+than as a quieter machine. The same discipline applied one step later is what caught the 82x that
+wasn't. **Every sweep in R2–R4 should be read as a loaded machine**, and the `idle` column in
+`Measurements.md` is not bookkeeping.
 
 ---
 

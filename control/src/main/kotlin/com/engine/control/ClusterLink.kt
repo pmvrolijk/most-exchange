@@ -1,18 +1,11 @@
 package com.engine.control
 
 import com.engine.reference.DirectoryClient
-import com.engine.reference.FeedSequenceTracker
-import com.engine.sbe.AuctionUncrossedDecoder
-import com.engine.sbe.MessageHeaderDecoder
-import com.engine.sbe.SessionChangedDecoder
-import com.engine.sbe.TradeExecutedDecoder
-import com.engine.sbe.VolatilityHaltedDecoder
 import io.aeron.Aeron
 import io.aeron.FragmentAssembler
 import io.aeron.Publication
 import jakarta.annotation.PostConstruct
 import jakarta.annotation.PreDestroy
-import org.agrona.DirectBuffer
 import org.agrona.concurrent.SleepingIdleStrategy
 import org.agrona.concurrent.UnsafeBuffer
 import org.slf4j.LoggerFactory
@@ -82,7 +75,9 @@ class ClusterLink(
     }
 
     private val directoryClient = DirectoryClient()
-    private val sequences = FeedSequenceTracker()
+
+    /** L3 into [state], and the gap count. Testable on its own; see [BookEventReader]. */
+    private val events = BookEventReader(state)
     private val publications = ConcurrentHashMap<Int, Publication>()
 
     private var aeron: Aeron? = null
@@ -223,7 +218,7 @@ class ClusterLink(
 
     private fun poll(link: Aeron) {
         val directory = link.addSubscription(discoveryChannel, discoveryStreamId)
-        val events = link.addSubscription(l3Channel, l3StreamId)
+        val l3Events = link.addSubscription(l3Channel, l3StreamId)
         // L2 for the increments and the recovery stream for the images that make them applicable.
         // Subscribing to one without the other gives a subscriber that can never synchronise.
         val depthUpdates = link.addSubscription(l2Channel, l2StreamId)
@@ -249,13 +244,8 @@ class ClusterLink(
             }
         }
 
-        val header = MessageHeaderDecoder()
-        val session = SessionChangedDecoder()
-        val halted = VolatilityHaltedDecoder()
-        val uncrossed = AuctionUncrossedDecoder()
-        val traded = TradeExecutedDecoder()
         val eventHandler = FragmentAssembler { buffer, offset, length, _ ->
-            onBookEvent(buffer, offset, length, header, session, halted, uncrossed, traded)
+            events.onBookEvent(buffer, offset, length)
         }
 
         val idle = SleepingIdleStrategy(POLL_IDLE.toNanos())
@@ -264,7 +254,7 @@ class ClusterLink(
         var nextImage = System.currentTimeMillis() + depthPublishMs
         while (!Thread.currentThread().isInterrupted) {
             var work = directory.poll(directoryHandler, FRAGMENT_LIMIT)
-            work += events.poll(eventHandler, FRAGMENT_LIMIT)
+            work += l3Events.poll(eventHandler, FRAGMENT_LIMIT)
             work += depthUpdates.poll(depthHandler, DEPTH_FRAGMENT_LIMIT)
             work += snapshots.poll(depthHandler, DEPTH_FRAGMENT_LIMIT)
             work += topOfBook.poll(depthHandler, FRAGMENT_LIMIT)
@@ -278,77 +268,6 @@ class ClusterLink(
             }
             idle.idle(work)
         }
-    }
-
-    /**
-     * L3 is the engine's own book events forwarded verbatim, which is why the control plane
-     * subscribes to it rather than to L1 or L2: a volatility halt appears **only** here. A
-     * dashboard watching depth would never learn that a security broke.
-     */
-    @Suppress("LongParameterList")
-    private fun onBookEvent(
-        buffer: DirectBuffer,
-        offset: Int,
-        length: Int,
-        header: MessageHeaderDecoder,
-        session: SessionChangedDecoder,
-        halted: VolatilityHaltedDecoder,
-        uncrossed: AuctionUncrossedDecoder,
-        traded: TradeExecutedDecoder,
-    ) {
-        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
-        header.wrap(buffer, offset)
-        val body = offset + MessageHeaderDecoder.ENCODED_LENGTH
-        val blockLength = header.blockLength()
-        val version = header.version()
-
-        when (header.templateId()) {
-            SessionChangedDecoder.TEMPLATE_ID -> {
-                session.wrap(buffer, body, blockLength, version)
-                accept(session.shardId(), session.seqNum())
-                state.onSessionChanged(session.securityId(), session.shardId(), session.phase().name)
-            }
-
-            VolatilityHaltedDecoder.TEMPLATE_ID -> {
-                halted.wrap(buffer, body, blockLength, version)
-                accept(halted.shardId(), halted.seqNum())
-                state.onVolatilityHalted(
-                    securityId = halted.securityId(),
-                    shardId = halted.shardId(),
-                    collarReference = halted.collarReference(),
-                    attemptedPrice = halted.attemptedPrice(),
-                    breachedBound = halted.breachedBound(),
-                    aggressorSide = halted.aggressorSide().name,
-                )
-            }
-
-            AuctionUncrossedDecoder.TEMPLATE_ID -> {
-                uncrossed.wrap(buffer, body, blockLength, version)
-                accept(uncrossed.shardId(), uncrossed.seqNum())
-                state.onAuctionUncrossed(
-                    uncrossed.securityId(), uncrossed.shardId(),
-                    uncrossed.uncrossPrice(), uncrossed.executedQty(),
-                )
-            }
-
-            TradeExecutedDecoder.TEMPLATE_ID -> {
-                traded.wrap(buffer, body, blockLength, version)
-                accept(traded.shardId(), traded.seqNum())
-                state.onTrade(traded.securityId(), traded.shardId(), traded.price(), traded.qty())
-            }
-
-            // Order add/reduce/remove are the rest of L3. Depth is market-data's job, not the
-            // control plane's, and shadowing a book here would be a second implementation of it.
-            else -> Unit
-        }
-    }
-
-    /**
-     * Sequences are namespaced per shard — each numbers from 1 independently — so a shared feed has
-     * to be tracked per shard or every interleaved message reads as a gap.
-     */
-    private fun accept(shardId: Int, seqNum: Long) {
-        state.recordEvent(sequences.accept(shardId, seqNum))
     }
 
     private companion object {

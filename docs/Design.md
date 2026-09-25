@@ -271,6 +271,94 @@ lookup cannot be measured with a 10 ns clock.
 Read all of it as one security on one node, and remember the tail is a JVM on Serial GC: the p99.9
 of 10.96 µs and the millisecond maxima are collection pauses, not matching.
 
+#### Measured at full fan-out
+
+The budget above is per order and it holds. The *aggregate* does not. Ten securities on one shard,
+driven together (runs R2–R6 in [`Measurements.md`](Measurements.md)), put the shard's ceiling at
+**~350k orders/sec aggregate** — comfortable at 300k, marginal at 350k, gone by 365k. That is about
+**35k/s/security**, not the 100k/s this section targets, so **the 1M orders/sec/shard figure above is
+over-stated by roughly 2.9x on the measured path.**
+
+The informative part is that this is the *same aggregate rate*, within measurement, at which **one**
+security broke on the same machine (200k–333k, R1 — itself taken on a loaded machine and so also
+low). Ten books bought no additional throughput. Per-order matching cost is
+what fan-out divides, and 0.42 µs of it is not the constraint; what fan-out does not divide is the
+shared path every order crosses whichever book it lands on — one cluster ingress, one consensus
+module, one archive write, one replicated log, one service thread. That path is the ceiling, and it
+is consistent with §7's attribution finding that the exchange's own code is 1.4% of a round trip.
+
+Above the knee the shard **queues rather than loses**: at 1M/s aggregate every order was still
+answered and nothing was rejected or dropped, with a 462 ms median. A rate above the knee therefore
+reports an *offer* rate, not a sustained throughput, and its latency is a draining queue rather than
+a round trip — `e2e/run-sweep.sh` marks such a row `SATURATED` so it cannot be quoted as one.
+
+What this changes for the design: **the per-shard order budget is a shared-path budget, not a
+matching budget**, and 10 securities per shard is a memory and fan-out limit rather than a throughput
+one.
+
+Attribution runs A1–A3 in [`Measurements.md`](Measurements.md) confirm this directly rather than by
+inference. Spreading the same 100k/s over ten books instead of one costs **8%** of a whole new order
+(0.46 µs → 0.50 µs, the cache pressure of ten ladders and ten pools) and 1.3 µs of a round trip, so
+fan-out is close to free. At 2.5x the rate the engine gets *faster* per order — 0.38 µs, better
+amortisation per poll — while the round trip grows from 39.4 µs to 61.2 µs, and **the whole of that
+increase is outside the gateway and the engine**, whose combined share falls to 0.9%. A fixed cost does
+not grow with arrival rate: something in the shared path saturates.
+
+**The ceiling is the media driver's threading mode.** The Aeron counters named it and a 2×2
+established it (R7). At 400k/s aggregate the whole durable chain — ingress publication, the log,
+`Cluster commit-pos`, `rec-pos`, archive write bytes — scaled exactly 1.33x with the offered rate, so
+none of it was capping; the counter that exploded was sender flow-control back-pressure, ×89. That
+pointed at the cluster ingress channel's `64k` term length, which turned out to be a **symptom**: at
+`16m` the knee did not move, though p50 at 350k/s improved 2.9x. What moved the knee was giving the
+driver its own conductor, sender and receiver threads instead of `ThreadingMode.SHARED`:
+
+| driver threading | knee (10 securities, aggregate) | p50 at 350k/s |
+| --- | --- | --- |
+| `SHARED` (the default) | ~350k/s | 6410 µs |
+| `DEDICATED` | **~550k/s** | **79 µs** |
+
+1.6x the throughput and 81x the median at the edge, from configuration. Per security that is ~55k/s
+rather than ~35k/s, so the shortfall against this section's 100k/s target narrows to **1.8x**. The
+archive's threading mode contributes nothing and is actively harmful on its own — a `DEDICATED` archive
+behind a `SHARED` driver is *worse* than both shared, because it takes a core from the component that
+needed it.
+
+**`SHARED` remains the default** (§7, "Driver threading"), so every figure in this document was taken
+1.6x below the shard's capability. That invalidates none of the ratios drawn from them, each being
+measured within one configuration.
+
+**What binds at ~550k/s is not attributed, and the counters cannot say.** `most counters` against a
+`DEDICATED` driver in genuine saturation comes back clean (C1 in Measurements.md): every stage — ingress,
+log, `commit-pos`, `rec-pos`, archive bytes, egress, both IPC streams — scales *exactly* with the offered
+rate, the archive's write time halves, and every duty-cycle and error counter reads zero. Aeron reports
+queues, positions and stalls; a stage that is merely **full** breaches none of them.
+
+Per-process CPU cannot finish the job either, because `engine`, `gateway` and `market-data` all use
+`BusySpinIdleStrategy` and therefore read ~100% of a core whether working or idling — the same reading
+appears under `SHARED` at a rate 1.7x lower (C2). The one real signal there confirms the section above
+from a second instrument: the cluster-host takes ~1.6 cores under `SHARED` and ~3.7 under `DEDICATED`.
+
+What *is* known: matching is **~23% of the engine's core** at 600k/s (0.38 µs × 600k), so the rest of
+that thread is the `ClusteredServiceContainer`'s Aeron work rather than matching. Measuring the three
+busy-spinning loops needs their own in-process metrics or a run with a yielding idle strategy, not a
+counter. And the gateway is the stage with the least headroom by construction — one thread for 600k
+orders inbound and ~1.3M reports outbound — and the only one that **scales sideways today**, which
+promotes open issue 6 (the directory advertising several gateways) from tidying to the cheapest
+throughput lever available.
+
+**The archive write is not the ceiling.** That experiment has been run: with the consensus log and
+archive on a RAM disk and the media-driver buffers left on the SSD, the round trip moves 2.6% at the
+median (A4) and **the knee does not move at all** — R6 saturates at exactly the rate R5 does, both
+comfortable at 300k and both gone at 400k. Put the durable writes in RAM and the shard stops at the
+same place, so durability is not what caps the rate.
+
+**Which shared stage does is still open.** What remains inside "everything else" is the
+single-threaded consensus module, the IPC hops and the poller wake-ups. A gateway-stamped ingress
+timestamp, read by the engine only under `engine.metrics`, would measure gateway-offer-to-engine-entry
+directly and separate the hop from the consensus module; that is a wire change, since
+`NewOrderSingle` carries no timestamp. Aeron's own driver and archive counters are exposed and read by
+nothing here, and are the cheaper next look.
+
 ### Memory Footprint (per shard)
 
 | Structure | Size |
@@ -2230,6 +2318,26 @@ Both attach to the same Aeron directory. The engine binary starts only the servi
 driver is not already running it reports that and exits rather than stack-tracing a
 `DriverTimeoutException`.
 
+#### Driver threading
+
+**The media driver's threading mode is the shard's throughput ceiling, and it is configuration.**
+`ThreadingMode.SHARED` puts the driver's conductor, sender and receiver on one thread; at ten
+securities that thread moves ~190 MB/s of loopback UDP and caps the shard at ~350k orders/sec
+aggregate. `DEDICATED` gives each its own thread and moves the knee to ~550k/s while cutting p50 at
+350k/s from 6410 µs to 79 µs (§2, "Measured at full fan-out"; Measurements.md R7).
+
+**`most cluster` nevertheless defaults to `SHARED`**, decided 2026-09-25. `DEDICATED` busy-spins three
+threads, which is the wrong default on a developer machine already running five JVMs and in an e2e run
+that cares about correctness rather than rate; and making it the default would have silently changed
+every figure in `Measurements.md`. The knob is `--driver-threading SHARED|SHARED_NETWORK|DEDICATED`,
+mirrored by `DRIVER_THREADING` in `e2e/run-sweep.sh`. **A benchmark or a production deployment sets
+`DEDICATED`**; anything quoting a rate states which mode it used, because the two differ by 1.6x.
+
+`--archive-threading` exists alongside it and should be left `SHARED`: measured on its own it is
+actively harmful, because a dedicated archive thread behind a shared driver thread takes a core from
+the component that needed it. `SHARED_NETWORK` — conductor alone, sender and receiver shared — is
+untested here and is not assumed to sit between the two.
+
 ### Market Data Process
 
 Consumes the book event stream and maintains a **`DepthBook`** per security: price-aggregated
@@ -2605,7 +2713,40 @@ It found three defects that unit tests could not:
   several gateways cannot advertise them all. Nothing about the gateways themselves prevents it —
   they hold no state and each needs only its own client endpoints — so the interim answer is a
   virtual address in front of the gateway tier, and the real one is a wire change nobody has needed
-  yet.
+  yet. **Somebody needs it now, for throughput rather than topology:** the gateway is a single thread
+  carrying every order inbound and every report outbound (~1.3M messages/sec at the measured ceiling),
+  and it is the only saturating stage that scales sideways without a redesign (§2, "Measured at full
+  fan-out"; Measurements.md C1–C2).
 * **`SecurityDefinition` distribution:** the Market Data Process currently learns the reference
   prices only implicitly, from trades. If downstream needs the collars or tick size, a corresponding
   book event is required.
+* ~~**The aggregate throughput has never been measured.**~~ **Measured.** Ten securities on one
+  shard, runs R2–R4 in [`Measurements.md`](Measurements.md), and the answer is not the one §2
+  claimed: the ceiling is **~350k orders/sec aggregate** (R5; R2–R4 read it 15% low on a loaded
+  machine), the same aggregate one book reached, so fan-out buys no throughput and the 1M/s/shard
+  target is over-stated by about 2.9x (§2, "Measured at full fan-out"). Attribution runs A1–A3 then established that the engine is not the ceiling —
+  fan-out costs 8% of a whole new order, and 100% of the latency added by raising the rate falls
+  outside the instrumented processes. **What is open in its place is which shared stage saturates.**
+  The RAM-disk experiment **eliminated the archive write** (A4, R6) and the Aeron counters then named
+  the cause: the media driver's `ThreadingMode.SHARED`. `DEDICATED` moves the knee ~350k → ~550k/s and
+  the median at 350k/s by 81x (R7, §7 "Driver threading"), which narrows the shortfall against the
+  100k/s/security target from 2.9x to **1.8x**. **What binds at ~550k/s is the part now open**: not
+  the engine, not storage, not the ingress term length (16m moved latency, not the knee), and **not
+  anything Aeron can see** — `most counters` against a `DEDICATED` driver in genuine saturation comes
+  back clean, every stage scaling exactly with the offered rate and every duty-cycle and error counter
+  at zero (C1). Per-process CPU cannot finish it either: `engine`, `gateway` and `market-data` all use
+  `BusySpinIdleStrategy` and read ~100% of a core whether working or idling, the same reading they give
+  under `SHARED` at a rate 1.7x lower (C2). What is left is their own in-process metrics, or a yielding
+  idle strategy for the duration of a measurement. Matching itself is ~23% of the engine's core at
+  600k/s, so most of that thread is the service container's Aeron work. A gateway-stamped ingress
+  timestamp read only under `engine.metrics` remains the definitive instrument and costs a wire change.
+  Then the §2 target is either restated or earned. Also still open: the same sweep on more than one
+  node. **The gateway is the stage with the least headroom by construction** — one thread for 600k
+  orders inbound and ~1.3M reports outbound — and the only one that scales sideways today, which makes
+  the directory item below the cheapest lever available rather than a tidying job.
+* ~~**The control plane over-reported feed gaps.**~~ **Fixed.** `ClusterLink` counted a sequence only
+  in the four book events it decodes while the engine numbers all seven, so every order event read as
+  a gap and a busy book reported continuous loss — which hid real loss rather than revealing it. The
+  decoding moved to `BookEventReader`, which consumes a sequence for every book event and none for a
+  book image, and `BookEventReaderTest` pins both halves against this section. The class exists
+  separately because the defect survived on a code path that needed a media driver to reach.

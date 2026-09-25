@@ -15,7 +15,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 same commit when the design changes.
 
 Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`,
-`control` — all implemented, 457 tests passing. See `docs/Status.md` §1 for what is real.
+`control` — all implemented, 463 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -27,7 +27,7 @@ Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gat
 ./gradlew installDist && ./e2e/run-e2e.sh          # every process, a real trade, a load run
 ./e2e/run-restart.sh                               # does the shard come back with its book?
 ./e2e/run-attribution.sh                           # where a round trip goes, by stage
-./e2e/run-sweep.sh                                 # how far one book goes, and where it stops
+SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and where it stops
 ./e2e/run-epsilon-soak.sh                          # steady-state allocation
 ```
 
@@ -249,8 +249,32 @@ here as well:
 - **Two things silently invalidate a run:** a `maxOrders` too small for the rate, and a price band
   outside the static collar or the ladder. Both show as reject counts in the summary.
 - **The `.hgrm` files from `run-attribution.sh` exist to be diffed.** Re-run it either side of a
-  change to the core.
-- Every measurement to date is **single-node** and **one security**. Say so when quoting one.
+  change to the core. Set `ATTRIBUTION_DIR` — a run wipes its directory, and the A1–A3 baselines in
+  `build/attr-*` are what a later run is compared against.
+- Every measurement to date is **single-node**. Say so when quoting one, and say how many
+  securities: the fan-out result is that **the shard's ceiling is aggregate, not per-security** —
+  ~350k/s across ten is the same aggregate one book reached, so Design.md §2's 1M/s/shard target is
+  over-stated by ~2.9x (Measurements.md R5), or ~1.8x with a `DEDICATED` driver (R7).
+- **State the driver threading mode with any rate.** `most cluster` defaults to `ThreadingMode.SHARED`,
+  which caps the shard ~1.6x below `--driver-threading DEDICATED` and costs 81x on p50 at the edge. A
+  benchmark or a production node sets `DEDICATED`; leave `--archive-threading` alone, since a dedicated
+  archive thread behind a shared driver thread is measurably worse than both shared. → Design.md §7
+- **`most counters` reads the driver's, archive's and cluster's counters with no Aeron client**, so it
+  is safe to point at a shard under load. It is what named the driver thread; use it before theorising
+  about where time goes. Sample **above** the knee with a run long enough that the window is steady
+  state, not a draining queue.
+- **A clean counter sheet does not mean nothing is saturated, and CPU% cannot fill the gap.** Aeron
+  reports queues, positions and stalls, so a stage that is merely *full* breaches nothing; and the
+  engine, gateway and market-data all use `BusySpinIdleStrategy`, so each reads ~100% of a core whether
+  working or idling. Get their utilisation from `engine.metrics` / `gateway.metrics`, or from a run
+  switched to a yielding strategy for that measurement only. → R§13
+- **Fill in `Measurements.md`'s `idle` column honestly, and never compare two configurations across
+  two machine states.** A sweep taken with a desktop open read the knee 15% low and put that figure
+  in four documents; the storage experiment that followed looked like an 82x win until an idle
+  baseline on the other medium was taken the same day, when it became nothing. → R§13
+- **`run-sweep.sh`'s `RATES` are aggregate across `SECURITIES`.** A rate the shard could not keep up
+  with is marked `SATURATED`: its `achieved` figure is an *offer* rate and its latency is a draining
+  queue, never a round trip. Do not quote one as a latency.
 - **Append a row to [`docs/Measurements.md`](docs/Measurements.md)** for any figure that reaches a
   document — it carries the machine, load, build and rate that make two numbers comparable.
 - **Run a discard pass before the first measured rate.** A cold JVM stalls the *generator*, and the
@@ -277,10 +301,19 @@ here as well:
 
 ## Performance budget
 
-100k orders/sec/security × 10 securities = a **1 µs aggregate budget per order**. The design
-estimates ~0.5 µs, so roughly 2x headroom at full fan-out. Cache misses dominate — that is why the
-order pool is cache-line packed. Design.md §2 has the stage-by-stage breakdown and the ~0.9 GB/shard
+100k orders/sec/security × 10 securities = a **1 µs aggregate budget per order**. The engine meets it
+— 0.42 µs measured for a whole new order — and cache misses dominate that figure, which is why the
+order pool is cache-line packed. Design.md §2 has the stage-by-stage breakdown and the ~1.0 GB/shard
 memory footprint, which makes huge pages mandatory, not optional.
+
+**The budget is met and the target is still missed.** The measured ten-security ceiling is
+**~350k/s aggregate** with the default driver threading and **~550k/s with `DEDICATED`**, not 1M/s, and
+it is the *same* aggregate one book reached. Attribution puts the gateway and engine at 0.9–2.0% of a
+round trip and shows the engine getting *faster* per order as the rate rises, so **the constraint is
+the shared path every order crosses** and not matching. **Do not treat a per-order improvement as a
+throughput improvement**; prove it with a sweep. Eliminated by measurement: the archive write (RAM
+disk) and the ingress term length (16m moved latency, not the knee). What binds at ~550k/s is open
+(Design.md §2, "Measured at full fan-out").
 
 ## Build and deployment
 

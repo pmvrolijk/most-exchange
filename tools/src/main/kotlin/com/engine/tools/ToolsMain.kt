@@ -20,6 +20,7 @@ private val USAGE = """
       most cluster [--dir DIR] [--fresh]
       most cluster snapshot [--ingress 0=HOST:PORT | --dir DIR]
       most cluster shutdown [--dir DIR]
+      most counters [--match REGEX] [--interval-ms N] [--samples N] [--all]
 
     Commands:
       securities  List the tradable universe and the shard serving each security.
@@ -40,6 +41,12 @@ private val USAGE = """
                   request is answered; with --dir through the local control toggle.
                   `cluster shutdown` snapshots and then stops the node, which SIGTERM
                   does not.
+      counters    Print the media driver's counters -- the driver's own, the archive's and
+                  every cluster component's -- read straight from the CnC file with no
+                  Aeron client, so it cannot perturb a shard under load. With
+                  --interval-ms it reports the rate of change, which is what identifies a
+                  saturating stage: a position counter that stops advancing while the one
+                  feeding it does not.
 
     Load options (the shard must already be defined and CONTINUOUS):
       --count N                Orders to send (default 1000000)
@@ -89,6 +96,7 @@ fun main(argv: Array<String>) {
             "purge" -> runPurge(args)
             "image" -> runImage(args)
             "cluster" -> runCluster(args)
+            "counters" -> runCounters(args)
             else -> {
                 System.err.println("most: unknown command '$command'")
                 println()

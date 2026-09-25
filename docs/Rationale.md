@@ -452,6 +452,68 @@ a `maxOrders` too small for the rate (everything becomes `BOOK_CAPACITY`) and a 
 the static collar or the ladder. Both show as reject counts in the summary, which is why the summary
 prints them. `docs/LocalTesting.md` §9 is the walkthrough.
 
+**A rate above the knee is not a slow round trip; it is a queue draining.** Above the shard's
+ceiling the generator empties its schedule into a buffer and the acknowledgements arrive later, so
+the sweep's `achieved` figure becomes an *offer* rate and its latency measures the drain. Both
+existing validity checks pass on such a row — no rejects, and the generator was perfectly on
+schedule, which is precisely why the queue formed elsewhere — so the sweep once printed `PASS` beside
+a 462 ms median that could have been quoted as a latency. `run-sweep.sh` therefore has a third check:
+a response p50 above `SATURATION_US` with pacing healthy marks the row `SATURATED`. It is not invalid
+— it is the measurement the sweep exists to find, and the knee is only visible because some row is on
+the far side of it — but it is never a round trip, and the summary names the highest rate the shard
+actually kept up with so the ceiling is a number rather than an inference.
+
+**Read the counters before theorising, and then distrust the first counter that moves.** `most counters`
+maps the driver's CnC file and reads what the driver, the archive and every cluster component already
+publish — no Aeron client, so it can be pointed at a saturated shard without changing the answer. It
+found the ceiling in one pass, and it also found a decoy. At 400k/s every counter in the durable chain
+scaled exactly 1.33x with the offered rate; the one that exploded was sender flow-control
+back-pressure, ×89, on the cluster ingress channel whose term length is `64k`. That looked like the
+answer and was not: at `16m` the knee did not move at all. Back-pressure on a channel is what a slow
+*consumer* looks like from the publisher's side, so a saturated window is as likely to be the symptom
+as the cause, and the only way to tell is to change it and re-measure. What was the cause sat one layer
+down — the media driver's `ThreadingMode.SHARED`, one thread for conductor, sender and receiver moving
+190 MB/s of loopback UDP. **A counter that moves non-linearly names a place to look, not a cause.**
+
+**A counter cannot see a full thread, and `ps` cannot see a busy-spinning one.** Pointed at the next
+knee, `most counters` came back clean: every stage scaling exactly with the offered rate, the archive's
+write time halving, every duty-cycle and error counter at zero — beside a 478 ms median. Aeron reports
+queues, positions, stalls and errors, and a stage that is merely *full* produces none of those, so a
+clean sheet narrows the answer to "not a buffer, a window, a disk or a stall" and no further. The
+obvious next instrument misleads in the opposite direction: `engine`, `gateway` and `market-data` all
+use `BusySpinIdleStrategy`, so each reads ~100% of a core whether it is working or idling, and the first
+reading of that sample wrongly concluded "three stages pinned". The control that caught it was running
+the same sample under `SHARED`, where the same three read ~100% at a rate 1.7x lower. **Utilisation of a
+busy-spinning loop has to come from the loop's own metrics** — which the engine and gateway already
+publish — or from a run deliberately switched to a yielding strategy for the measurement. The
+corollary: a CPU sample of this system needs a second configuration to compare against before any figure
+in it means anything.
+
+**Measure the factorial, not one cell of it.** Dedicating the archive's thread *helps nothing and hurts
+on its own*: with the driver still `SHARED`, a `DEDICATED` archive was worse than both shared — 28.4 ms
+against 6410 µs at 350k/s — because it takes a core from the component that needed it. Had that been
+tested as a single change it would have read as "dedicated threads make things worse" and closed off
+the setting that actually mattered.
+
+**A storage experiment needs a same-day baseline on the other medium, and a rate at the knee.** The
+question "is the archive write the ceiling?" was first asked by moving the consensus log and archive to
+a RAM disk and comparing the *median round trip* at a rate the shard was comfortably serving. That
+found 2.6% and would have answered "no" from a rate at which storage was never stressed — the right
+answer, reached invalidly. Compared instead against a sweep taken days-of-desktop earlier, the same
+RAM disk appeared to move the knee by 82x at 350k/s, which was entirely the browser that had been
+closed in between. What settled it was a *throughput* comparison at and above the knee against an
+SSD baseline taken the same hour: the knee did not move at all, so storage is out. Two rules come out
+of that, and both are cheap: compare configurations only at the rate where the resource is actually
+under pressure, and take both sides of the comparison under the same load on the same day.
+`run-sweep.sh` and `run-attribution.sh` therefore both take `CLUSTER_HOST`, which moves the durable
+writes without moving the Aeron buffers, so the two runs differ in one variable and not two.
+
+**`RATES` are aggregate across `SECURITIES`.** The alternative — a per-security rate multiplied by the
+count — would make a one-book sweep and a ten-book sweep incomparable, and comparing them is the
+entire finding: the ten-security knee (~350k/s) is the *same aggregate* as the one-security knee
+(200k–333k) on the same machine, which is what identifies the ceiling as the shared path rather than
+the books. A per-security reading would have hidden that behind a factor of ten.
+
 ---
 
 ## 14. Warnings are errors

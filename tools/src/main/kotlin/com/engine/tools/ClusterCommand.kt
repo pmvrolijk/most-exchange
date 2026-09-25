@@ -48,6 +48,16 @@ private fun runClusterHost(args: Args) {
     val aeronDir = args.optional("aeron-dir") ?: "$base/driver"
     val archiveDir = args.optional("archive-dir") ?: "$base/archive"
     val clusterDir = args.optional("cluster-dir") ?: "$base/cluster"
+    val ingressTermLength = args.optional("ingress-term-length") ?: "64k"
+    // SHARED puts the driver's conductor, sender and receiver on one thread, which is right for a
+    // developer laptop running five JVMs and wrong if that thread is what caps the shard. Both are
+    // measurable; neither is assumed.
+    val driverThreading = ThreadingMode.valueOf(
+        (args.optional("driver-threading") ?: "SHARED").uppercase(),
+    )
+    val archiveThreading = ArchiveThreadingMode.valueOf(
+        (args.optional("archive-threading") ?: "SHARED").uppercase(),
+    )
     val host = args.optional("host") ?: "localhost"
 
     // Persist by default. The recorded log and the snapshots taken against it *are* the shard's
@@ -88,6 +98,7 @@ private fun runClusterHost(args: Args) {
     }
 
     println("cluster: aeronDir=$aeronDir archive=$archiveDir cluster=$clusterDir")
+    println("cluster: ingress term length=$ingressTermLength driver=$driverThreading archive=$archiveThreading")
     println(
         if (registry == null) "cluster: no participant registry (pass --participants to authenticate gateways)"
         else "cluster: participants=$registryFile fingerprint=${registry.fingerprint()} " +
@@ -102,7 +113,7 @@ private fun runClusterHost(args: Args) {
 
     val driverContext = MediaDriver.Context()
         .aeronDirectoryName(aeronDir)
-        .threadingMode(ThreadingMode.SHARED)
+        .threadingMode(driverThreading)
         .dirDeleteOnStart(true)
         .dirDeleteOnShutdown(true)
         .errorHandler { it.printStackTrace() }
@@ -113,7 +124,7 @@ private fun runClusterHost(args: Args) {
         .controlChannel("aeron:udp?endpoint=$host:8010")
         .replicationChannel("aeron:udp?endpoint=$host:0")
         .recordingEventsEnabled(false)
-        .threadingMode(ArchiveThreadingMode.SHARED)
+        .threadingMode(archiveThreading)
         .deleteArchiveOnStart(fresh)
         .errorHandler { it.printStackTrace() }
 
@@ -122,7 +133,11 @@ private fun runClusterHost(args: Args) {
         .clusterDir(File(clusterDir))
         .clusterMemberId(0)
         .clusterMembers(members)
-        .ingressChannel("aeron:udp?term-length=64k")
+        // The ingress term length caps how far the gateway's publication may run ahead of the
+        // consensus module's ingress subscription, so it bounds how much of a hiccup the shard can
+        // absorb before the sender is flow-controlled. 64k is small; whether it is the shard's
+        // throughput ceiling is measured with `most counters` and a sweep, not assumed.
+        .ingressChannel("aeron:udp?term-length=$ingressTermLength")
         .replicationChannel("aeron:udp?endpoint=$host:0")
         .deleteDirOnStart(fresh)
         .errorHandler { it.printStackTrace() }

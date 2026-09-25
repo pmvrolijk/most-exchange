@@ -56,6 +56,6 @@ class Args(argv: Array<String>, booleanFlags: Set<String> = BOOLEAN_FLAGS) {
             ?: throw IllegalArgumentException("--$name must be a number, got '${values[name]}'")
 
     companion object {
-        val BOOLEAN_FLAGS = setOf("verbose", "help", "fresh", "keep")
+        val BOOLEAN_FLAGS = setOf("verbose", "help", "fresh", "keep", "all")
     }
 }

@@ -17,6 +17,17 @@
 #   DELAY_US   microseconds between sends    (default 10 => 100k/s)
 #   MAX_ORDERS book capacity per security    (default 1,000,000)
 #   STAGES     split a new order into admit/match/settle (default true)
+#   SECURITIES how many securities to drive  (default 1, max 10)
+#   CLUSTER_HOST where the consensus log and archive live (default $RUN/cluster-host)
+#
+# CLUSTER_HOST is separate from the Aeron directory on purpose. `--dir` places the archive and the
+# consensus log; `--aeron-dir` places the media driver's buffers, and it is left alone. Pointing
+# CLUSTER_HOST at a RAM disk therefore moves the durable writes and nothing else, which is the one
+# experiment that separates the archive write from consensus inside "everything else" below.
+#
+# DELAY_US is the gap between sends for the run as a whole, so the rate it implies is the
+# **aggregate** across SECURITIES -- the same reading run-sweep.sh uses, and the only one that lets
+# a one-book attribution be diffed against a fan-out one.
 set -uo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -28,6 +39,8 @@ ORDERS="${ORDERS:-2000000}"
 DELAY_US="${DELAY_US:-10}"
 MAX_ORDERS="${MAX_ORDERS:-1000000}"
 STAGES="${STAGES:-true}"
+SECURITIES="${SECURITIES:-1}"
+CLUSTER_HOST="${CLUSTER_HOST:-$RUN/cluster-host}"
 
 MOST="${MOST:-$ROOT/tools/build/install/most/bin/most}"
 ENGINE="${ENGINE:-$ROOT/engine/build/install/engine/bin/engine}"
@@ -36,6 +49,9 @@ MARKETDATA="${MARKETDATA:-$ROOT/market-data/build/install/market-data/bin/market
 DISCOVERY="${DISCOVERY:-$ROOT/discovery/build/install/discovery/bin/discovery}"
 
 rm -rf "$RUN"; mkdir -p "$LOGS"
+# Only what this run owns: CLUSTER_HOST may be a mount point that must not be removed.
+rm -rf "${CLUSTER_HOST:?}/archive" "${CLUSTER_HOST:?}/cluster" "${CLUSTER_HOST:?}/driver"
+mkdir -p "$CLUSTER_HOST"
 
 PIDS=()
 cleanup() {
@@ -62,25 +78,46 @@ stop_and_wait() { # stop_and_wait <pid>
   return 1
 }
 
-# One security: the point is to attribute one order's path, and a second book only adds noise.
-cat > "$RUN/securities.properties" <<EOF
-shard.id=0
-shard.securities=1
+# One security attributes one order's path with nothing else in the way, and is the baseline every
+# earlier attribution run used. Ten attributes the same path at the fan-out the design claims: the
+# per-order stages are what fan-out divides, "everything else" is what it does not, and running both
+# is how you find out which one the ceiling is in. Same table, ISINs and geometry as run-sweep.sh.
+SYMBOLS_ALL=(AAPL MSFT GOOGL AMZN NVDA META TSLA JPM JNJ XOM)
+ISINS_ALL=(US0378331005 US5949181045 US02079K3059 US0231351067 US67066G1040
+           US30303M1027 US88160R1014 US46625H1005 US4781601046 US30231G1022)
+NAMES_ALL=("Apple Inc." "Microsoft Corp." "Alphabet Inc." "Amazon.com Inc." "NVIDIA Corp."
+           "Meta Platforms Inc." "Tesla Inc." "JPMorgan Chase" "Johnson & Johnson" "Exxon Mobil")
 
-security.1.symbol=AAPL
-security.1.isin=US0378331005
-security.1.name=Apple Inc.
-security.1.currency=USD
-security.1.priceFloor=0
-security.1.tickSize=1000000
-security.1.levelCount=32768
-security.1.maxOrders=$MAX_ORDERS
-EOF
+[ "$SECURITIES" -ge 1 ] && [ "$SECURITIES" -le "${#SYMBOLS_ALL[@]}" ] \
+  || fail "SECURITIES must be between 1 and ${#SYMBOLS_ALL[@]}, got $SECURITIES"
+
+# `shard.securities` is the comma-separated list of security **ids**, not a count: ids 1..N here.
+SYMBOLS=""
+IDS=""
+for i in $(seq 1 "$SECURITIES"); do IDS="${IDS:+$IDS,}$i"; done
+{
+  echo "shard.id=0"
+  echo "shard.securities=$IDS"
+  echo
+  for i in $(seq 1 "$SECURITIES"); do
+    idx=$((i - 1))
+    echo "security.$i.symbol=${SYMBOLS_ALL[$idx]}"
+    echo "security.$i.isin=${ISINS_ALL[$idx]}"
+    echo "security.$i.name=${NAMES_ALL[$idx]}"
+    echo "security.$i.currency=USD"
+    echo "security.$i.priceFloor=0"
+    echo "security.$i.tickSize=1000000"
+    echo "security.$i.levelCount=32768"
+    echo "security.$i.maxOrders=$MAX_ORDERS"
+    echo
+    SYMBOLS="${SYMBOLS:+$SYMBOLS,}${SYMBOLS_ALL[$idx]}"
+  done
+} > "$RUN/securities.properties"
 
 cat > "$RUN/engine.properties" <<EOF
 engine.securitiesFile=$RUN/securities.properties
 engine.aeronDir=$AERON_DIR
-engine.clusterDir=$RUN/cluster-host/cluster
+engine.clusterDir=$CLUSTER_HOST/cluster
 engine.bookEvent.channel=aeron:ipc
 engine.bookEvent.streamId=12
 engine.metrics=true
@@ -135,8 +172,8 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
       --l1-channel aeron:ipc --l1-stream 31 --l2-channel aeron:ipc --l2-stream 32
       --snapshot-channel aeron:ipc --snapshot-stream 34"
 
-echo "== starting the shard ($ORDERS orders, ${DELAY_US}us apart, stages=$STAGES)"
-$MOST cluster --fresh --dir "$RUN/cluster-host" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
+echo "== starting the shard ($SECURITIES security(s), $ORDERS orders, ${DELAY_US}us apart, stages=$STAGES)"
+$MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 
@@ -156,13 +193,15 @@ $DISCOVERY "$RUN/discovery.properties" > "$LOGS/discovery.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/discovery.log" "discovery: started" 30 "discovery" || fail "discovery"
 
-$MOST define --symbol AAPL --reference 100.00 --static-collar 5000 --dynamic-collar 2000 $CONN \
-  > "$LOGS/define.log" 2>&1 || fail "define AAPL"
+for symbol in ${SYMBOLS//,/ }; do
+  $MOST define --symbol "$symbol" --reference 100.00 --static-collar 5000 --dynamic-collar 2000 \
+    $CONN >> "$LOGS/define.log" 2>&1 || fail "define $symbol"
+done
 $MOST session --phase continuous --shard 0 $CONN > "$LOGS/session.log" 2>&1 || fail "session"
 sleep 1
 
 echo "== driving the load"
-$MOST load --symbol AAPL --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+$MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
   --count "$ORDERS" --delay-us "$DELAY_US" --warmup 1000 --participant 20 --participants 4 \
   --clordid-base 100000 --drain-ms 20000 --histogram-file "$RUN/client-latency.hgrm" \
   $CONN > "$RUN/load.out" 2>&1 || fail "load"
@@ -209,9 +248,14 @@ awk -v c="$CLIENT" -v i="$IN" -v e="$ENG" -v o="$OUT" 'BEGIN {
   printf "  everything else          %8.1f us  (%.1f%%)\n", rest, 100 * rest / c
   printf "\n  \"Everything else\" is Raft consensus, the archive write, the IPC hops and the\n"
   printf "  poller wake-ups. It is not idle time: it is the cost of being a replicated log.\n"
+  printf "  It is also still a lump: this subtraction cannot say which of those four it is.\n"
 }'
 
 echo
 echo "  histograms: $RUN/{client,engine,gateway}-latency.hgrm"
+echo "  scope:      $SECURITIES security(s) ($SYMBOLS), ${DELAY_US}us between sends"
+echo "  log+archive on $(df -h "$CLUSTER_HOST" | tail -1 | awk '{print $1}') at $CLUSTER_HOST"
+echo "  aeron dir   on $(df -h "$AERON_DIR" | tail -1 | awk '{print $1}') at $AERON_DIR"
+echo "              => $((1000000 / DELAY_US))/s aggregate, $((1000000 / DELAY_US / SECURITIES))/s/security"
 echo
 echo "PASS -- the round trip is attributed."

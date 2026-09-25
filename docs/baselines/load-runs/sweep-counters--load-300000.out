@@ -1,0 +1,16 @@
+load: generating 6000000 orders for AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,JNJ,XOM (seed 42)
+load: sending 6000000 orders at 300,030/s (3 µs apart)
+
+load: AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,JNJ,XOM  6,000,000 orders in 20.00s -- 300,030/s achieved (target 300,030/s)
+  measured path  client -> gateway -> cluster consensus -> engine -> gateway -> client
+  band           99.90..100.10  qty 1..10  participants 20..23  warmup 50000
+  offers         ok=6,000,000  backpressure-retries=8  dropped=0
+  reports        13,039,696   new=5,999,992 trade=6,032,420 canceled=1,007,284 expired=0 rejected=0
+  fills          18,892,404 qty traded, 3,000,942 orders filled on arrival (50.0%)
+  unanswered     3 orders never saw a report
+  ignored        20,154 reports from outside this run
+  pacing         lateness n=5,950,000  p50=0.0 p90=0.1 p99=0.3 p99.9=1005.6 max=5759.0 (µs)
+  ack  response  n=5,949,997  p50=67.5 p90=367.6 p99=3393.5 p99.9=8151.0 max=12992.5 (µs)
+  ack  service   n=5,949,997  p50=67.4 p90=367.6 p99=3334.1 p99.9=7823.4 max=12984.3 (µs)
+  fill service   n=3,000,942  p50=69.5 p90=369.9 p99=3332.1 p99.9=7757.8 max=9789.4 (µs)
+  note: unanswered orders usually mean the gateway dropped them (its shutdown counters say which leg) or --drain-ms was too short

@@ -1,0 +1,15 @@
+load: generating 400000 orders for AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,JNJ,XOM (seed 42)
+load: sending 400000 orders at 400,000/s (2 µs apart)
+
+load: AAPL,MSFT,GOOGL,AMZN,NVDA,META,TSLA,JPM,JNJ,XOM  400,000 orders in 1.00s -- 399,992/s achieved (target 400,000/s)
+  measured path  client -> gateway -> cluster consensus -> engine -> gateway -> client
+  band           99.90..100.10  qty 1..10  participants 20..23  warmup 40000
+  offers         ok=400,000  backpressure-retries=0  dropped=0
+  reports        861,298   new=399,999 trade=394,045 canceled=67,254 expired=0 rejected=0
+  fills          1,234,063 qty traded, 181,386 orders filled on arrival (45.3%)
+  unanswered     0 orders never saw a report
+  ignored        9,245 reports from outside this run
+  pacing         lateness n=360,000  p50=0.0 p90=0.0 p99=0.3 p99.9=13.0 max=103.6 (µs)
+  ack  response  n=360,000  p50=76808.2 p90=117440.5 p99=126615.6 p99.9=127139.8 max=127270.9 (µs)
+  ack  service   n=360,000  p50=76808.2 p90=117440.5 p99=126615.6 p99.9=127139.8 max=127270.9 (µs)
+  fill service   n=181,386  p50=76742.7 p90=117375.0 p99=126615.6 p99.9=127074.3 max=127270.9 (µs)

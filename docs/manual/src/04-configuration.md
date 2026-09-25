@@ -298,8 +298,48 @@ otherwise.
 | `--members STRING` | single-node default | Aeron member string (3.6) |
 | `--participants FILE` | none | The participant registry to authenticate gateways against |
 | `--participants-reload-ms N` | `5000` | Registry poll interval; `0` disables |
+| `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's throughput ceiling** — see below |
+| `--archive-threading MODE` | `SHARED` | Archive threads: `SHARED` or `DEDICATED`. Leave it alone unless the cores are isolated |
+| `--ingress-term-length LEN` | `64k` | Cluster ingress term length, e.g. `16m`. Buys latency headroom at the edge, not capacity |
 | `--fresh` | off | **Delete the archive and cluster directories on start** |
 | `--keep` | on | Persist them. Contradicts `--fresh` |
+
+### Driver threading is the throughput ceiling
+
+`--driver-threading` is the single setting with the largest measured effect on what a shard can carry.
+`SHARED` puts the media driver's conductor, sender and receiver on **one** thread; at ten securities
+that thread moves ~190 MB/s of loopback traffic and is what caps the shard. Measured on a 14-core
+development machine, ten securities, aggregate rate across all of them:
+
+| `--driver-threading` | Sustained | p50 at 350,000/s |
+| --- | --- | --- |
+| `SHARED` (default) | ~350,000 orders/s | 6,410 µs |
+| `DEDICATED` | **~550,000 orders/s** | **79 µs** |
+
+1.6x the throughput and 81x the median at the edge. **The default is `SHARED` on purpose:**
+`DEDICATED` busy-spins three threads, which starves a development machine that is already running
+five JVMs, and it needs the isolated cores of 3.4 to be worth having. So:
+
+- **Development** — leave both defaults alone. 2.3 and the e2e scripts are correctness checks, not
+  capacity ones.
+- **Performance measurement and production** — `--driver-threading DEDICATED`, with the core
+  allocation of 3.4 in place.
+
+::: warning Do not dedicate the archive's threads on their own
+`--archive-threading DEDICATED` behind a `SHARED` driver is measurably **worse than both shared** —
+28.4 ms against 6,410 µs at 350,000/s, and saturated where the default was not — because it takes a
+core from the component that needed it. It belongs with dedicated driver threads and isolated cores,
+or not at all. `--ingress-term-length` is the same shape of trap: raising it from `64k` to `16m`
+improves p50 at the edge 2.9x and moves the sustainable rate **not at all**.
+:::
+
+::: note What "sustained" means here
+The figures above are the rate at which acknowledgements keep up. Above it the shard still accepts
+everything — nothing is rejected and nothing is dropped — and the latency becomes a queue that never
+drains: at 1,000,000 orders/s offered, every order was still answered, at a median of 462 ms. A rate
+above the knee therefore reports an *offer* rate and not a throughput, which is why `e2e/run-sweep.sh`
+marks such a row `SATURATED` (5.7).
+:::
 
 ::: warning The archive and cluster directories are the shard's only resumption point
 They persist by default and `--fresh` is how you ask to lose them. The **Aeron directory is

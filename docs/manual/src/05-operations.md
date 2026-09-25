@@ -396,12 +396,44 @@ Read it in this order:
 
 Run the generator on a separate machine, never on a cluster node.
 
+### What a shard actually carries
+
+`e2e/run-sweep.sh` drives a series of rates, validates each one before believing it, and prints a
+row block for the record. `SECURITIES=n` drives *n* securities, and **`RATES` is the aggregate across
+them** — `SECURITIES=10 RATES=1000000` is 100,000/s per security.
+
+Measured, single node, ten securities, development machine with the desktop closed:
+
+| `--driver-threading` | Sustained (aggregate) | Per security |
+| --- | --- | --- |
+| `SHARED` (default) | ~350,000 orders/s | ~35,000/s |
+| `DEDICATED` | ~550,000 orders/s | ~55,000/s |
+
+**Plan capacity against these numbers, not against the design target** of 100,000/s per security
+across ten. Two findings behind them are worth carrying into any capacity conversation:
+
+- **The ceiling is aggregate, not per security.** Ten books sustain the same *total* rate one book
+  does; fan-out costs 8% of the work of a single order and buys no throughput. A shard is one
+  thread's worth of shared path — one ingress, one consensus module, one archive, one log — and
+  adding securities divides it rather than multiplying it.
+- **Matching is not the constraint.** The engine's own whole-message p50 is 0.38–0.50 µs, about 23% of
+  its thread at the ceiling. The rest of that thread, and the ceiling, is the plumbing around it.
+
+::: warning A rate above the knee is a queue, not a latency
+Past the sustainable rate the shard still accepts everything — no rejects, no drops, every order
+answered — and the delay becomes a backlog that never drains. The `achieved` figure on such a run is
+the rate the *generator offered*, not one the shard sustained, and its p50 is the queue draining.
+`run-sweep.sh` marks the row `SATURATED` and names the highest rate the shard kept up with. Never
+quote a `SATURATED` row's latency.
+:::
+
 ::: note Attribution
 `e2e/run-attribution.sh` splits a round trip by stage and writes `.hgrm` histograms meant to be
-diffed across a change. On a development machine the gateway and engine own **0.8 µs of a 55 µs**
-round trip — 1.4% — and the engine's whole-message p50 is 0.42 µs. The number to watch after a change
-is the *share*, not the round trip: real network hops add to the denominator and dedicated cores
-subtract from it.
+diffed across a change. On an idle development machine the gateway and engine own **0.8 µs of a
+38 µs** round trip — 2.0%, falling to 0.9% as the rate rises — and the engine's whole-message p50 is
+0.46 µs at one security, 0.50 µs at ten. The number to watch after a change is the *share*, not the
+round trip: real network hops add to the denominator and dedicated cores subtract from it. It takes
+the same `SECURITIES` and `CLUSTER_HOST` knobs as the sweep.
 :::
 
 ## 5.8 Monitoring
@@ -450,10 +482,60 @@ should be. It is derived from L3 and from the discovery broadcast.
 }
 ```
 
+::: warning This capture predates the feed-gap fix — regenerate it
+`"feedGaps": 9543` against `"eventsSeen": 9552` is not a lossy feed, it is the defect that reading was
+taken with: the control plane counted a sequence only for the four book events it interprets, while
+the engine numbers **all seven**, so every order event it ignored read as a gap. On a busy book the
+two counters therefore tracked each other and real loss was invisible. Fixed; a healthy shard now
+reports `feedGaps` and `eventsMissed` at or near **zero** with `eventsSeen` climbing steadily. The
+transcript above is kept until it can be regenerated from a running stack rather than edited by hand.
+:::
+
+The three feed counters, once they mean what they say:
+
+| Field | Healthy | What a non-zero value means |
+| --- | --- | --- |
+| `eventsSeen` | climbing | Book events the control plane has read off L3 |
+| `feedGaps` | 0, or rare | Jumps forward in the sequence: the subscriber missed messages. Occasional under `MaxMulticastFlowControl` is by design; sustained is a real problem, and the fix is not changing flow control (6.6) |
+| `eventsMissed` | 0 | How many messages those gaps accounted for |
+
 `routingDrift` reports where the database and what discovery is actually broadcasting disagree.
 Commands route from the **database**, not the directory — the control plane is the authority on
 topology and a command must still be sendable when discovery is down — so where the two disagree,
 that is said out loud rather than one silently winning.
+
+### Reading Aeron's own counters
+
+Every Aeron component — the media driver, the archive and each cluster component — publishes counters
+into the driver's `cnc.dat`. `most counters` reads them **with no Aeron client**, so it is safe to
+point at a shard under load and cannot perturb what it is measuring.
+
+```sh
+most counters --aeron-dir /dev/shm/aeron-most            # a snapshot of everything non-zero
+most counters --aeron-dir … --interval-ms 4000 --samples 3   # rates of change, busiest first
+most counters --aeron-dir … --all --match 'luster|archive' # including the still ones, filtered
+```
+
+`--interval-ms` is the mode that finds things. A counter's value is rarely interesting; its slope
+usually is, and the shape to look for is **a position counter that stops advancing while the one
+feeding it does not**. Reach for this before theorising about where time goes — it is what identified
+the driver threading mode as the shard's ceiling (4.8).
+
+::: warning A clean counter sheet does not mean nothing is saturated
+Aeron reports queues, positions, duty-cycle breaches and errors. A stage that is simply **full**
+breaches none of them, so "every counter scaled with the offered rate and nothing exceeded a
+threshold" narrows an answer to *not a buffer, a window, a disk or a stall* and no further. Nor can
+`top` finish the job: the engine, gateway and market-data busy-spin and read ~100% of a core whether
+working or idling (3.4). The next instrument after the counters is those processes' own metrics.
+:::
+
+::: note A counter that moves non-linearly names a place to look, not a cause
+Sender flow-control back-pressure on the cluster ingress channel rose 89-fold at the knee, which
+looked conclusive and pointed at the ingress term length. Raising it 256-fold moved the sustainable
+rate not at all — back-pressure on a channel is what a slow *consumer* looks like from the
+publisher's side, so a closing window is as likely to be the symptom as the cause. Change it and
+re-measure before believing it.
+:::
 
 ### Who asked
 

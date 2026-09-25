@@ -4,8 +4,9 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2h),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated at the end of the session that fixed the control plane's feed-gap counting and
-measured the ten-security aggregate for the first time.
+Last updated at the end of the session that fixed the control plane's feed-gap counting, measured the
+ten-security aggregate for the first time, and found the shard's throughput ceiling in the media
+driver's threading mode — 1.6x behind one enum (Handover §2i).
 
 ---
 
@@ -15,7 +16,7 @@ measured the ten-security aggregate for the first time.
 | --- | --- |
 | Branch | **`master`** |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~22,700 lines — 13,300 main across 64 files, 9,500 test across 49 |
+| Kotlin | ~23,400 lines — 13,490 main across 65 files, 9,894 test across 52 |
 | Frontend | ~3,100 lines of TypeScript and Vue across 24 files, outside the Gradle build |
 | Tests | 463, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
@@ -25,10 +26,11 @@ measured the ten-security aggregate for the first time.
 | Admin SPA | [`../web/README.md`](../web/README.md) — Vue 3 + Vite, read and write, live books |
 | Local setup | [`LocalTesting.md`](LocalTesting.md) — §9 benchmarks, §9a attributes by stage |
 | Measurements | [`Measurements.md`](Measurements.md) — every figure with its machine, load and rate |
+| Baselines | [`baselines/`](baselines/) — the `.hgrm` histograms to diff a core change against |
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; still needs a runner |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
-| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/) |
+| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.8 and §5.7 carry the threading configuration and the measured capacity |
 
 ```sh
 ./gradlew clean build                        # 457 tests (control's need Docker)
@@ -53,9 +55,10 @@ that authors reference data and drives the market over REST, and a console that 
 - **Zero allocation is proven**, by three measurements that are each mutation-validated (§2b).
   `--gc=epsilon` is still off for want of a runner and an hours-long soak, not for want of a
   measured path — the pipeline that would run the assertion now exists.
-- **Latency is attributed.** The exchange's own code is **1.4%** of a client round trip; the rest is
-  consensus, the archive write and the wire. Design.md §2's 0.5 µs/order estimate holds at 0.42 µs
-  (§2c).
+- **Latency is attributed, and the ceiling is found.** The exchange's own code is **0.9–2.0%** of a
+  client round trip; the rest is consensus, the archive write and the wire, and the shard's throughput
+  ceiling is the media driver's threading mode — `--driver-threading DEDICATED` is worth 1.6x (§2i).
+  Design.md §2's 0.5 µs/order estimate holds at 0.38–0.50 µs (§2c, A1–A4).
 - **Gateways are stateless and disposable.** `origQty` lives in the engine, several gateways can
   serve one shard, and the participant registry is authored by the control plane and re-read while
   the nodes run (§2g, §2h).
@@ -216,19 +219,19 @@ In the order I would tackle them.
    every row in `Measurements.md` was taken 1.6x below what the shard can do.
 
    Whatever it says, Design.md §2's 100k/s/security target then either gets restated or gets earned.
-4. **Update [`OperatorManual.pdf`](OperatorManual.pdf) (built from [`manual/`](manual/)) for the
-   threading configuration and the measured ceilings.** Outstanding and explicitly asked for. The
-   manual predates all of R2–R7 and tells an operator nothing about the one setting that costs 1.6x of
-   throughput. It needs: a **dev versus perf/prod configuration** split — dev leaves
-   `ThreadingMode.SHARED` (the `most cluster` default, right for a laptop running five JVMs),
-   perf/prod sets `--driver-threading DEDICATED` and leaves `--archive-threading` alone because a
-   dedicated archive thread behind a shared driver thread is measurably *worse* than both shared; the
-   **measured capacity** an operator should expect (~350k/s aggregate over ten securities on the
-   default, ~550k/s with `DEDICATED`, against Design.md §2's 100k/s/security target — so plan capacity
-   on the measured figure, not the design one); **`most counters`** as the first diagnostic when a
-   shard is slow, with the warning that a non-linear counter names a place to look and not a cause;
-   and the `SATURATED` marker in `run-sweep.sh`, so nobody quotes a draining queue as a latency.
-   Cross-reference Design.md §7 "Driver threading" rather than restating it.
+4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
+   **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
+   §4.8 "Driver threading is the throughput ceiling" carries the dev-versus-perf/prod split and the
+   measured table; §3.4 gives production the launch line and keeps an honest `todo` for the idle
+   strategies, which are still constants; §5.7 "What a shard actually carries" states the capacity to
+   plan against and warns that a `SATURATED` row's latency is a draining queue; §5.8 "Reading Aeron's
+   own counters" documents `most counters` with both traps (a clean sheet is not innocence, and a
+   non-linear counter names a place to look); §6.1 gains it as a first move, §6.5 gains two rows for
+   the saturated case, and §6.9's capacity entry replaces the resolved threading one.
+   **Still outstanding there:** the `/api/status` transcript in §5.8 was captured on the pre-fix build
+   and shows `feedGaps` tracking `eventsSeen` — it is marked as such rather than hand-edited, because
+   the manual's own convention is that transcripts are regenerated from a running stack. Regenerate it
+   (and the screenshots, which are equally old) next time the dev stack is up.
 5. **Decide the archive retention policy** (open issue 5). Cheap to establish, expensive to
    discover — and still a housekeeping question rather than a performance one, since R6 showed the
    archive write is not the ceiling.
@@ -270,8 +273,9 @@ In the order I would tackle them.
 * `e2e/run-attribution.sh` says where a round trip went, and takes the same `SECURITIES` knob as the
   sweep (`--delay-us` sets the **aggregate** rate). Both scripts also take `CLUSTER_HOST`, which moves
   the consensus log and archive without moving the Aeron buffers — that is how R6 tested storage. The
-  `.hgrm` files exist to be diffed; A1–A4's are kept under `build/attr-*`, so set `ATTRIBUTION_DIR`
-  rather than letting a new run wipe them.
+  `.hgrm` files exist to be diffed, and A1–A4's are kept in [`baselines/`](baselines/) — outside
+  `build/`, so a `./gradlew clean` cannot take them. Set `ATTRIBUTION_DIR` on a new run and copy its
+  histograms in beside them.
 * `most counters [--match REGEX] [--interval-ms N]` reads the driver's, the archive's and every cluster
   component's Aeron counters out of the CnC file **with no Aeron client**, so it is safe against a
   shard under load. `--interval-ms` reports the rate of change, which is what finds a saturating stage.

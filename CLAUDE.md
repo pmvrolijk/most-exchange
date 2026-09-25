@@ -249,8 +249,8 @@ here as well:
 - **Two things silently invalidate a run:** a `maxOrders` too small for the rate, and a price band
   outside the static collar or the ladder. Both show as reject counts in the summary.
 - **The `.hgrm` files from `run-attribution.sh` exist to be diffed.** Re-run it either side of a
-  change to the core. Set `ATTRIBUTION_DIR` — a run wipes its directory, and the A1–A3 baselines in
-  `build/attr-*` are what a later run is compared against.
+  change to the core. Set `ATTRIBUTION_DIR` — a run wipes its directory — and compare against
+  `docs/baselines/`, which is where the A1–A4 histograms live so a `./gradlew clean` cannot take them.
 - Every measurement to date is **single-node**. Say so when quoting one, and say how many
   securities: the fan-out result is that **the shard's ceiling is aggregate, not per-security** —
   ~350k/s across ten is the same aggregate one book reached, so Design.md §2's 1M/s/shard target is

@@ -15,6 +15,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Auction, opening <span class="ref">1.6, <b>5.4</b></span></li>
 <li>Auction, uncollared <span class="ref">5.4</span></li>
 <li>Back-pressure, cluster ingress <span class="ref"><b>5.4</b>, 5.8</span></li>
+<li>Busy-spin idle strategy <span class="ref">3.4, 5.8</span></li>
 <li>Book capacity <span class="ref">4.2, 5.4, 6.5</span></li>
 <li>Book event stream <span class="ref">1.2, 3.2, 4.4, 4.6</span></li>
 <li>Book image <span class="ref"><b>5.3</b>, 6.6</span></li>
@@ -24,7 +25,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Conflation, depth images <span class="ref">2.8, 4.9</span></li>
 <li>Consensus module <span class="ref">1.2, 3.6, 4.8</span></li>
 <li>Coordinated omission <span class="ref">5.7</span></li>
-<li>Core isolation <span class="ref"><b>3.4</b></span></li>
+<li>Core isolation <span class="ref"><b>3.4</b>, 4.8</span></li>
 <li>CSRF <span class="ref">2.8, 5.8</span></li>
 <li>cumQty <span class="ref"><b>2.6</b>, 4.5, 6.5</span></li>
 </ul>
@@ -77,6 +78,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Release, immutable <span class="ref"><b>1.4</b>, 3.8, 4.11, 6.7</span></li>
 <li>Reference price, static and dynamic <span class="ref"><b>5.3</b>, 5.4, 6.4</span></li>
 <li>Routing drift <span class="ref">5.8</span></li>
+<li>Counters, Aeron <span class="ref"><b>5.8</b>, 6.1</span></li>
 <li>SBE <span class="ref"><b>1.3</b>, 6.7</span></li>
 <li>Scheduler, session <span class="ref"><b>5.2</b>, 3.9, 6.4</span></li>
 <li>Self-match prevention <span class="ref"><b>5.4</b></span></li>
@@ -84,14 +86,16 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Shard <span class="ref"><b>1.1</b>, 4.2</span></li>
 <li>Shard security file <span class="ref"><b>4.2</b>, 4.4–4.7</span></li>
 <li>Snapshot, cluster <span class="ref"><b>5.6</b>, 6.3, 6.7</span></li>
+<li>Saturation, and the <code>SATURATED</code> marker <span class="ref"><b>5.7</b>, 4.8, 6.5</span></li>
 <li>Snapshot, depth recovery <span class="ref">4.6, <b>5.5</b>, 6.6</span></li>
+<li>Sustainable rate <span class="ref"><b>5.7</b>, 4.8</span></li>
 <li>Synchronised, depth subscriber <span class="ref"><b>2.7</b>, 5.5, 6.6</span></li>
 </ul>
 
 ### T–Z
 
 <ul>
-<li>Threading modes <span class="ref">3.4, 3.10</span></li>
+<li>Threading modes <span class="ref">3.4, <b>4.8</b>, 5.7</span></li>
 <li>Tick size <span class="ref">1.5, 4.2</span></li>
 <li>Topology, draft <span class="ref">4.10, 4.11</span></li>
 <li>Trading date <span class="ref">5.1, 5.3</span></li>
@@ -121,6 +125,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>most purge</code> <span class="ref">5.3</span></li>
 <li><code>most image</code> <span class="ref">5.3, 6.6</span></li>
 <li><code>most cluster</code> <span class="ref">2.10, <b>4.8</b></span></li>
+<li><code>most counters</code> <span class="ref"><b>5.8</b>, 6.1</span></li>
 <li><code>most cluster snapshot</code> <span class="ref"><b>5.6</b>, 6.7</span></li>
 <li><code>most cluster shutdown</code> <span class="ref">5.6</span></li>
 </ul>
@@ -232,6 +237,9 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>--members</code>, <code>--host</code> <span class="ref">3.6, 4.8</span></li>
 <li><code>--participants</code> <span class="ref">4.8</span></li>
 <li><code>--participants-reload-ms</code> <span class="ref">4.8, 6.7</span></li>
+<li><code>--driver-threading</code> <span class="ref">3.4, <b>4.8</b>, 5.7</span></li>
+<li><code>--archive-threading</code> <span class="ref">3.4, <b>4.8</b></span></li>
+<li><code>--ingress-term-length</code> <span class="ref">4.8</span></li>
 <li><code>--fresh</code> / <code>--keep</code> <span class="ref">4.8</span></li>
 </ul>
 

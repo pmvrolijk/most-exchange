@@ -120,10 +120,30 @@ starve the kernel's own softirq processing. Never copy production idle strategie
 machine.
 :::
 
-::: todo Threading modes and idle strategies are hardcoded
-`most cluster` sets `ThreadingMode.SHARED` and `ArchiveThreadingMode.SHARED` with no override, and
-idle strategies are constants rather than configuration. Both are correct for a laptop and wrong for
-the table above.
+The two driver-side modes in that table are the ones you must ask for. `most cluster` defaults to
+`SHARED` for both, which is right for a laptop and wrong here:
+
+```sh
+most cluster --members "$MEMBERS" --host shard0-a \
+     --driver-threading DEDICATED --archive-threading DEDICATED \
+     --participants /etc/most/current/participants-shard0.properties
+```
+
+**`--driver-threading DEDICATED` is worth 1.6x of throughput** and 81x of median latency at the edge
+(4.8). `--archive-threading DEDICATED` earns its place only *with* it and only with the cores above
+isolated — on shared cores it is measurably worse than leaving it alone.
+
+::: todo Idle strategies are hardcoded
+Threading modes are now configurable (4.8), but idle strategies are still constants:
+`BusySpinIdleStrategy` in the engine, gateway and market-data regardless of whether cores are
+isolated. On the layout above that is correct; on a machine without isolation it is the harmful case
+the warning describes, and there is no flag to change it.
+:::
+
+::: note This also means CPU% tells you very little about these processes
+Because the engine, gateway and market-data busy-spin, each reads ~100% of a core whether it is
+working or idling. `top` cannot tell you whether one of them is the constraint. Their own counters and
+histograms can — `engine.metrics`, `gateway.metrics` (5.7, 5.8).
 :::
 
 ## 3.5 Aeron buffer sizing

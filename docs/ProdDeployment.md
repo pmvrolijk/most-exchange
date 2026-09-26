@@ -511,8 +511,11 @@ One distinct value, or stop and fix it.
 **Nothing takes a snapshot unless something asks.** Without one, a restart replays the log from
 genesis. Three things ask:
 
-- `most cluster snapshot --ingress` — through consensus, so every member snapshots. This is the one
-  to use in production.
+- `most cluster snapshot --ingress … --identity ID --secret-file F` — through consensus, so every
+  member snapshots. This is the one to use in production. The identity must be an `operator=true`
+  entry of the shard's registry: the consensus module grants a snapshot request to nothing else
+  (Aeron's own default grants none at all), and the command prints the cluster's **answer**. The
+  control plane and its scheduler present `control.cluster.identity.<shard>` the same way.
 - `most cluster snapshot --dir` — the local control toggle, one member only.
 - `most cluster shutdown` — snapshot then stop, which plain SIGTERM does *not* do.
 - The control plane's scheduler, at each session close.
@@ -553,20 +556,23 @@ restart. A refusal is the system working.
 
 ### 9.4 Changing who speaks for whom
 
-A participant list change does not restart a node. Publish the release, move the symlink, and the
-consensus module and engine pick it up within their poll interval — both announce the swap with the
-old and new fingerprint. Then restart the gateways, which is free because they hold no state.
+A participant list change restarts nothing. Publish the release, move the symlink, and the
+consensus module, the engine **and the gateways** pick it up within their poll interval. The gateway
+is where the registry is enforced (Design.md §1), and it prints its own new grants.
 
 ```sh
 # 1. Publish from the control plane, then point `current` at it on every machine.
 ansible shard0,gateways -a "ln -sfn /etc/most/releases/000042 /etc/most/current"
 
-# 2. Watch both node processes adopt it. No restart.
+# 2. Watch the node processes adopt it.
 journalctl -u most-engine -f | grep -m1 'registry: reloaded'
 
-# 3. Restart the gateways so their sessions re-open and re-derive their bindings.
-ansible gateways -a "systemctl restart most-gateway"
+# 3. And each gateway -- this line is when a revocation is in force.
+journalctl -u most-gateway -f | grep -m1 'gateway: now'
 ```
+
+To revoke a participant, move it to `cancelOnly` first (it can withdraw its resting orders but not
+place), and remove it in a later release once its orders are gone.
 
 A registry that cannot be parsed, or one for another shard, is reported and **ignored** — the one in
 force keeps authenticating. That is deliberate: standing down on a bad file would turn a typo into a
@@ -583,7 +589,10 @@ if a deployment would rather restart.
 | `gaps` | market-data | Feed sequence gaps. Expected occasionally under `MaxMulticastFlowControl`; sustained means a subscriber cannot keep up |
 | `rejectedDefinitions` | engine | A `SecurityDefinition` was refused. Operator commands are unacknowledged, so this counter is the only signal |
 | `registryReloadFailures` | engine, cluster-host | A participant registry that could not be read or was for another shard. The one in force still applies, so this is a quiet wrong rather than an outage |
-| `authenticatedGateways` = 0 | cluster-host, at shutdown | Every gateway connected anonymously despite a registry being configured. Looks identical to working until a maker goes quiet |
+| `rejectedSessions` | cluster-host, at shutdown | Sessions refused at connect — a wrong secret, or no credentials on a node with a registry |
+| `unauthorizedRejects` | gateway | Orders and cancels refused `UNAUTHORIZED_PARTICIPANT`: someone reached this gateway as a participant it does not serve |
+| `refusedCommands` | gateway | Operator commands consumed because this gateway is not an operator. With markets not moving, the control plane is pointed at the wrong gateway |
+| `undeclaredParticipantMessages` | engine | Orders and cancels from a gateway that does not list the participant — a gateway not enforcing the registry the engine holds |
 | Leader changes | consensus | Any unexplained one is worth a look |
 
 `operator_audit` in the control plane records who asked for every market-moving command. Like the

@@ -19,6 +19,12 @@
 - [x] Participant registry authored by the control plane and re-read by the nodes while they run,
       so onboarding a participant or rotating a gateway secret restarts a gateway and no node
       (docs/ControlPlane.md §3, docs/ProdDeployment.md §9.4)
+- [x] Participant enforcement — at the gateway, before the log: `UNAUTHORIZED_PARTICIPANT` for
+      orders and cancels, `cancelOnly` for graceful revocation, operator-only commands, several
+      gateways per participant with a primary, anonymous sessions refused, and snapshot requests
+      granted to operators. The gateway re-reads the registry too, so nothing restarts (docs/Design.md
+      §1 "Enforcement, at the gateway", docs/Handover.md §2j)
+- [ ] Bulk cancel of one participant's resting orders — the operator side of revocation
 - [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries  
 - [ ] Admin frontend for backend control plane, Vue
 

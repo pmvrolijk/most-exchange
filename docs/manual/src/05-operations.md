@@ -244,7 +244,7 @@ larger term buffer or a faster subscriber, not a busier gateway.
 | `SELF_MATCH_PREVENTED` | engine | The aggressor's remainder was cancelled by SMP |
 | `VOLATILITY_HALT` | engine | The aggressor's remainder was cancelled by a dynamic collar breach |
 | `GATEWAY_UNAVAILABLE` | gateway | The cluster session is closed |
-| `UNAUTHORIZED_PARTICIPANT` | — | Defined on the wire and raised by nothing (1.7) |
+| `UNAUTHORIZED_PARTICIPANT` | gateway | The participant is not one this gateway may act for — or, for a new order, is only `cancelOnly` here (4.3). Never reaches the cluster |
 
 ### Self-match prevention
 
@@ -324,18 +324,28 @@ avoid. Four things ask:
 
 | | |
 | --- | --- |
-| `most cluster snapshot --ingress 0=HOST:PORT` | Through consensus, so **every member** snapshots at the same log position and the request is answered. This is the one to use in production. |
+| `most cluster snapshot --ingress 0=HOST:PORT --identity ID --secret-file F` | Through consensus, so **every member** snapshots at the same log position, and the command prints the cluster's **answer** — `snapshot taken, the cluster answered OK`, or the refusal. On a node with a registry the identity must be an `operator=true` entry (4.3). This is the one to use in production. |
 | `most cluster snapshot --dir DIR` | The local control toggle, one member only |
 | `most cluster shutdown` | Snapshot, then stop — which plain SIGTERM does **not** do |
-| The control plane's scheduler | At each session close |
+| The control plane's scheduler | At each session close, as the control plane's operator identity (4.9) |
 :::
+
+A snapshot through consensus is only as real as the answer. Aeron's own default authorisation grants
+**no** snapshot request, and until the registry authorised operators every one asked for over the
+network was refused — while being reported as requested, because only the offer was checked. The
+cluster's recording log is the ground truth when in doubt:
+
+```sh
+java -cp "/opt/most/tools/lib/*" io.aeron.cluster.ClusterTool <cluster-dir> recording-log \
+  | grep -o 'type=SNAPSHOT' | wc -l        # two entries per snapshot: consensus module and service
+```
 
 Leave the scheduler enabled in production: a daily snapshot at the close is what bounds restart time.
 
 ### Restarting a node
 
 ```sh
-most cluster shutdown --ingress 0=shard0-a:20110    # or rely on the scheduler's close snapshot
+most cluster shutdown --dir <the node's --dir>      # on the node; or rely on the scheduler's close snapshot
 systemctl stop most-engine most-cluster-host
 sleep 15                                            # mark-file liveness is ~10s; 15 for margin
 systemctl start most-cluster-host most-engine
@@ -449,8 +459,11 @@ the same `SECURITIES` and `CLUSTER_HOST` knobs as the sweep.
 | `foreignShard` | market-data | Book events for another shard. Means this process is pointed at the wrong engine |
 | `imagesApplied` | market-data | A restarted process expects this to be non-zero. Zero with a book that stayed empty means the engine never sent one |
 | `rejectedDefinitions` | engine | A `SecurityDefinition` was refused. Commands are unacknowledged, so this counter is the only signal |
-| `registryReloadFailures` | engine, cluster-host | A registry that could not be read or was for another shard. The one in force still applies, so this is a quiet wrong rather than an outage |
-| `authenticatedGateways` = 0 | cluster-host, at shutdown | Every gateway connected anonymously despite a registry being configured |
+| `registryReloadFailures` | engine, cluster-host, gateway | A registry that could not be read or was for another shard. The one in force still applies, so this is a quiet wrong rather than an outage |
+| `rejectedSessions` | cluster-host, at shutdown | Sessions refused at connect: wrong secret, unknown gateway, or no credentials on a node with a registry |
+| `unauthorizedRejects` | gateway | Orders and cancels refused `UNAUTHORIZED_PARTICIPANT`. Non-zero means someone reached this gateway as a participant it does not serve |
+| `refusedCommands` | gateway | Operator commands consumed unsent because this gateway is not an operator. Non-zero with markets not moving means the control plane or CLI is pointed at the wrong gateway (4.9) |
+| `undeclaredParticipantMessages` | engine | Orders and cancels from a gateway that does not list the participant. Counted, never refused; non-zero means a gateway is not enforcing the registry the engine holds |
 | Leader changes | consensus | Any unexplained one is worth a look |
 
 ::: todo There is no health or metrics endpoint on the core processes
@@ -467,29 +480,29 @@ should be. It is derived from L3 and from the discovery broadcast.
 {
   "connected": true,
   "directory": { "version": "9181280125937456696", "securities": 2, "shards": [0],
-                 "lastSeenAt": "2026-09-06T14:44:00.827Z", "incompleteBroadcasts": 0 },
+                 "lastSeenAt": "2026-09-26T14:02:07.570Z", "incompleteBroadcasts": 0 },
   "securities": [
     { "securityId": 1, "shardId": 0, "phase": "CLOSED",
-      "halt": { "at": "2026-09-06T14:43:46.966Z", "collarReference": 10064000000,
-                "attemptedPrice": 10167000000, "breachedBound": 100640000,
+      "halt": { "at": "2026-09-26T14:02:05.698Z", "collarReference": 10005000000,
+                "attemptedPrice": 12500000000, "breachedBound": 2001000000,
                 "aggressorSide": "BUY", "clearedAt": null },
-      "lastTradePrice": 10161000000, "lastTradeQty": 29 },
+      "lastTradePrice": 10050000000, "lastTradeQty": 60 },
     { "securityId": 2, "shardId": 0, "phase": "CONTINUOUS", "halt": null,
-      "lastTradePrice": 10122000000, "lastTradeQty": 4 }
+      "lastTradePrice": 9996000000, "lastTradeQty": 36 }
   ],
-  "feedGaps": 9543, "eventsMissed": 26075, "eventsSeen": 9552,
+  "feedGaps": 0, "eventsMissed": 0, "eventsSeen": 35528,
   "routingDrift": []
 }
 ```
 
-::: warning This capture predates the feed-gap fix — regenerate it
-`"feedGaps": 9543` against `"eventsSeen": 9552` is not a lossy feed, it is the defect that reading was
-taken with: the control plane counted a sequence only for the four book events it interprets, while
-the engine numbers **all seven**, so every order event it ignored read as a gap. On a busy book the
-two counters therefore tracked each other and real loss was invisible. Fixed; a healthy shard now
-reports `feedGaps` and `eventsMissed` at or near **zero** with `eventsSeen` climbing steadily. The
-transcript above is kept until it can be regenerated from a running stack rather than edited by hand.
-:::
+Captured from the development stack (fields trimmed for width) after a 20,000-order load run across
+both securities and a buy swept AAPL towards 125.00 against a reference of 100.05: the dynamic
+collar (±20%) halted it at the breaching level, so security 1 is `CLOSED` with a `halt` block whose
+`clearedAt` stays null until an operator reopens it (6.4). **35,528 book events and not one gap** is
+what a healthy feed looks like. An older capture read `"feedGaps": 9543` against `"eventsSeen":
+9552` — not a lossy feed but a defect in the control plane, which counted a sequence only for the
+four book events it interprets while the engine numbers all seven, so every order event it ignored
+read as a gap and real loss was invisible.
 
 The three feed counters, once they mean what they say:
 

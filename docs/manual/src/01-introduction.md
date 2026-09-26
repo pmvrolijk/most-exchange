@@ -130,10 +130,11 @@ security's phase moves every book on that shard.
 The manual marks unimplemented behaviour inline, in callouts like the one below, at the point where
 an operator would otherwise expect it to work. The consolidated list is in 6.9.
 
-::: todo Order-entry authorisation
-A gateway's participant claims decide **where a participant's execution reports are delivered**, not
-whether it may trade. `UNAUTHORIZED_PARTICIPANT` exists in the wire schema and is raised by nothing,
-so a gateway can currently submit orders for a participant it does not claim.
+::: todo Bulk cancel of a revoked participant
+Revoking a participant is graceful rather than immediate: moving it to a gateway's `cancelOnly` list
+stops new orders at once and lets it withdraw what is resting (4.3). There is no operator command
+that cancels every resting order of one participant, so a revoked participant that does not withdraw
+its orders leaves them in the book until they fill, expire or are purged.
 :::
 
 ## 1.8 How to read this manual

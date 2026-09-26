@@ -9,7 +9,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 | **Where things stand, what to do next** | [`docs/Status.md`](docs/Status.md) — the session entry point |
 | **Normative behaviour** | [`docs/Design.md`](docs/Design.md) — authoritative. §8 is the open list |
 | **Why a rule exists** | [`docs/Rationale.md`](docs/Rationale.md) |
-| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2h |
+| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2j |
 
 `docs/Design.md` is the specification — read it before implementing anything, and update it in the
 same commit when the design changes.
@@ -86,6 +86,9 @@ SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and w
 - **Nothing takes a snapshot unless something asks** — `most cluster snapshot`, `most cluster
   shutdown`, or the control plane's scheduler at session close. Without one, a restart replays from
   genesis. → R§4
+- **A snapshot through consensus is an admin request, and Aeron's default authorisation refuses it.**
+  `RegistryAuthorisationService` grants it to an `operator=true` identity; report the cluster's
+  *answer* (`requestSnapshot`), never the offer, and prove a snapshot by the recording log. → R§4
 - **A node cannot restart for ~10 s after the previous one stopped.** Archive and cluster mark files
   carry a liveness timestamp. → R§4
 - **A cluster client must send keepalives.** The consensus module closes a session after
@@ -350,6 +353,11 @@ disk) and the ingress term length (16m moved latency, not the knee). What binds 
   bound in the `cluster-host` container and must name `shard0`, never the individual process's
   container. The dev stack swaps multicast for **dynamic MDC**; the publisher/subscriber channel
   asymmetry is correct, not a typo. → R§12
+- **A cluster client's egress names its media driver's host, never `0.0.0.0`** — otherwise it
+  connects and times out at `POLL_RESPONSE`. → R§12
+- **Rebuilding the `most` image recreates `cluster-host`** (same image); inside the ~10 s mark-file
+  window that takes the shard down. `up --build` skips it (`--profile cli build`); use
+  `run --no-deps`. → R§12
 - `deploy/`'s `client-aeron` volume is a **1 GB** tmpfs and needs to be. A full mount surfaces as
   `InternalError: a fault occurred in an unsafe memory access operation`.
 

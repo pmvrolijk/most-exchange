@@ -20,10 +20,15 @@ docker compose up -d           # ~40s to a trading market
 | Control API | <http://localhost:8080> — `curl -u admin:most-dev-password localhost:8080/api/status` |
 | Teardown | `docker compose down -v` (`-v` also discards the books — see below) |
 
-`docker compose up` also runs a one-shot `seed` container that creates shard 0 in the control plane,
-imports the same security file the processes booted from, publishes a release, seeds the reference
-prices and walks the session to `CONTINUOUS`. It does all of that over the REST API, so
-[`init/seed.sh`](init/seed.sh) doubles as a worked example of driving the exchange the supported way.
+`docker compose up` also runs a one-shot `seed` container that authors in the control plane what the
+processes booted from — shard 0 and its securities (imported from the very file they read),
+participants 7, 8 and 20–23, the gateway `gw-0` and the control plane's own operator identity
+`control` with the secrets they present, and the `equities` calendar — then publishes a release,
+seeds the reference prices and walks the session to `CONTINUOUS`. It prints the release's registry
+fingerprint, which must equal the one `cluster-host`, `engine` and `gateway` print at startup: that
+is the check that the database and the running shard agree. It does all of this over the REST API,
+so [`init/seed.sh`](init/seed.sh) doubles as a worked example of driving the exchange the supported
+way.
 
 ## The network layout, and why it is drawn this way
 
@@ -267,41 +272,46 @@ order. It used to hold them in a memory-mapped journal on `cluster-data`, which 
 is gone; it is also why running two gateways against one shard is now a matter of giving each its
 own client endpoint rather than a design problem.
 
-## Who speaks for whom
+## Who may do what
 
-`config/shard-0-participants.properties` says which gateway speaks for which participant. The
-cluster-host authenticates the gateway against it and stamps `gw-0` on the session as its encoded
-principal; the engine turns that back into a participant list and binds every one at session open.
-That is what keeps a participant reachable when it has said nothing since the gateway last connected
-— a `docker compose restart gateway`, most of all, which otherwise leaves every quiet participant of
-that gateway unable to be sent its own fills (Design.md §1).
+`config/shard-0-participants.properties` is the participant registry (Design.md §1), and three
+processes read it for three reasons:
 
-**Changing it does not restart a node.** The cluster-host and the engine re-read the file every
-five seconds and announce the swap with both fingerprints, so editing it and running
-`docker compose restart gateway` is the whole procedure:
+- **cluster-host** authenticates every cluster session against it — a wrong secret *and* no secret
+  at all are refused — and grants a snapshot request only to an `operator=true` identity;
+- **engine** binds each gateway's participants to its session, so a participant that has said
+  nothing since its gateway connected is still sent its own fills;
+- **gateway** enforces it on every client message: an order or cancel for a participant it does not
+  list is rejected `UNAUTHORIZED_PARTICIPANT` before it reaches the cluster, a `cancelOnly`
+  participant may cancel but not place, and operator commands pass only because `gw-0` is an
+  operator.
+
+It holds two identities: `gw-0`, which speaks for 7, 8 and `most load`'s 20–23 and is the operator
+gateway the CLI's and the control plane's commands pass through; and `control`, operator-only, which
+the control plane presents for the snapshots it sends straight to the cluster.
+
+**Changing it restarts nothing.** All three re-read the file every five seconds. The gateway prints
+its own new grants, which is the line to wait for:
 
 ```sh
-docker compose logs -f cluster-host | grep -m1 'reloaded'
-docker compose restart gateway
+# e.g. move 8 from gateway.gw-0.participants to gateway.gw-0.cancelOnly, then:
+docker compose logs -f gateway | grep -m1 'gateway: now'
+./most send --symbol AAPL --side buy --price 100.00 --qty 1 --participant 8   # REJECTED ... UNAUTHORIZED_PARTICIPANT
 ```
 
 A file that cannot be parsed, or one for another shard, is reported and **ignored** — the registry in
-force keeps authenticating, because standing down on a bad file would leave a shard that
-authenticates nobody.
-
-Three files, three roles:
+force keeps applying, because standing down on a bad file would leave a shard that authenticates
+nobody.
 
 | | |
 | --- | --- |
-| `config/shard-0-participants.properties` | The registry. Mounted into cluster-host, engine and gateway. Holds the **SHA-256** of the secret, never the secret. |
-| `config/gateway-0.secret` | The secret itself, read only by the gateway. |
+| `config/shard-0-participants.properties` | The registry. Mounted into cluster-host, engine and gateway. Holds the **SHA-256** of each secret, never the secret. |
+| `config/gateway-0.secret` | `gw-0`'s secret, mounted only into the gateway. |
+| `config/control.secret` | `control`'s secret, mounted only into the control plane. |
 | `--participants` on `cluster-host` | What makes the consensus module verify anything at all. |
 
-Remove all three and the stack still runs: the engine falls back to learning routes from traffic,
-which is what shipped before the registry existed. What it does not do is fall back *quietly on its
-own* — credentials that fail to verify are rejected outright, and a gateway configured with an id
-but no secret refuses to start, because a gateway that connected anonymously by accident trades
-perfectly well while losing exactly the fills this is for.
+Remove the registry everywhere and the stack still runs, open: anyone connects, nothing is enforced
+and routes are learned from traffic — what shipped before the registry existed.
 
 ## What is dev-only
 
@@ -311,10 +321,12 @@ Do not carry these into anything real:
   cannot exercise. Snapshot *restore* is now exercised single-node by `e2e/run-restart.sh`; what a
   single node still cannot show is a snapshot taken on one member restoring on another, or a
   rejoining node catching up from the archive.
-- **A shared secret in the repository.** `config/gateway-0.secret` is committed, which is fine for
-  a stack whose admin password is also fixed and is not how a real one is run.
-- **A hand-written participant registry.** The control plane owns the `participant` table but does
-  not yet render or publish this file, so nothing checks the two agree.
+- **Shared secrets in the repository.** `config/gateway-0.secret` and `config/control.secret` are
+  committed, which is fine for a stack whose admin password is also fixed and is not how a real one
+  is run.
+- **A hand-written participant registry.** The processes read `config/`, not a published release.
+  The seed authors the same content in the control plane and prints the release's registry
+  fingerprint to compare against the processes' — a check you read, not one that stops anything.
 - **A fixed, published admin password.** Unset `CONTROL_ADMIN_PASSWORD` and the control plane
   generates one and logs it.
 - **`CONTROL_COOKIE_SECURE` is false**, because everything here is plain HTTP on localhost.
@@ -322,8 +334,23 @@ Do not carry these into anything real:
 - **The scheduler is off** (`CONTROL_SCHEDULER_ENABLED=false`). It opens markets unattended, which
   is a surprising thing for a dev stack to do while you are reading its logs. Turn it on to exercise
   it.
-- **Ephemeral cluster and archive data.** `most cluster` deletes its directories on start unless
-  given `--keep`.
+- **Persistent cluster and archive data, on a named volume.** `docker compose restart` resumes from
+  the last snapshot; `docker compose down -v` discards it. A restart that should have loaded a
+  snapshot says so — `matching-engine: restored N resting orders ... from a snapshot` — and one that
+  replayed the log from genesis prints nothing of the kind.
+
+## Rebuilding without breaking the shard
+
+- **`docker compose up --build` does not rebuild the CLI.** `most` is in the `cli` profile; after a
+  change to `tools`, run `docker compose --profile cli build`.
+- **That image is also the cluster host's.** Once it is rebuilt, the next `docker compose up` *or*
+  `docker compose run` recreates `cluster-host` — and a cluster host recreated within about ten
+  seconds of the old one stopping refuses to start (`active mark file detected`), taking the shard
+  down. Stop the shard, wait out the window, then start it; use `docker compose run --no-deps` for
+  one-off containers.
+- **A cluster client's egress must name its media driver's host.** `0.0.0.0` is not an address the
+  consensus module can answer, so a client using it connects and then times out at `POLL_RESPONSE`.
+  The control plane's is `control-driver:0` — its driver's container, not its own.
 
 ## Troubleshooting
 

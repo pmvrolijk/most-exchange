@@ -59,16 +59,24 @@ docker compose up -d           # roughly 40 seconds to a trading market
 | Control API | <http://localhost:8080> |
 | Teardown | `docker compose down` — add `-v` to discard the books as well |
 
-`docker compose up` also runs a one-shot `seed` container that creates shard 0 in the control plane,
-imports the same security file the processes booted from, publishes a release, seeds reference
-prices and walks the session to `CONTINUOUS`. It does all of that over the REST API, so
-`deploy/init/seed.sh` doubles as a worked example of driving the exchange the supported way.
+`docker compose up` also runs a one-shot `seed` container that authors, over the REST API, what the
+processes booted from: shard 0 and its securities (imported from the very file they read),
+participants 7, 8 and 20–23, the gateway `gw-0` and the control plane's own operator identity
+`control` with the secrets the processes present, and the `equities` calendar. It publishes a
+release, seeds reference prices and walks the session to `CONTINUOUS`, so `deploy/init/seed.sh`
+doubles as a worked example of driving the exchange the supported way.
 
 ```
 seed: creating shard 0
 seed: importing the shard security file the processes booted from
-seed: import said: {"shardId":0,"fingerprint":"3e04cf2b9902f08a","inserted":[],"updated":["AAPL","MSFT"]}
+seed: import said: {"shardId":0,"fingerprint":"3e04cf2b9902f08a","inserted":["AAPL","MSFT"],"updated":[]}
+seed: participant 7: 201
+...
+seed: gateway gw-0 secret: 200
+seed: gateway control secret: 200
 seed: publishing release
+seed: release registry fingerprint for shard 0: 4c9c24c10df3ff56
+seed: creating the equities schedule
 seed: seeding definition for security 1
 seed: seeding definition for security 2
 seed: session -> PRE_OPEN
@@ -77,13 +85,22 @@ seed: session -> CONTINUOUS
 seed: done -- shard 0 is CONTINUOUS with AAPL and MSFT at 100.00
 ```
 
+::: warning Rebuilding the CLI image restarts the shard
+`most` and `cluster-host` run the same tools image, and `docker compose up --build` does not rebuild
+it — the `most` service sits in the `cli` profile, so it needs `docker compose --profile cli build`.
+Once rebuilt, the next `docker compose up` **or** `docker compose run` recreates the cluster host,
+and a cluster host recreated within about ten seconds of the old one stopping refuses to start
+(`active mark file detected`). Stop the shard, wait out the window, then start it; use
+`docker compose run --no-deps` for one-off containers.
+:::
+
 ### What each container is
 
 | Service | What it is |
 | --- | --- |
 | `cluster-host` | The shard's media driver, archive and consensus module. Holds the `shard0` network alias. |
 | `engine` | The service container only. Attaches to `cluster-host` over shared memory. |
-| `gateway` | Order entry, with its cluster identity `gw-0`. |
+| `gateway` | Order entry, with its cluster identity `gw-0`, which it also enforces (4.3). |
 | `market-data` | L1/L2/L3 and the snapshot feed. |
 | `discovery` | The directory broadcast. |
 | `control`, `postgres`, `web` | The control plane, its database, and the SPA behind nginx. |
@@ -103,15 +120,21 @@ Every process prints its geometry fingerprint at startup. They must all agree.
 ```
 $ docker compose logs cluster-host engine gateway market-data discovery | grep -i fingerprint
 
-cluster:        participants=/config/shard-0-participants.properties fingerprint=cb7d8bceec5e98b4 gateways=[gw-0] reload=5000ms
-matching-engine: shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] serviceId=0 participantRegistry=cb7d8bceec5e98b4
-gateway:        shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] in=aeron:udp?endpoint=0.0.0.0:20001:20
-market-data:    shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] in=aeron:ipc:12
+cluster:         participants=/config/shard-0-participants.properties fingerprint=4c9c24c10df3ff56 gateways=[control, gw-0] reload=5000ms
+matching-engine: shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] serviceId=0 clusterDir=/cluster/cluster participantRegistry=4c9c24c10df3ff56 reload=5000ms
+gateway:         shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] in=aeron:udp?endpoint=0.0.0.0:20001:20 out=...
+gateway:         identity=gw-0 registry=4c9c24c10df3ff56 reload=5000ms participants=[7, 8, 20, 21, 22, 23] cancelOnly=[] operator=true
+market-data:     shard=0 fingerprint=3e04cf2b9902f08a securities=[AAPL, MSFT] in=aeron:ipc:12 ...
 ```
 
 Two distinct fingerprints appear here and both are correct: `3e04cf2b9902f08a` is the **shard's
-geometry**, and `cb7d8bceec5e98b4` is the **participant registry's**. They are deliberately separate
+geometry**, and `4c9c24c10df3ff56` is the **participant registry's**. They are deliberately separate
 values — rotating a gateway's secret is not a change of geometry, and must not invalidate a release.
+The `seed` container prints the registry fingerprint of the release it published
+(`seed: release registry fingerprint for shard 0: 4c9c24c10df3ff56`), which is the check that the
+control plane's database and the file the shard booted from say the same thing. The gateway's
+`identity=` line is what it will **enforce** (4.3): `gw-0` speaks for 7, 8 and the load generator's
+20–23, and is the operator gateway the CLI's and the control plane's commands pass through.
 
 The five processes should each print a readiness line:
 
@@ -269,7 +292,7 @@ and Releases in section 4; Schedules, Audit and Operators in section 5.
 | Development stack | Production |
 | --- | --- |
 | One cluster node | Three or five members on separate machines (3.2) |
-| `config/gateway-0.secret` committed to the repository | A secret issued by the control plane, delivered out of band (4.3, 4.10) |
+| `config/gateway-0.secret` and `config/control.secret` committed to the repository | Secrets issued by the control plane, delivered out of band (4.3, 4.10) |
 | A fixed, published admin password | `CONTROL_ADMIN_PASSWORD` unset, so one is generated and logged once (4.9) |
 | `CONTROL_COOKIE_SECURE=false` | `true`, behind TLS |
 | Dynamic MDC for market data and the gateway's outbound leg | UDP multicast with an IGMP querier (3.7) |

@@ -1,12 +1,13 @@
 # Status
 
 Where the project stands, what is open, and what to do next. **This is the session entry point** —
-read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2h),
+read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2j),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated at the end of the session that fixed the control plane's feed-gap counting, measured the
-ten-security aggregate for the first time, and found the shard's throughput ceiling in the media
-driver's threading mode — 1.6x behind one enum (Handover §2i).
+Last updated at the end of the session that put the pipeline on a runner, then built participant
+enforcement at the gateway — and on the way found that no snapshot requested over the network had
+ever been taken (Handover §2j). The work is on branch `gateway-security-multiple-per-shard`, seven
+commits, not yet merged.
 
 ---
 
@@ -14,11 +15,11 @@ driver's threading mode — 1.6x behind one enum (Handover §2i).
 
 | | |
 | --- | --- |
-| Branch | **`master`** |
+| Branch | **`gateway-security-multiple-per-shard`** — seven commits ahead of `master`, to merge |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~23,400 lines — 13,490 main across 65 files, 9,894 test across 52 |
-| Frontend | ~3,100 lines of TypeScript and Vue across 24 files, outside the Gradle build |
-| Tests | 463, all passing |
+| Kotlin | ~25,600 lines — 14,280 main across 68 files, 11,290 test across 57 |
+| Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
+| Tests | 542, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -30,10 +31,10 @@ driver's threading mode — 1.6x behind one enum (Handover §2i).
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
-| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.8 and §5.7 carry the threading configuration and the measured capacity |
+| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session |
 
 ```sh
-./gradlew clean build                        # 457 tests (control's need Docker)
+./gradlew clean build                        # 542 tests (control's need Docker)
 ./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
 ./e2e/run-restart.sh                         # does the shard come back with its book?
 ./e2e/run-attribution.sh                     # where a round trip goes, by stage
@@ -49,7 +50,11 @@ consensus, matching, execution reports out, L1/L2/L3 derived by a separate proce
 that authors reference data and drives the market over REST, and a console that shows live books.
 
 - **A restart resumes.** Durable cluster directories, a snapshot something actually asks for, and a
-  restore that refuses to destroy state when geometry changes (Handover §2d, §2e).
+  restore that refuses to destroy state when geometry changes (Handover §2d, §2e). **Until this
+  session only the local toggle took one** — every snapshot requested through consensus (`--ingress`,
+  the control plane, the scheduler's session-close) was refused by Aeron's default authorisation and
+  reported as success. Fixed and proven by the recording log, in `run-restart.sh` and in the Docker
+  stack, where a full shard restart printed `restored 1 resting orders ... from a snapshot` (§2j).
 - **Native images build and pass e2e.** All four core processes, plus a `linux/amd64` container
   (§2a). Untested: a trade *through* native containers, which needs an x86-64 host.
 - **Zero allocation is proven**, by three measurements that are each mutation-validated (§2b).
@@ -62,6 +67,13 @@ that authors reference data and drives the market over REST, and a console that 
 - **Gateways are stateless and disposable.** `origQty` lives in the engine, several gateways can
   serve one shard, and the participant registry is authored by the control plane and re-read while
   the nodes run (§2g, §2h).
+- **Who may do what is enforced** (Design.md §1, "Enforcement, at the gateway"; §2j). The gateway
+  refuses `UNAUTHORIZED_PARTICIPANT` for orders and cancels, lets a `cancelOnly` participant withdraw
+  but not place, and forwards operator commands only if it is an `operator`; it re-reads the
+  registry while running. A node with a registry refuses anonymous sessions and grants snapshot
+  requests only to operators; the control plane and the CLI hold operator-only identities. A
+  participant may be on several gateways with a declared primary. The engine never rejects on the
+  registry — it counts `undeclaredParticipantMessages`. No wire change.
 
 ### The caveats that still stand
 
@@ -121,9 +133,15 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    extracted rather than patched in place because the defect lived on a path that needed a media
    driver to reach, which is why nothing tested it. **Not yet seen against a live control plane** —
    no e2e script runs one, so the confirmation available is the unit proof plus the mutation check.
-3. **No enforcement of the participant binding.** The engine binds routes but does not refuse an
-   order whose `participantId` is not bound to the sending session, so `UNAUTHORIZED_PARTICIPANT` is
-   raised by nothing. Note it cannot simply read the hot-reloaded registry — see §3 item 0.
+3. ~~**No enforcement of the participant binding.**~~ **Done, at the gateway** (§2j). The standing
+   assumption was that a reject had to come through the log; a reject that never *enters* the log
+   has no determinism to protect. **Still open underneath it:** the client-to-gateway leg is not
+   authenticated, so the check means "whoever can reach this endpoint may act for these
+   participants" — per-client authentication is the upstream session gateways' job, and nothing here
+   tests one. There is **no bulk cancel** for a revoked participant, so `cancelOnly` relies on it
+   withdrawing its own orders. And the control plane cannot *verify* that the gateway it sends
+   operator commands through is an operator — `control.cluster.operatorChannel.<shard>` names one,
+   but a wrong one is still a silent `refusedCommands` count.
 4. **Authorisation is all-or-nothing.** One `ADMIN` role with full access. Also, a command refused
    locally before the send attempt is not audited, because the audit is written on the way out of
    the REST layer.
@@ -135,7 +153,14 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    establishing before a retention procedure or a volume size can be written down.
 6. **The directory advertises one order-entry endpoint per shard**, so a shard served by several
    gateways cannot name them all. `ShardEntry` carries one channel and `DirectoryClient` keeps one
-   `ShardRoute` per shard. A virtual address in front of the tier works today.
+   `ShardRoute` per shard. **Decided this session: participants learn their gateway out of band**,
+   as member connectivity usually works, and the CLI takes `--order-entry-channel` to reach one the
+   directory does not name. What remains is the throughput case (§3 item 2), not addressing.
+6a. **The release publisher writes into an existing directory.** `Files.createDirectories` does not
+   fail on one, while its own KDoc promises a directory a running process points at never changes.
+   Latent in production (release numbers repeat only after a database restore); it bit the control
+   tests, whose fixture now clears the release directory. Refusing to publish into an existing
+   directory would make the promise true.
 7. **No per-order L3 recovery.** The book image is deliberately level-aggregated, so an MBO consumer
    that joins or reconnects after a restart has nothing to rebuild per-order state from. Nothing
    needs it today; a FIX market data adapter carrying order-level detail would.
@@ -182,12 +207,10 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 In the order I would tackle them.
 
-0. **Decide the shape of participant enforcement** (open issue 3). A reject is replicated state, so
-   it cannot be decided from a file each node re-reads on its own schedule — the binding it would
-   refuse on is node-local by design, which is exactly what makes the hot reload safe. Enforcement
-   has to come through the log, which probably means a sequenced command that installs a registry
-   version rather than a poller. Every existing config, e2e script and Docker stack would also have
-   to name its participants. Worth deciding the shape before writing any of it.
+0. **Merge `gateway-security-multiple-per-shard`.** Push it and let the pipeline run first: CI has
+   not seen these seven commits, and `e2e:restart` now carries the enforcement, anonymous-refusal
+   and snapshot checks. Then re-seed any long-lived dev stack (`docker compose down -v && up`), since
+   V6 changes the gateway tables and the seed now authors the registry.
 1. ~~**Get a GitLab runner onto the pipeline.**~~ **Done.** A self-hosted Docker-executor runner
    (`clytemnestra`, privileged for `docker:dind`) runs [`.gitlab-ci.yml`](../.gitlab-ci.yml), and
    pipeline 34 on `d198ad6` is green end to end: build, `test:core` — so the allocation proofs now
@@ -203,8 +226,9 @@ In the order I would tackle them.
    `INVALID` on pacing lateness (p99.9 11–53 ms, load average 3.1) — the generator stalled, the
    script refused to print rows, and that is the validation working on a machine that cannot be
    quoted from. Both stay manual and `allow_failure`.
-2. **Advertise several gateways per shard** — promoted from item 5, because C1–C2 turned it from
-   tidying into the cheapest throughput lever the system has. The gateway is one thread carrying every
+2. **Advertise several gateways per shard, as a throughput lever** — addressing is settled (out of
+   band, open issue 6); what is left is whether a second gateway raises the ceiling, because C1–C2
+   made it the cheapest throughput lever the system has. The gateway is one thread carrying every
    order inbound and every report outbound (~1.3M messages/sec at the ceiling), it is the only
    saturating stage that scales sideways **today** (stateless, `origQty` in the engine,
    `run-restart.sh` §4c already covers multi-gateway), and the sole blocker is that `ShardEntry` carries
@@ -258,6 +282,10 @@ In the order I would tackle them.
 9. **Fingerprint enforcement at boot** (open issue 11) — cheap, and closes a silent-divergence path.
 10. **Reconcile `Design.md` §6 with the code**, or cut it. Outstanding for several sessions.
 11. **Tests for the `discovery` process** itself. Also outstanding.
+11a. **Bulk cancel of one participant's resting orders** — the operator side of revocation, which
+    `cancelOnly` currently leaves to the participant (open issue 3). An operator command, so it goes
+    through the log; the engine would walk the ladders as the purge does (Design.md §4.3).
+11b. **Refuse to publish into an existing release directory** (open issue 6a).
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.
 

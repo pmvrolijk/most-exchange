@@ -118,6 +118,21 @@ close. **A node also cannot restart immediately after the previous one stopped**
 and cluster mark files carry a liveness timestamp and a new process refuses until it ages out,
 measured at roughly ten seconds here even after a clean shutdown.
 
+**A snapshot through consensus is an admin request, and Aeron's default refuses it.** Aeron 1.53's
+consensus module installs `AllowBackupAndStandbyAuthorisationService` unless told otherwise, which
+grants backup and standby traffic and nothing else — so every `most cluster snapshot --ingress`,
+every control-plane snapshot and the scheduler's session-close snapshot was refused from the day
+they were written. Nobody noticed because both requesters checked only that the request was
+*offered*: `ClusterAdmin` returned `confirmed: true` beside a comment saying the cluster answers,
+and the CLI printed `snapshot requested`. It surfaced when a Docker restart replayed from genesis
+after two "confirmed" snapshots, and the recording log held no SNAPSHOT entry at all. The fix is in
+two halves and both are load-bearing: `RegistryAuthorisationService` grants a snapshot request to
+an `operator=true` registry identity (and a node without a registry allows every admin request), and
+`requestSnapshot` waits for the answer on egress so `confirmed` means OK. The e2e check counts
+SNAPSHOT entries in the recording log rather than trusting any message, because a message is
+exactly what lied. The local toggle — `--dir`, `cluster shutdown` — was never affected: it opens no
+session.
+
 **A cluster client must send keepalives.** The consensus module closes a session after
 `sessionTimeoutNs` (10s default) of silence and every later offer fails silently; polling egress is
 not enough. **`ShutdownSignalBarrier` must be closed** — `await()` alone leaves the JVM alive — and
@@ -449,6 +464,19 @@ address". The dev stack also swaps multicast for **dynamic MDC**, because a Dock
 route multicast: a publication says `control=shard0:PORT|control-mode=dynamic` with no endpoint, and
 what discovery hands a *subscriber* additionally carries `endpoint=0.0.0.0:0`. That asymmetry is
 correct, not a typo. `deploy/README.md` has the rest.
+
+**A cluster client's egress must name its media driver's host.** `0.0.0.0` is where a client
+*listens*, not an address the consensus module can send to, so a client that uses it connects and
+then times out at `POLL_RESPONSE` — which is why the control plane could never take a snapshot in the
+dev stack even before authorisation was considered. The name is the driver's container, not the
+client's: the control plane's egress is `control-driver:0`.
+
+**Rebuilding the CLI image recreates the cluster host.** `most` and `cluster-host` run the same tools
+image, and `most` sits in the `cli` profile, so `docker compose up --build` never rebuilds it. After
+`docker compose --profile cli build`, the next `up` or `run` sees a new image for `cluster-host` and
+recreates it; a cluster host recreated inside the ~10 s mark-file window refuses to start, and the
+shard is down. Stop the shard, wait, start it — and use `docker compose run --no-deps` for one-off
+containers.
 
 ---
 

@@ -926,6 +926,92 @@ wasn't. **Every sweep in R2–R4 should be read as a loaded machine**, and the `
 
 ---
 
+### 2j. Participant enforcement at the gateway — and the snapshots that never happened
+
+Branch `gateway-security-multiple-per-shard`, seven commits, not yet merged. It closes open issue 3,
+the oldest security gap in the system, and on the way found that a durability path everyone
+believed in had never worked.
+
+**The runner first.** The GitLab pipeline had never executed. Its first run (pipeline 33) failed four
+jobs for four reasons unrelated to the exchange: Docker's 64 MB `/dev/shm` could not hold a 16 MB-term
+IPC log (the three driver-backed test classes now keep `aeron.dir` under `build/`); `run-restart.sh`
+grepped once for restore lines the engine prints *after* `awaiting shutdown signal`; the GraalVM
+image lacks `xargs`; and dind needs a privileged runner. Pipeline 34 was green. `measure:sweep` fails
+on the runner, correctly — its validation refused every rate on pacing lateness.
+
+**The decision.** For several sessions the plan was that `UNAUTHORIZED_PARTICIPANT` had to come
+through the log, because an *engine* reject decided from a node-local registry would diverge the
+nodes — a sequenced registry-install command, snapshot state, a wire change. The user's proposal
+removed all of it: reject at the **gateway**. A refusal that never enters the log has no determinism
+to protect, so the gateway may decide from a file it re-reads on its own schedule, and it rejects
+earlier and cheaper. `UNAUTHORIZED_PARTICIPANT` already existed in the schema. Four choices were made
+explicitly: refuse anonymous sessions; allow a participant on several gateways with a declared
+primary; hot-reload the registry in the gateway, with revocation made graceful by a `cancelOnly`
+list; and keep gateway discovery out of band rather than change the directory.
+
+**What was built**, in the order it was committed, each step green on its own:
+
+1. **Registry model** (`reference`): `cancelOnly`, `operator`, `participant.<id>.primary`; an
+   operator-only entry is the only kind allowed to list nobody; allocation-free `mayPlace`/
+   `mayCancel`. A registry using none of the new keys renders and fingerprints exactly as before —
+   pinned at `dbbaaeaf18f6598f`, computed from the pre-change jar with `jshell`, because releases
+   already record that value.
+2. **Gateway**: refuses orders and **cancels** for unlisted participants (a cancel check is not
+   optional — the engine's own is participant equality, which is only as good as the id), refuses
+   operator commands and unknown templates unless it is an operator, and re-reads the registry via
+   `ParticipantRegistrySource`. `RegistryAccess` re-resolves its entry only when the registry object
+   changes; the allocation test caught my own harness allocating encoders before it measured the
+   gateway.
+3. **Engine**: binds a participant at session open only if the gateway is its primary or nobody live
+   holds it; rebinds a closing session's routes to another listing session; counts
+   `undeclaredParticipantMessages` and never branches on it — a test drives two nodes with
+   disagreeing registries to identical reports, books and sequences.
+4. **CLI**: `--order-entry-channel`/`--report-channel` (and streams) override the directory's route
+   per part, four options because channel URIs are full of colons; `cluster snapshot --ingress
+   --identity --secret-file`.
+5. **Control plane**: V6 (`gateway.operator`; `gateway_participant` keyed by the pair, with
+   `cancel_only` and `is_primary` — V5's key on the participant alone had also confined a participant
+   to one gateway on one shard); operator-only gateways are published; one primary per participant
+   per shard. It surfaced a test-isolation bug: `RESTART IDENTITY` reused release numbers while the
+   release directory kept earlier tests' files.
+6. **Anonymous sessions refused**, last, because it needed the identities first — the Docker stack's
+   control plane connected anonymously. The control plane gained
+   `control.cluster.operatorChannel.<shard>`: its operator commands go through a gateway and are
+   unacknowledged, so pointing them at a non-operator gateway would be a silent `refusedCommands`.
+7. **Snapshots** — below.
+
+**The snapshots that never happened.** Testing the Docker stack interactively, a control-plane
+snapshot timed out: its egress endpoint defaulted to `0.0.0.0:0`, which the consensus module cannot
+answer (fixed: `control-driver:0`, the media driver's container). With that fixed it returned
+`confirmed: true` — and after a restart the engine printed no restore line. The recording log held
+**no SNAPSHOT entry**. Aeron 1.53's default admin authorisation, `AllowBackupAndStandbyAuthorisation
+Service`, grants backup and standby traffic and nothing else, so **every** snapshot requested through
+consensus since the feature was written — `--ingress`, the control plane's button, the scheduler's
+session-close snapshot — had been refused, and both requesters reported success because they checked
+only the offer. `RegistryAuthorisationService` now grants a snapshot request to an `operator=true`
+identity (a node without a registry allows all), and `requestSnapshot` waits for the answer on
+egress; `ClusterAdmin` connects per request, since its cached session sent no keepalives. The dev
+stack then took a confirmed snapshot (recording log 0 → 2 entries), and a full shard restart printed
+`restored 1 resting orders across 2 books from a snapshot`.
+
+**The dev stack now tells the truth about itself.** The seed authors participants 7, 8, 20–23, `gw-0`
+and `control` with the secrets the processes present, and the `equities` calendar, and prints the
+release's registry fingerprint: `4c9c24c10df3ff56`, identical to what `cluster-host`, `engine` and
+`gateway` printed. Before, the database had no gateways at all while the cluster enforced two.
+
+**What the check is.** 542 tests pass (463 before the session). Every new behaviour was mutation-
+checked — a removed cancel check, an allocating check, an ignored primary, a skipped rebind, a
+deciding counter, a non-operator allowed to snapshot — and each failed the tests meant to catch it.
+`e2e/run-restart.sh` §4f exercises it live: an unlisted participant refused through gw-1 (reached via
+the CLI override), a hot reload to `cancelOnly` that blocks placing but not cancelling, a refused
+operator command, `undeclaredParticipantMessages=0` in the engine, an anonymous cluster session
+refused with the reason logged, and a snapshot proven by the recording log — granted to `control`,
+refused `UNAUTHORISED_ACCESS` to gw-1. **Not yet run in CI**: the branch has not been pushed.
+
+**Still open**: no bulk cancel for a revoked participant; the client-to-gateway leg is not
+authenticated (by design — the upstream session gateways' job); the control plane cannot verify its
+operator gateway is one; the release publisher writes into an existing directory.
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.
@@ -940,7 +1026,11 @@ Change any of these and something breaks in a way that is hard to trace back.
   makes gateway HA a deployment choice. Anything that puts state back in it takes that away.
 * **The engine's participant map is node-local egress routing, not replicated state.** It is what
   lets the registry be re-read under a running node. It stops being true if the engine ever rejects
-  an order on a binding.
+  an order on a binding — which is why **enforcement lives in the gateway** (§2j): a refusal that
+  never enters the log may rest on a node-local file. The engine only counts.
+* **A snapshot through consensus needs an operator identity, and its result is the cluster's
+  answer.** Aeron's default authorisation refuses every snapshot request; a requester that reads the
+  offer reports success anyway (§2j). Prove a snapshot by the recording log.
 * **The dynamic collar uses a snapshot** taken at the aggressor's arrival, never the live reference.
 * **`seqNum` and `shardId` live on the book event**, not only the derived feeds, because L3 is
   forwarded verbatim. Stamped where the event is *generated*, so they survive failover.
@@ -1544,6 +1634,24 @@ half-dead stack.
 `LocalTesting.md` now insists on verifying `pgrep -f "com.engine"` returns zero *before* cleanup, and
 that symptom is the third row of its troubleshooting table. The general lesson: **when behaviour is
 inexplicable, verify the environment before debugging the code.**
+
+### From the enforcement session (§2j)
+
+* **"Confirmed" that only checks the offer is worse than "sent".** `ClusterAdmin` said `confirmed:
+  true` next to a comment claiming the cluster answers, and for the whole life of the feature no
+  snapshot requested over the network was taken. The engine's `restored ... from a snapshot` line —
+  printed precisely so a replay cannot pass for a restore — is what exposed it, and only because a
+  restart happened to be watched. Check the durable effect (the recording log), not a message.
+* **A library default is a decision someone else made.** `AllowBackupAndStandbyAuthorisationService`
+  was never chosen here; nobody knew it was there. The fix began with `javap` on the jar.
+* **The interactive stack found what three test layers could not**: an unreachable egress address,
+  a database that disagreed with the running registry, and the snapshot refusal. Each was invisible
+  to unit tests and to e2e scripts that grep for a success message.
+* **Shared images have shared consequences.** Rebuilding the CLI image recreated the cluster host
+  inside its mark-file window and took the dev shard down.
+* **The simplest framing won.** Enforcement had been "must go through the log" for several
+  sessions; asking where a refusal *needs* to be deterministic removed a wire change, snapshot state
+  and a sequenced command in one step.
 
 ### What worked
 

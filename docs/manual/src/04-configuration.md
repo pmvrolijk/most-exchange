@@ -86,16 +86,27 @@ session and every node must apply them at the same log position, so they arrive 
 
 ## 4.3 The participant registry
 
-Which gateway may connect as which identity, and which participants it speaks for. Read by **two**
-processes for two different reasons: the consensus module authenticates a connecting gateway against
-it, and the engine resolves the resulting principal into a participant list at session open.
+Who may connect, and what each identity may do. Read by **three** processes for three reasons: the
+consensus module authenticates every cluster session against it and authorises snapshot requests
+from it, the engine resolves each session's principal into the participants it routes reports to,
+and the **gateway enforces it** on every client message.
 
 ```properties
 shard.id=0
-registry.gateways=gw-0
+registry.gateways=control,gw-0,gw-1
 
 gateway.gw-0.secret=3b2c637a03bcb9c167c9bd5f84de22f6bbdc18169d36526cafc164cd68725367
-gateway.gw-0.participants=7,8
+gateway.gw-0.participants=7,8,20,21,22,23
+gateway.gw-0.cancelOnly=9
+gateway.gw-0.operator=true
+
+gateway.gw-1.secret=<sha-256 hex>
+gateway.gw-1.participants=7,14
+
+gateway.control.secret=310c47787a741d2f320f6e921645a52f305b5446acc38a9f6257b2a39cfd94a8
+gateway.control.operator=true
+
+participant.7.primary=gw-0
 ```
 
 | Key | Constraint |
@@ -103,38 +114,71 @@ gateway.gw-0.participants=7,8
 | `shard.id` | Must match the shard of the process reading it, or the process refuses to start |
 | `registry.gateways` | At least one id, comma-separated |
 | `gateway.<id>.secret` | The **SHA-256 hex digest** of the shared secret, 64 lowercase hex characters |
-| `gateway.<id>.participants` | At least one positive participant id. A participant belongs to **at most one gateway** |
+| `gateway.<id>.participants` | Participants that may **place and cancel** through this gateway. Required unless the gateway is an operator |
+| `gateway.<id>.cancelOnly` | Optional. Participants that may **cancel but not place** — revocation made graceful. Not also in `participants` |
+| `gateway.<id>.operator` | Optional, `true` or `false` (default). May send operator commands, and may request a snapshot through consensus. Any other value is refused |
+| `participant.<id>.primary` | Required when a participant is listed on **more than one** gateway, and refused otherwise. Names the gateway it is bound to while both are connected; that gateway must list it |
 
 Gateway ids are at most 64 characters from a restricted alphabet. The file holds the digest, never
-the secret; the secret itself is delivered only to the gateway that presents it.
+the secret; the secret itself is delivered only to the process that presents it. A registry that
+uses none of the optional keys renders and fingerprints exactly as it did before they existed.
 
 ::: term Participant binding
 A gateway presents `gatewayId:secret` as its cluster credentials. The consensus module verifies them
 and stamps the gateway id on the session as its **encoded principal**. Aeron carries that principal
 in the session-open event through the replicated log, so every node derives the identical
-participant-to-session map without any snapshot state of its own. This is what makes a participant's
-fills deliverable when it has said nothing since the gateway last connected.
+participant-to-session map without any snapshot state of its own. A session binds each participant
+its gateway lists **if it is that participant's primary or nobody live holds it**, and a closing
+session's participants move to another open gateway that lists them, primary first. This is what
+makes a participant's fills deliverable when it has said nothing since its gateway last connected.
 :::
 
-::: note Wrong credentials are rejected, never downgraded
-A gateway with a bad secret fails to connect. It is never quietly downgraded to an anonymous session
-— an anonymous gateway trades perfectly well and loses only the fills of whichever participants have
-gone quiet, which is invisible until someone reconciles a `cumQty`. **No** credentials at all still
-authenticates anonymously, because the control plane and the CLI connect to send operator commands
-and are addressed by nobody.
+::: term Operator identity
+An entry with `operator=true`. With no participants at all — the only kind of entry allowed to list
+nobody — it is how the **control plane and the CLI** are named to the cluster. A gateway may be an
+operator as well as speak for participants; the dev stack's `gw-0` is both.
 :::
 
-### Reloading while a node runs
+### What the gateway enforces
 
-The consensus module and the engine both **re-read this file while running**. They compare content by
-fingerprint rather than mtime — a release is published to a new directory and put in force by moving
-a symlink, so mtime says nothing — and swap an immutable registry behind a volatile reference.
+`UNAUTHORIZED_PARTICIPANT` is raised by the **gateway**, locally, before anything reaches the
+cluster:
+
+- an order for a participant not in its `participants` — a `cancelOnly` participant included;
+- a cancel for a participant in neither list. Checked, not optional: the engine's own cancel check is
+  that the participant matches the order's, which only means something once the gateway has
+  established the participant id is one this endpoint may use;
+- an operator command — a session transition, purge, definition or image request, or any message
+  it does not recognise — through a gateway that is **not** an operator is consumed and counted
+  `refusedCommands`. There is no client report for it, so the counter is the only trace.
+
+The client-to-gateway leg is not authenticated, so what this establishes is that *whoever can reach
+this gateway's endpoint may act for these participants*. Authenticating an end client is the job of
+the FIX and session gateways upstream; a member's connection lands on the gateway assigned to it.
+
+The engine never rejects on the registry — a refusal decided from a file each node reads on its own
+schedule would diverge the nodes. It **counts** an order or cancel from a gateway that does not list
+the participant (`undeclaredParticipantMessages`), as defence against a misconfigured gateway.
+
+::: note A node with a registry authenticates everything or nothing
+A gateway with a bad secret fails to connect; it is never quietly downgraded to an anonymous session.
+And a client presenting **no** credentials is refused too: an anonymous session reaches the engine
+without passing any gateway, so it could act for any participant and send any operator command. The
+control plane (4.9) and the CLI (`--identity`, 5.6) therefore hold operator identities. A node
+started without a registry accepts everyone, as before the registry existed.
+:::
+
+### Reloading while running
+
+The consensus module, the engine **and the gateway** re-read this file while running. They compare
+content by fingerprint rather than mtime — a release is published to a new directory and put in
+force by moving a symlink, so mtime says nothing — and swap an immutable registry behind a volatile
+reference. The gateway prints its own grants on every swap (`gateway: now participants=[…]
+cancelOnly=[…] operator=…`), which is the line to wait for when revoking someone.
 
 A file that cannot be parsed, or one for another shard, is **reported and ignored**; the registry in
-force keeps authenticating. Standing down on a bad file would turn a typo into a shard that
-authenticates nobody. Watch `registryReloadFailures` rather than assuming a silent success.
-
-The gateway does **not** reload; it restarts, which costs nothing because it holds no state.
+force keeps applying. Standing down on a bad file would turn a typo into a shard that authenticates
+nobody. Watch `registryReloadFailures` rather than assuming a silent success.
 
 ## 4.4 Engine
 
@@ -150,7 +194,7 @@ engine.bookEvent.streamId=12
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `engine.securitiesFile` | *required* | The shard security file (4.2) |
-| `engine.participantRegistry` | none | The participant registry (4.3). Omit and routes are learned from traffic alone |
+| `engine.participantRegistry` | none | The participant registry (4.3), for routing reports and counting `undeclaredParticipantMessages`. Omit and routes are learned from traffic alone |
 | `engine.participantRegistry.reloadMs` | `5000` | Registry poll interval; `0` disables reloading |
 | `engine.aeronDir` | driver default | Must be the media driver this node's processes share |
 | `engine.clusterDir` | `cluster` | The consensus module's cluster directory, written by the cluster host |
@@ -183,7 +227,7 @@ gateway.credentialTokenFile=/etc/most/gw-a.secret
 gateway.aeronDir=/dev/shm/aeron-gw-a
 gateway.ingressChannel=aeron:udp
 gateway.ingressEndpoints=0=shard0-a:20110,1=shard0-b:20110,2=shard0-c:20110
-gateway.egressChannel=aeron:udp?endpoint=0.0.0.0:0
+gateway.egressChannel=aeron:udp?endpoint=gw-a-host:0
 
 gateway.client.inbound.channel=aeron:udp?endpoint=0.0.0.0:20001
 gateway.client.inbound.streamId=20
@@ -194,14 +238,15 @@ gateway.client.outbound.streamId=21
 | Key | Default | Meaning |
 | --- | --- | --- |
 | `gateway.securitiesFile` | *required* | The shard security file. Orders for anything else are rejected |
-| `gateway.participantRegistry` | none | Checked at boot so a typo in the id stops the process here |
-| `gateway.gatewayId` | none | This gateway's registry id. Unset means an anonymous connection |
+| `gateway.participantRegistry` | none | The registry this gateway **enforces** (4.3), and checks its own id against at boot |
+| `gateway.participantRegistry.reloadMs` | `5000` | Registry poll interval; `0` disables reloading |
+| `gateway.gatewayId` | none | This gateway's registry id. Unset means an anonymous connection that enforces nothing — and that a node with a registry refuses |
 | `gateway.credentialToken` | none | The shared secret as a literal. Prefer the file form |
 | `gateway.credentialTokenFile` | none | The shared secret from a file; trailing whitespace trimmed |
 | `gateway.aeronDir` | driver default | This gateway's own media driver |
 | `gateway.ingressChannel` | `aeron:udp` | Cluster ingress |
 | `gateway.ingressEndpoints` | none | Every member's ingress endpoint, so the client can find the leader |
-| `gateway.egressChannel` | `aeron:udp?endpoint=localhost:9020` | Cluster egress |
+| `gateway.egressChannel` | `aeron:udp?endpoint=localhost:9020` | Cluster egress. The host must be one the cluster can **send to** — the name of the machine whose media driver this gateway uses — never `0.0.0.0` |
 | `gateway.client.inbound.channel` | `aeron:ipc` | Where adapters **publish orders**. Must be unique per gateway |
 | `gateway.client.inbound.streamId` | `20` | |
 | `gateway.client.outbound.channel` | `aeron:ipc` | Where the gateway **publishes execution reports** |
@@ -296,7 +341,7 @@ otherwise.
 | `--cluster-dir DIR` | `<dir>/cluster` | Consensus module directory — **durable** |
 | `--host HOST` | `localhost` | Host name used to build default endpoints |
 | `--members STRING` | single-node default | Aeron member string (3.6) |
-| `--participants FILE` | none | The participant registry to authenticate gateways against |
+| `--participants FILE` | none | The participant registry (4.3). With it, every cluster session must authenticate — anonymous ones are refused — and a snapshot request through consensus is granted only to an `operator=true` identity. Without it, anyone connects and anyone may snapshot |
 | `--participants-reload-ms N` | `5000` | Registry poll interval; `0` disables |
 | `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's throughput ceiling** — see below |
 | `--archive-threading MODE` | `SHARED` | Archive threads: `SHARED` or `DEDICATED`. Leave it alone unless the cores are isolated |
@@ -388,6 +433,16 @@ at all, because it would look protected. Passwords are stored as BCrypt hashes i
 | `CONTROL_DEPTH_PUBLISH_MS` | `250` | How often a conflated book image is pushed to browsers |
 | `CONTROL_DEPTH_MAX_LEVELS` | `25` | Depth per side in that image |
 
+| `CONTROL_CLUSTER_OPERATORCHANNEL_<shardId>` / `…OPERATORSTREAM_<shardId>` | the shard's order-entry endpoint | Where operator commands go (below) |
+
+**Operator commands go through a gateway that must be an operator.** Session transitions, purges,
+definitions and image requests — the scheduler's included — are sent to a gateway like any client
+message, and only one whose registry entry has `operator=true` forwards them (4.3). They are
+unacknowledged, so a refusal is invisible here: the gateway consumes and counts it
+(`refusedCommands`). By default they go to the shard's advertised order-entry endpoint; when that
+gateway is a participant's rather than the operator's, name a dedicated operator gateway with
+`CONTROL_CLUSTER_OPERATORCHANNEL_<shardId>` and, optionally, `…OPERATORSTREAM_<shardId>`.
+
 The link is **optional**. Authoring reference data must work with no media driver anywhere near it,
 so a missing driver is reported by `GET /api/status` and nothing else breaks.
 
@@ -403,8 +458,18 @@ the control plane does not send through a gateway.
 | Variable | Default | |
 | --- | --- | --- |
 | `CONTROL_CLUSTER_INGRESS_CHANNEL` | `aeron:udp` | |
-| `CONTROL_CLUSTER_EGRESS_CHANNEL` | `aeron:udp?endpoint=0.0.0.0:0` | |
+| `CONTROL_CLUSTER_EGRESS_CHANNEL` | `aeron:udp?endpoint=0.0.0.0:0` | **Set it.** The host must be one the cluster can send to — the machine of this process's media driver. With the default the cluster's answer has nowhere to go and every request times out |
 | `CONTROL_CLUSTER_INGRESS_<shardId>` | none | Member endpoints, e.g. `0=shard0-a:20110,1=shard0-b:20110` |
+| `CONTROL_CLUSTER_IDENTITY_<shardId>` | none | The registry identity to present. Required when the shard runs with a registry, which refuses anonymous sessions |
+| `CONTROL_CLUSTER_SECRETFILE_<shardId>` | none | Its secret, from a file only. Set with the identity or not at all |
+
+The identity must be an **operator** entry of that shard's registry — `operator=true`, usually with
+no participants. The consensus module grants a snapshot request only to an operator (4.3), and the
+control plane reports **what the cluster answered**: `confirmed` means it answered OK, which it does
+once the snapshot has been taken; a refusal comes back with the cluster's message, and silence as a
+timeout. (Aeron's own default grants no snapshot request at all. Until the registry authorised
+operators, every snapshot asked for over the network was refused, and reported as confirmed because
+only the offer was checked.)
 
 A shard with no ingress entry simply cannot be snapshotted from the control plane, and the API says
 so rather than failing obscurely. This is deliberately per-process configuration rather than
@@ -427,14 +492,20 @@ The database holds a **draft topology** that nothing reads until it is published
 | `shard` | Shard id and the gateway client endpoints published in the directory |
 | `security` | Identity and geometry (published), plus reference price and collar widths (sent as commands, never published) |
 | `participant` | Participant id, name, SMP id, enabled |
-| `gateway`, `gateway_participant` | Gateway identity, secret digest, and participant claims |
+| `gateway`, `gateway_participant` | Gateway identity, secret digest, `operator`; and per listing, `cancel_only` and `is_primary` |
 | `spec_release`, `spec_release_shard` | Published releases and the fingerprints frozen into each |
 | `session_schedule`, `session_schedule_entry`, `market_holiday` | The trading calendar |
 | `control_user`, `operator_audit` | Operators and who asked for every market-moving command |
 
 ![Securities. Identity and ladder geometry, validated by the same domain objects a process uses at boot — the ISIN check and the length limits have exactly one implementation.](assets/ui-securities.png)
 
-![Gateways. Identity, participant claims, and the rendered registry a shard would publish. Creating a gateway returns its secret exactly once.](assets/ui-gateways.png)
+![Gateways. What each identity may do: participants that place (P marks a primary), those that may only cancel, and whether it is an operator. Creating a gateway returns its secret exactly once.](assets/ui-gateways.png)
+
+A participant may be listed on several gateways; where several of a shard's gateways list it, one
+must be marked its primary, or the draft view reports the shard's registry as a problem and the
+release cannot be published. One primary per participant per shard is refused at the point of the
+mistake. An operator-only gateway (operator, no participants) is published like any other — it is
+the control plane's and the CLI's identity.
 
 ::: warning A gateway secret is returned exactly once
 `POST /api/gateways` generates one and returns the plaintext in that response and nowhere else; the

@@ -10,12 +10,13 @@ References are to section numbers. **Bold** marks where a term is defined.
 
 <ul>
 <li>Aeron directory <span class="ref">2.9, 4.8, 6.2</span></li>
-<li>Anonymous gateway <span class="ref">4.3, 6.5, 6.8</span></li>
+<li>Anonymous session, refused <span class="ref"><b>4.3</b>, 4.8, 6.5, 6.8</span></li>
 <li>Archive <span class="ref">3.3, 3.6, <b>4.8</b>, 5.6</span></li>
 <li>Auction, opening <span class="ref">1.6, <b>5.4</b></span></li>
 <li>Auction, uncollared <span class="ref">5.4</span></li>
 <li>Back-pressure, cluster ingress <span class="ref"><b>5.4</b>, 5.8</span></li>
 <li>Busy-spin idle strategy <span class="ref">3.4, 5.8</span></li>
+<li>Cancel-only participant <span class="ref"><b>4.3</b>, 6.7</span></li>
 <li>Book capacity <span class="ref">4.2, 5.4, 6.5</span></li>
 <li>Book event stream <span class="ref">1.2, 3.2, 4.4, 4.6</span></li>
 <li>Book image <span class="ref"><b>5.3</b>, 6.6</span></li>
@@ -44,6 +45,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Fingerprint, shard geometry <span class="ref"><b>1.4</b>, 2.4, 3.9, 4.11, 6.1</span></li>
 <li>Fixed point, 8 decimals <span class="ref"><b>1.5</b>, 4.2</span></li>
 <li>Flow control, multicast <span class="ref"><b>3.7</b>, 6.6</span></li>
+<li>Gateway enforcement <span class="ref"><b>4.3</b>, 5.4, 6.5</span></li>
 <li>Gateway identity <span class="ref">4.3, 4.5, 6.7</span></li>
 <li>Geometry, ladder <span class="ref"><b>4.2</b>, 6.3, 6.7</span></li>
 </ul>
@@ -65,6 +67,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Metrics, hot path <span class="ref"><b>4.4</b>, 4.5, 5.7</span></li>
 <li>Multicast, market data <span class="ref"><b>3.7</b>, 4.6</span></li>
 <li>origQty <span class="ref"><b>2.6</b>, 4.5, 5.8</span></li>
+<li>Operator identity <span class="ref"><b>4.3</b>, 4.9, 5.6</span></li>
 </ul>
 
 ### P–S
@@ -72,6 +75,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <ul>
 <li>Participant binding <span class="ref"><b>4.3</b>, 6.5, 6.7</span></li>
 <li>Participant registry <span class="ref"><b>4.3</b>, 4.4, 4.5, 4.8, 6.7</span></li>
+<li>Primary gateway <span class="ref"><b>4.3</b>, 4.10</span></li>
 <li>Phase, session <span class="ref"><b>1.6</b>, 5.1, 5.2</span></li>
 <li>Purge, expired orders <span class="ref"><b>5.1</b>, 5.3</span></li>
 <li>Reject reasons <span class="ref"><b>5.4</b></span></li>
@@ -86,6 +90,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Shard <span class="ref"><b>1.1</b>, 4.2</span></li>
 <li>Shard security file <span class="ref"><b>4.2</b>, 4.4–4.7</span></li>
 <li>Snapshot, cluster <span class="ref"><b>5.6</b>, 6.3, 6.7</span></li>
+<li>Snapshot authorisation <span class="ref">4.8, 4.9, <b>5.6</b>, 6.5</span></li>
 <li>Saturation, and the <code>SATURATED</code> marker <span class="ref"><b>5.7</b>, 4.8, 6.5</span></li>
 <li>Snapshot, depth recovery <span class="ref">4.6, <b>5.5</b>, 6.6</span></li>
 <li>Sustainable rate <span class="ref"><b>5.7</b>, 4.8</span></li>
@@ -100,6 +105,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Topology, draft <span class="ref">4.10, 4.11</span></li>
 <li>Trading date <span class="ref">5.1, 5.3</span></li>
 <li>Uncross <span class="ref">1.6, <b>5.4</b>, 6.4</span></li>
+<li><code>UNAUTHORIZED_PARTICIPANT</code> <span class="ref"><b>4.3</b>, 5.4, 6.5</span></li>
 <li>Universe version <span class="ref">2.5, 5.8</span></li>
 <li>Zero allocation <span class="ref">2.2, 6.9</span></li>
 </ul>
@@ -127,6 +133,8 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>most cluster</code> <span class="ref">2.10, <b>4.8</b></span></li>
 <li><code>most counters</code> <span class="ref"><b>5.8</b>, 6.1</span></li>
 <li><code>most cluster snapshot</code> <span class="ref"><b>5.6</b>, 6.7</span></li>
+<li><code>--identity</code>, <code>--secret-file</code> <span class="ref">4.3, <b>5.6</b></span></li>
+<li><code>--order-entry-channel</code>, <code>--report-channel</code> <span class="ref">4.9</span></li>
 <li><code>most cluster shutdown</code> <span class="ref">5.6</span></li>
 </ul>
 
@@ -184,6 +192,9 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>registry.gateways</code> <span class="ref">4.3</span></li>
 <li><code>gateway.&lt;id&gt;.secret</code> <span class="ref">4.3</span></li>
 <li><code>gateway.&lt;id&gt;.participants</code> <span class="ref">4.3</span></li>
+<li><code>gateway.&lt;id&gt;.cancelOnly</code> <span class="ref">4.3</span></li>
+<li><code>gateway.&lt;id&gt;.operator</code> <span class="ref">4.3</span></li>
+<li><code>participant.&lt;id&gt;.primary</code> <span class="ref">4.3</span></li>
 </ul>
 
 ### Engine
@@ -206,6 +217,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <ul>
 <li><code>gateway.securitiesFile</code> <span class="ref">4.5</span></li>
 <li><code>gateway.participantRegistry</code> <span class="ref">4.5</span></li>
+<li><code>gateway.participantRegistry.reloadMs</code> <span class="ref">4.5, 6.7</span></li>
 <li><code>gateway.gatewayId</code> <span class="ref">4.5, 6.2</span></li>
 <li><code>gateway.credentialToken</code> / <code>TokenFile</code> <span class="ref">4.5</span></li>
 <li><code>gateway.ingressChannel</code> <span class="ref">3.6, 4.5</span></li>
@@ -257,6 +269,9 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>CONTROL_SNAPSHOT_*</code> <span class="ref">4.9</span></li>
 <li><code>CONTROL_DEPTH_PUBLISH_MS</code> / <code>_MAX_LEVELS</code> <span class="ref">4.9</span></li>
 <li><code>CONTROL_CLUSTER_INGRESS_&lt;shardId&gt;</code> <span class="ref"><b>4.9</b>, 5.6</span></li>
+<li><code>CONTROL_CLUSTER_IDENTITY_&lt;shardId&gt;</code>, <code>…SECRETFILE_…</code> <span class="ref"><b>4.9</b>, 5.6</span></li>
+<li><code>CONTROL_CLUSTER_OPERATORCHANNEL_&lt;shardId&gt;</code>, <code>…OPERATORSTREAM_…</code> <span class="ref"><b>4.9</b>, 6.5</span></li>
+<li><code>CONTROL_CLUSTER_EGRESS_CHANNEL</code> <span class="ref"><b>4.9</b>, 6.5</span></li>
 <li><code>CONTROL_SCHEDULER_ENABLED</code> / <code>_INTERVAL_MS</code> <span class="ref">4.9, 5.2</span></li>
 </ul>
 

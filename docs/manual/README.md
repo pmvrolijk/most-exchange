@@ -67,6 +67,11 @@ cd deploy && docker compose up -d
 # place a few orders so the Books and Status screens have something to show
 ```
 
-Then drive a headless Chrome through the console at <http://localhost:8081> (`admin` /
-`most-dev-password`), signing in and screenshotting each route into `assets/ui-<route>.png` at a
-1440×900 viewport and a device scale factor of 2.
+Then `node screenshots.cjs` drives a headless Chrome through the console at <http://localhost:8081>
+(`admin` / `most-dev-password`), signing in and screenshotting each route into
+`assets/ui-<route>.png` at a 1440×900 viewport and a device scale factor of 2. It waits for the DOM
+and a fixed beat rather than for the network to go idle, because Books and Status stream and never
+do. Look at each image before rebuilding: a book captured before its first snapshot shows nothing.
+
+The `/api/status` transcript in 5.8 comes from the same stack; regenerate it with a short `most load`
+run and a collar breach so it shows both traffic and a halt, and never edit one by hand.

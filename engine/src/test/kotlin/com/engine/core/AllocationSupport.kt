@@ -40,7 +40,10 @@ import com.engine.sbe.SmpStrategy as SbeSmpStrategy
  * session header exactly as Aeron does, so the service encodes at the offset it uses in
  * production rather than one this fake made convenient (see CLAUDE.md).
  */
-internal class CountingSession(private val id: Long) : ClientSession {
+internal class CountingSession(
+    private val id: Long,
+    private val principal: ByteArray = EMPTY,
+) : ClientSession {
     private val buffer = UnsafeBuffer(ByteArray(64 * 1024))
     var claims = 0L
         private set
@@ -48,7 +51,7 @@ internal class CountingSession(private val id: Long) : ClientSession {
     override fun id(): Long = id
     override fun responseStreamId(): Int = 1
     override fun responseChannel(): String = "fake"
-    override fun encodedPrincipal(): ByteArray = EMPTY
+    override fun encodedPrincipal(): ByteArray = principal
     override fun close() = Unit
     override fun isClosing(): Boolean = false
     override fun offer(b: DirectBuffer, offset: Int, length: Int): Long = 1L
@@ -120,6 +123,10 @@ internal class Driver(
     bookEventStreamId: Int = 12,
     /** Hot-path timing, exactly as a node would run it. Null is the production default. */
     metrics: EngineMetrics? = null,
+    /** Which gateway speaks for whom. Null is the default: no registry, nothing declared. */
+    participantRegistry: com.engine.reference.ParticipantRegistry? = null,
+    /** The gateway id the driving session authenticated as, if any. */
+    principal: String? = null,
 ) {
     val book = OrderBook(
         securityId = Alloc.SECURITY_ID,
@@ -129,7 +136,10 @@ internal class Driver(
         maxOrders = maxOrders,
     )
     private val books = arrayOf(book)
-    val session = CountingSession(Alloc.SESSION_ID)
+    val session = CountingSession(
+        Alloc.SESSION_ID,
+        principal?.toByteArray(Charsets.US_ASCII) ?: ByteArray(0),
+    )
     private val cluster = SingleSessionCluster(session, aeron)
     val service = MatchingEngineService(
         shardId = 1,
@@ -139,6 +149,7 @@ internal class Driver(
         bookEventStreamId = bookEventStreamId,
         levelCount = Alloc.LEVELS,
         metrics = metrics,
+        participantRegistry = { participantRegistry },
     )
     private val useRealAeron = aeron != null
 
@@ -170,6 +181,8 @@ internal class Driver(
                 .apply { isAccessible = true }.set(service, cluster)
         }
         service.onRoleChange(Cluster.Role.LEADER)
+        // What onStart does for sessions already present: bind their declared participants.
+        if (!useRealAeron) service.rebindDeclaredParticipants()
         book.phase = Phase.CONTINUOUS
         book.tradingDate = Alloc.TRADING_DATE
     }

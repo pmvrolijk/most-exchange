@@ -160,9 +160,10 @@ SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and w
 
 - **A participant is bound to its session at session open, from an authenticated principal.** The
   consensus module verifies `gatewayId:secret` against the shard's `ParticipantRegistry` and stamps
-  the gateway id as the encoded principal; the engine binds every participant it claims. The map is
-  rebuilt in `onStart` from `cluster.clientSessions()` and needs **no snapshot state of its own**.
-  → R§8
+  the gateway id as the encoded principal; the engine binds each participant that gateway lists
+  **if it is the participant's primary or nobody live holds it**, and a closing session's routes move
+  to another open gateway that lists them, primary first. The map is rebuilt in `onStart` from
+  `cluster.clientSessions()` and needs **no snapshot state of its own**. → R§8
 - **Traffic still wins for the order it arrived on**, and `onSessionClose` drops only routes that
   session **still owns**. Both directions are mutation-tested in `ParticipantBindingTest`. → R§8
 - **Wrong credentials are rejected, never downgraded to anonymous.** *No* credentials still

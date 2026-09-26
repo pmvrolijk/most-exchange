@@ -194,4 +194,32 @@ class AllocationTest {
         assertTrue(metrics.admit.count > 0, "sanity: the stage histograms actually recorded")
         assertTrue(metrics.match.count > 0)
     }
+
+    /**
+     * Design.md §1: with a registry in force, every order and cancel from an authenticated session
+     * is checked against what its gateway declares, and an undeclared one is counted. That check
+     * is on the hot path, so it must allocate nothing -- participant 1 is declared, 2 is not, so
+     * both branches run every round.
+     */
+    @Test
+    fun `declared participant accounting allocates nothing`() {
+        val registry = com.engine.reference.ParticipantRegistry(
+            shardId = 1,
+            gateways = listOf(
+                com.engine.reference.GatewayIdentity(
+                    "gw-alloc", com.engine.reference.ParticipantRegistry.sha256Hex("alloc"), listOf(1L),
+                ),
+            ),
+        )
+        val driver = Driver(participantRegistry = registry, principal = "gw-alloc")
+        var clOrdId = 0L
+
+        assertNoSteadyStateAllocation("matching with declarations checked", opsPerRound = 2) {
+            driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE, 1L)
+            driver.newOrder(2L, clOrdId++, Side.SELL, Alloc.PRICE, 1L)
+        }
+        assertEquals(0, driver.book.restingOrderCount())
+        assertTrue(driver.service.undeclaredParticipantMessages > 0, "sanity: the check actually ran")
+        assertEquals(1L, driver.service.declaredBindings, "sanity: the session's declaration was bound")
+    }
 }

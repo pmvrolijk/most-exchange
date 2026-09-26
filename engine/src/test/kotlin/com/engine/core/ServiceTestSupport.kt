@@ -182,6 +182,12 @@ class Harness(
     val session = FakeSession(SESSION_ID, principal = sessionPrincipal)
 
     /**
+     * The registry in force. Assignable, so a test can do what `ParticipantRegistrySource` does to a
+     * running node: swap it underneath the service.
+     */
+    var participantRegistry: com.engine.reference.ParticipantRegistry? = participantRegistry
+
+    /**
      * Mutable, so a test can open and close sessions the way a gateway restart does. `FakeCluster`
      * reads it live rather than copying, which is what makes `clientSessions()` reflect them.
      */
@@ -195,7 +201,7 @@ class Harness(
         bookEventStreamId = 12,
         levelCount = levelCount,
         auctionMaxPasses = auctionMaxPasses,
-        participantRegistry = { participantRegistry },
+        participantRegistry = { this.participantRegistry },
         metrics = metrics,
     )
 

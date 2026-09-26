@@ -633,6 +633,13 @@ pass "gw-1 refused the operator command and counted both refusals"
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2
 stop_node
+# The engine's own view of 4a-4f, printed at shutdown: every order and cancel it received came from a
+# gateway that lists the participant. A gateway that forwarded one it should have refused would
+# show here -- counted, never rejected, since the engine must not decide on a node-local file.
+grep -q "undeclaredParticipantMessages=0 " "$LOGS/engine-same.log" \
+  || { grep -o "undeclaredParticipantMessages=[0-9]*" "$LOGS/engine-same.log" >&2
+       fail "the engine saw a participant its sending gateway does not list"; }
+pass "the engine received nothing for a participant its gateway does not list"
 
 # ------------------------------------------------------------------------- 5
 echo

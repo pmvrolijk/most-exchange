@@ -164,6 +164,7 @@ fun main(args: Array<String>) {
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +
+                    "undeclaredParticipantMessages=${service.undeclaredParticipantMessages} " +
                     "participantRoutes=${service.participantRoutes}" +
                     (registrySource?.let {
                         " registryReloads=${it.reloads} registryReloadFailures=${it.failures}"

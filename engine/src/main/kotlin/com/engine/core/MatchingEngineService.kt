@@ -43,6 +43,7 @@ import io.aeron.logbuffer.Header
 import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
 import org.agrona.collections.Long2LongHashMap
+import org.agrona.collections.Long2ObjectHashMap
 import com.engine.sbe.Phase as SbePhase
 import com.engine.sbe.RejectReason as SbeRejectReason
 import com.engine.sbe.Side as SbeSide
@@ -86,8 +87,9 @@ class MatchingEngineService(
      * Which gateway speaks for which participant, or null to keep the old behaviour of learning
      * every route from traffic.
      *
-     * When present, a session that authenticated as one of these gateways has all of that
-     * gateway's participants bound to it the moment the session opens -- so a maker that has said
+     * When present, a session that authenticated as one of these gateways has that gateway's
+     * participants bound to it the moment the session opens -- those it is the primary for, and any
+     * nobody live holds (Design.md §1) -- so a maker that has said
      * nothing since the gateway last connected is still reachable when its resting order fills.
      * Every node must hold an identical copy; see [ParticipantRegistry].
      *
@@ -215,6 +217,23 @@ class MatchingEngineService(
     var unknownPrincipals = 0L
         private set
 
+    /**
+     * Orders and cancels from an authenticated session for a participant its gateway does not list
+     * (Design.md §1). Defence in depth against a misconfigured gateway, which is where enforcement
+     * lives. **Counted, never rejected, never branched on**: this rests on a file each node reads on
+     * its own schedule, so anything it decided would diverge the nodes.
+     */
+    var undeclaredParticipantMessages = 0L
+        private set
+
+    /**
+     * What each authenticated session's principal declares, sorted, under [declaredUnder]. Feeds
+     * [undeclaredParticipantMessages] and nothing else. Rebuilt whenever the registry in force is a
+     * different object, which is the only time this path allocates.
+     */
+    private val declaredBySession = Long2ObjectHashMap<LongArray>()
+    private var declaredUnder: ParticipantRegistry? = null
+
     /** Routes currently held, declared and learned together. */
     val participantRoutes: Int get() = participantToSession.size
 
@@ -241,6 +260,18 @@ class MatchingEngineService(
      */
     internal fun rebindDeclaredParticipants() {
         for (session in cluster.clientSessions()) bindDeclaredParticipants(session)
+    }
+
+    /** True when [participantId]'s route names a session that is still open. */
+    private fun hasLiveRoute(participantId: Long): Boolean {
+        val sessionId = participantToSession.get(participantId)
+        return sessionId != NULL_SESSION && cluster.getClientSession(sessionId) != null
+    }
+
+    private fun gatewayIdOf(session: ClientSession): String? {
+        val principal = session.encodedPrincipal()
+        if (principal == null || principal.isEmpty()) return null
+        return String(principal, Charsets.US_ASCII)
     }
 
     override fun onRoleChange(newRole: Cluster.Role) {
@@ -280,7 +311,10 @@ class MatchingEngineService(
     }
 
     /**
-     * Drops the routes this session declared, and only those it still owns.
+     * Drops the routes this session declared and still owns, and moves each to another open session
+     * whose gateway lists that participant -- its primary if that is connected, otherwise the first
+     * found (Design.md §1). This is what makes a failover gateway worth running: without it, a
+     * quiet participant would have no route until it next spoke.
      *
      * The ownership test is not defensive tidiness. A participant registered to gateway A that has
      * been sending through gateway B is bound to B by its own traffic, and B is the gateway holding
@@ -294,11 +328,38 @@ class MatchingEngineService(
         timestamp: Long,
         closeReason: CloseReason,
     ) {
+        declaredBySession.remove(session.id())
         val participants = declaredParticipantsOf(session) ?: return
         for (participantId in participants) {
             if (participantToSession.get(participantId) == session.id()) {
                 participantToSession.remove(participantId)
+                rebindElsewhere(participantId, closing = session.id())
             }
+        }
+    }
+
+    /**
+     * Allocates (it walks the open sessions and decodes their principals), and runs only on
+     * session close -- never on the message path.
+     */
+    private fun rebindElsewhere(participantId: Long, closing: Long) {
+        val registry = participantRegistry() ?: return
+        val primary = registry.primaryOf(participantId)
+        var chosen = NULL_SESSION
+        for (candidate in cluster.clientSessions()) {
+            if (candidate.id() == closing) continue
+            val gatewayId = gatewayIdOf(candidate) ?: continue
+            val listed = registry.participantsOf(gatewayId) ?: continue
+            if (listed.binarySearch(participantId) < 0) continue
+            if (gatewayId == primary) {
+                chosen = candidate.id()
+                break
+            }
+            if (chosen == NULL_SESSION) chosen = candidate.id()
+        }
+        if (chosen != NULL_SESSION) {
+            participantToSession.put(participantId, chosen)
+            declaredBindings++
         }
     }
 
@@ -327,16 +388,40 @@ class MatchingEngineService(
      */
     private fun bindDeclaredParticipants(session: ClientSession) {
         val registry = participantRegistry() ?: return
-        val principal = session.encodedPrincipal()
-        if (principal == null || principal.isEmpty()) return
-        val participants = registry.participantsOf(String(principal, Charsets.US_ASCII))
+        val gatewayId = gatewayIdOf(session) ?: return
+        val participants = registry.participantsOf(gatewayId)
         if (participants == null) {
             unknownPrincipals++
             return
         }
+        if (registry === declaredUnder) declaredBySession.put(session.id(), participants)
+        // Only where this gateway is the primary, or nobody live holds the participant: a failover
+        // connecting beside a live primary must take nothing from it (Design.md §1).
         for (participantId in participants) {
-            participantToSession.put(participantId, session.id())
-            declaredBindings++
+            if (registry.primaryOf(participantId) == gatewayId || !hasLiveRoute(participantId)) {
+                participantToSession.put(participantId, session.id())
+                declaredBindings++
+            }
+        }
+    }
+
+    /**
+     * Counts [participantId] if [session] authenticated as a gateway that does not list it. Never
+     * branches on the outcome. Allocation-free unless the registry in force has just changed.
+     */
+    private fun countIfUndeclared(session: ClientSession, participantId: Long) {
+        val registry = participantRegistry() ?: return
+        if (registry !== declaredUnder) redeclare(registry)
+        val declared = declaredBySession.get(session.id()) ?: return
+        if (declared.binarySearch(participantId) < 0) undeclaredParticipantMessages++
+    }
+
+    private fun redeclare(registry: ParticipantRegistry) {
+        declaredUnder = registry
+        declaredBySession.clear()
+        for (session in cluster.clientSessions()) {
+            val gatewayId = gatewayIdOf(session) ?: continue
+            registry.participantsOf(gatewayId)?.let { declaredBySession.put(session.id(), it) }
         }
     }
 
@@ -421,6 +506,7 @@ class MatchingEngineService(
         val side = newOrderDecoder.side().value()
         val smpStrategy = newOrderDecoder.smpStrategy().value()
 
+        countIfUndeclared(session, participantId)
         participantToSession.put(participantId, session.id())
 
         val bookIndex = indexOfSecurity(securityId)
@@ -594,6 +680,7 @@ class MatchingEngineService(
         val securityId = cancelDecoder.securityId()
         val side = cancelDecoder.side().value()
 
+        countIfUndeclared(session, participantId)
         participantToSession.put(participantId, session.id())
 
         val bookIndex = indexOfSecurity(securityId)

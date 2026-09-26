@@ -2750,10 +2750,11 @@ It found three defects that unit tests could not:
   restarts the gateway, crosses the offer and checks the maker's `cumQty` advanced — which it can
   only do if the fill reached a gateway the maker had not spoken to. Two things are left, and are
   stated rather than hidden. **Enforcement** is decided and being built, at the gateway rather than
-  in the engine (§1, "Enforcement, at the gateway"): the registry model and the gateway's checks
-  and hot reload are in, and `e2e/run-restart.sh` §4f exercises them against a live shard. The
-  engine's primary-aware binding and counter, the CLI and control-plane identities, and — last,
-  since it needs those identities — the refusal of anonymous sessions follow. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
+  in the engine (§1, "Enforcement, at the gateway"): the registry model, the gateway's checks and
+  hot reload, and the engine's primary-aware binding and `undeclaredParticipantMessages` counter
+  are in, and `e2e/run-restart.sh` §4f exercises them against a live shard. The CLI and
+  control-plane identities, and — last, since it needs those identities — the refusal of anonymous
+  sessions follow. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
   by nothing. **Granularity:** the identity is the
   gateway's, not the end participant's — this is authentication of the process, and the participant
   ids it claims are trusted because the file says so, not because each client proved anything.

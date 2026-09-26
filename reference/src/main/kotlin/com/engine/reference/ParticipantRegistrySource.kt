@@ -18,8 +18,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * anyone. So two nodes briefly holding different versions of this file cannot diverge the log, the
  * books or a snapshot — they can only disagree about where to send a report, and only one of them
  * is sending. That stops being true the moment the engine *rejects* an order on a binding, which is
- * why enforcement (`UNAUTHORIZED_PARTICIPANT`) has to arrive through the log rather than from a
- * file each node reads on its own schedule.
+ * why the engine never does: `UNAUTHORIZED_PARTICIPANT` is raised by the gateway, before the log,
+ * where a node-local file is exactly what the decision may rest on (Design.md §1, "Enforcement, at
+ * the gateway").
  *
  * Three rules, each of which is the conservative half of a choice:
  *

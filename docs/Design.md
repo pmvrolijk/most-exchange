@@ -112,8 +112,12 @@ needs a route back that the inbound message cannot supply. The engine therefore 
 **Declared, at session open.** A gateway presents `gatewayId:secret` as its Aeron cluster
 credentials. The **consensus module** verifies them against the shard's *participant registry* and
 stamps the gateway id on the session as its **encoded principal**; the engine resolves that
-principal back to a participant list through its own copy of the same file and binds every one of
-them. Two properties come free from doing it this way rather than with a message of our own: the
+principal back to a participant list (its `participants` and its `cancelOnly`, since a cancel-only
+participant's resting orders still fill) through its own copy of the same file and binds each one
+**for which this gateway is the primary, or which has no live route yet** — so a failover gateway
+connecting beside a live primary takes nothing from it. When a session closes, each route it still
+owned is rebound to another open session whose gateway lists the participant, the primary first.
+Two properties come free from doing it this way rather than with a message of our own: the
 principal is carried in the session-open event through the replicated log, so every node derives the
 identical map; and because Aeron restores sessions and their principals from the consensus module's
 own snapshot, a service that restarts rebuilds the bindings in `onStart` from
@@ -135,8 +139,12 @@ The registry is a published file, read by the consensus module and by the engine
 its `fingerprint()` at startup: two nodes disagreeing about it would route the same report to
 different places. It is deliberately **not** folded into `ShardSpec.fingerprint()`, which the control
 plane records in every release — rotating a gateway secret is not a change of shard geometry. A
-participant belongs to at most one gateway, because two claims on one participant would be resolved
-by whichever session happened to open last. It is **authored in the control plane** and rendered
+participant may be listed on **several gateways** — a primary and a failover, say — and then the
+registry must name one of them its **primary** (`participant.<id>.primary`), which lists it. The
+primary is where the participant is bound at session open when more than one listing gateway is
+connected; without that declaration two claims on one participant would be resolved by whichever
+session happened to open last. A participant on one gateway needs no primary line, and a primary
+line for one that is not on several gateways is refused as a typo. It is **authored in the control plane** and rendered
 into each release beside the shard security file, so the `participant` table and the file the
 cluster authenticates against cannot disagree (`docs/ControlPlane.md`).
 
@@ -148,26 +156,65 @@ directory and put in force by moving a symlink, so the path's own timestamp need
 swaps an immutable registry behind a volatile reference, announcing both fingerprints. A file that
 cannot be parsed, or one for another shard, is reported and ignored: the registry in hand is still
 correct, and standing down on a bad file would turn a typo into a shard that authenticates nobody.
-The gateway does not reload — it restarts, which now costs nothing, and its replacement session
-re-derives its bindings at open.
+The gateway re-reads it the same way, with the same rules, because it is where the registry is
+enforced (below): revoking a participant must not wait for someone to restart a process.
 
 **Why that is legal in the engine, and the line it must not cross.** What this feeds is node-local
 *egress routing*: the map is rebuilt in `onStart` from `Cluster.clientSessions()`, is deliberately
 not snapshotted, and only the leader's egress reaches anyone. Two nodes briefly holding different
 versions of the file cannot diverge the log, the books or a snapshot — they can only disagree about
 where to send a report, and only one of them is sending. That stops being true the moment the engine
-*rejects* an order on a binding, so `UNAUTHORIZED_PARTICIPANT` (§8) has to arrive through the log
-rather than from a file each node reads on its own schedule. The reload is node-local by the same
-argument that keeps metrics out of `EngineConfig.fingerprint()`.
+*rejects* an order on a binding, and so **the engine never does**: enforcement happens at the
+gateway, before the log (below). The reload is node-local by the same argument that keeps metrics
+out of `EngineConfig.fingerprint()`.
 
-Both halves are optional and default to off, which is the behaviour that shipped before the registry
-existed. A client presenting **no** credentials — the control plane, the operator CLI — authenticates
-anonymously with the null principal and is bound to nothing. Credentials that do **not** verify are
-**rejected outright**, never downgraded to anonymous: a gateway that connected anonymously by
-accident would trade perfectly well and lose only the fills of whichever participants had gone
-quiet, which is precisely the failure this removes. What is still not enforced is the converse — the
-engine does not yet refuse an order whose `participantId` is not bound to the session it arrived on,
-so `UNAUTHORIZED_PARTICIPANT` remains unraised; see §8.
+The registry is optional and defaults to off, which is the behaviour that shipped before it existed:
+a node started without one authenticates every client anonymously and a gateway without one enforces
+nothing. **A node started with one authenticates everything or nothing.** Credentials that do not
+verify are **rejected outright**, never downgraded to anonymous — a gateway that connected
+anonymously by accident would trade perfectly well and lose only the fills of whichever participants
+had gone quiet. And a client presenting **no** credentials is **rejected too**: an anonymous session
+reaches the engine without passing any gateway, so it could act for any participant and send any
+operator command, and every check below would be decoration. The control plane and the operator
+CLI, which reach the cluster directly, therefore hold registry identities of their own.
+
+#### Enforcement, at the gateway
+
+`UNAUTHORIZED_PARTICIPANT` is raised by the **gateway**, locally, as an `ExecutionReport` it writes
+itself — the same path as `UNKNOWN_SECURITY`. A refused message never enters the log, so no node
+ever sees it and determinism has nothing to protect; the gateway can therefore decide from a file it
+re-reads on its own schedule, which the engine cannot. It also rejects early, at the edge, before the
+message costs consensus anything.
+
+Each gateway entry in the registry grants three things, and the gateway checks each on every message:
+
+* **`participants`** — may place orders and cancel them.
+* **`cancelOnly`** — may cancel, may not place. This is revocation made graceful: moving a
+  participant here, and publishing, stops new business at once while leaving it able to withdraw
+  what is resting. A participant may not be in both lists of one gateway. (A bulk cancel of a
+  revoked participant's orders would make this unnecessary, and does not exist yet.)
+* **`operator`** (`true`/`false`, default `false`) — may send operator commands: session
+  transitions, purges, security definitions, book-image requests. A gateway that is not an operator
+  consumes them and counts them; there is no client report to reject to. An **operator-only**
+  identity — `operator=true` and no participants at all — is how the control plane and the CLI are
+  named, and is the only kind of entry allowed to list nobody.
+
+A cancel is checked as well as an order, and that is not optional: the engine's own cancel check is
+that the cancel's `participantId` matches the order's, which only means something if the gateway
+has already established that the participant id is one this endpoint may use.
+
+**What the check establishes.** The client-to-gateway leg is not authenticated, so the
+`participantId` on a message is a claim, and the rule this enforces is *whoever can reach this
+gateway's endpoint may act for these participants*. That is the right layer for this system —
+authenticating an end client is the job of the FIX and session gateways upstream (§1, "The wire"),
+and a member firm's connection lands on the gateway assigned to it. It is not per-client
+authentication, and nothing here pretends to be.
+
+**The engine counts what it cannot refuse.** Defence in depth against a misconfigured gateway: a
+message from an authenticated session for a participant its principal does not list is counted
+(`undeclaredParticipantMessages`), never rejected, never branched on. Like metrics, enabling or
+disabling it — or two nodes holding different registries — is incapable of changing the log, the
+books or a snapshot.
 
 A report for a participant with no live session is still counted and dropped — blocking the engine
 thread on an absent consumer is worse than losing the report.
@@ -2701,11 +2748,12 @@ It found three defects that unit tests could not:
   against the shard's participant registry and the engine binds that gateway's participants at
   session open, from the principal carried in the log (§1). `e2e/run-restart.sh` §4c rests an offer,
   restarts the gateway, crosses the offer and checks the maker's `cumQty` advanced — which it can
-  only do if the fill reached a gateway the maker had not spoken to. Three things are left, and are
-  stated rather than hidden. **Enforcement:** the engine binds routes but does not yet *refuse* an
-  order whose `participantId` is not bound to the sending session, so `UNAUTHORIZED_PARTICIPANT` is
-  still raised by nothing and a gateway may still trade on behalf of a participant that is not its
-  own. **Granularity:** the identity is the
+  only do if the fill reached a gateway the maker had not spoken to. Two things are left, and are
+  stated rather than hidden. **Enforcement** is decided and being built, at the gateway rather than
+  in the engine (§1, "Enforcement, at the gateway"): the registry model is in; the gateway's
+  checks, the engine's primary-aware binding and counter, the CLI and control-plane identities,
+  and — last, since it needs those identities — the refusal of anonymous sessions follow. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
+  by nothing. **Granularity:** the identity is the
   gateway's, not the end participant's — this is authentication of the process, and the participant
   ids it claims are trusted because the file says so, not because each client proved anything.
 * **The directory advertises one order-entry endpoint per shard.** `ShardEntry` carries a single

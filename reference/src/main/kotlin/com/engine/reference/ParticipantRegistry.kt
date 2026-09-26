@@ -5,7 +5,13 @@ import java.security.MessageDigest
 import java.util.Properties
 
 /**
- * One gateway's identity: what it proves at connect, and which participants it speaks for.
+ * One gateway's identity: what it proves at connect, and what it may do (Design.md §1,
+ * "Enforcement, at the gateway"):
+ *
+ *  - [participants] may place orders and cancel them;
+ *  - [cancelOnly] may cancel and not place -- a revoked participant withdrawing what is resting;
+ *  - [operator] may send operator commands. An operator-only identity (no participants at all) is
+ *    how the control plane and the CLI are named, and the only kind allowed to list nobody.
  *
  * [secretSha256] is the SHA-256 of the shared secret, hex-encoded. The secret itself is never in
  * this file — the file is published to every node and to the gateway hosts, and a value that has
@@ -17,6 +23,8 @@ data class GatewayIdentity(
     val gatewayId: String,
     val secretSha256: String,
     val participants: List<Long>,
+    val cancelOnly: List<Long> = emptyList(),
+    val operator: Boolean = false,
 ) {
     init {
         require(gatewayId.isNotBlank()) { "a gateway has no id" }
@@ -30,21 +38,47 @@ data class GatewayIdentity(
             "gateway $gatewayId: secret must be the SHA-256 of the shared secret as " +
                 "$SHA256_HEX_LENGTH lowercase hex characters"
         }
-        require(participants.isNotEmpty()) { "gateway $gatewayId speaks for no participants" }
-        require(participants.all { it > 0L }) {
-            "gateway $gatewayId has a non-positive participantId: $participants"
+        require(operator || participants.isNotEmpty() || cancelOnly.isNotEmpty()) {
+            "gateway $gatewayId speaks for no participants and is not an operator"
         }
-        val duplicates = participants.groupBy { it }.filterValues { it.size > 1 }.keys
+        val listed = participants + cancelOnly
+        require(listed.all { it > 0L }) {
+            "gateway $gatewayId has a non-positive participantId: $listed"
+        }
+        val duplicates = listed.groupBy { it }.filterValues { it.size > 1 }.keys
         require(duplicates.isEmpty()) {
-            "gateway $gatewayId lists a participant twice: $duplicates"
+            "gateway $gatewayId lists a participant twice (in participants and cancelOnly, or " +
+                "twice in one): $duplicates"
         }
     }
 
-    /** The participant ids, sorted, as the engine indexes them. */
-    fun participantIds(): LongArray = participants.sorted().toLongArray()
+    // Sorted once, so the checks a gateway makes on every message are a binary search and allocate
+    // nothing. Not constructor properties, so they stay out of equals and the data-class copy.
+    private val placeIds: LongArray = participants.sorted().toLongArray()
+    private val listedIds: LongArray = listed().sorted().toLongArray()
 
-    internal fun canonical(): String =
-        "$gatewayId:$secretSha256:${participants.sorted().joinToString("/")}"
+    /** Everyone this gateway speaks for, cancel-only included: all of them still fill. */
+    fun listed(): List<Long> = participants + cancelOnly
+
+    /** The participant ids the engine binds to this gateway's session, sorted. */
+    fun participantIds(): LongArray = listedIds.copyOf()
+
+    /** True when [participantId] may place orders through this gateway. Allocates nothing. */
+    fun mayPlace(participantId: Long): Boolean = placeIds.binarySearch(participantId) >= 0
+
+    /** True when [participantId] may cancel through this gateway. Allocates nothing. */
+    fun mayCancel(participantId: Long): Boolean = listedIds.binarySearch(participantId) >= 0
+
+    /**
+     * The fields every node must agree on. The new ones are appended only when they are not their
+     * defaults, so a registry that uses none of them hashes exactly as it did before they existed --
+     * releases already published record that value.
+     */
+    internal fun canonical(): String = buildString {
+        append("$gatewayId:$secretSha256:${participants.sorted().joinToString("/")}")
+        if (cancelOnly.isNotEmpty()) append(":cancelOnly=${cancelOnly.sorted().joinToString("/")}")
+        if (operator) append(":operator")
+    }
 
     companion object {
         const val MAX_GATEWAY_ID = 64
@@ -77,27 +111,55 @@ data class GatewayIdentity(
  * security list: two nodes that disagreed would route the same report to different places. Hence
  * [fingerprint], which each process prints at startup.
  *
- * A participant belongs to **at most one gateway**. Two gateways claiming one participant is not a
- * merge, it is an ambiguity — the last session opened would win, silently and by timing.
+ * A participant may be listed on **several gateways** -- a primary and a failover -- and then
+ * [primaries] must name the one it is bound to at session open, which must list it. Without that,
+ * two claims on one participant would be an ambiguity resolved by whichever session opened last.
+ * A primary for a participant listed only once is refused as a typo.
+ *
+ * The **gateway** enforces what each entry grants ([mayPlace], [mayCancel], [mayOperate]); the
+ * engine never rejects on this file, because each node reads it on its own schedule
+ * (Design.md §1, "Enforcement, at the gateway").
  */
 data class ParticipantRegistry(
     val shardId: Int,
     val gateways: List<GatewayIdentity>,
+    /** participantId → gatewayId, only for participants listed on more than one gateway. */
+    val primaries: Map<Long, String> = emptyMap(),
 ) {
     init {
         require(shardId >= 0) { "shardId must be non-negative: $shardId" }
         require(gateways.isNotEmpty()) { "shard $shardId registers no gateways" }
         val duplicateIds = gateways.groupBy { it.gatewayId }.filterValues { it.size > 1 }.keys
         require(duplicateIds.isEmpty()) { "duplicate gateway id in shard $shardId: $duplicateIds" }
-        val claimed = gateways.flatMap { g -> g.participants.map { it to g.gatewayId } }
-        val contested = claimed.groupBy({ it.first }, { it.second }).filterValues { it.size > 1 }
-        require(contested.isEmpty()) {
-            "a participant is claimed by more than one gateway: " +
-                contested.entries.joinToString(", ") { "${it.key} by ${it.value.sorted()}" }
+        val listings = gateways
+            .flatMap { g -> g.listed().map { it to g.gatewayId } }
+            .groupBy({ it.first }, { it.second })
+        val undecided = listings.filter { (participant, by) -> by.size > 1 && participant !in primaries }
+        require(undecided.isEmpty()) {
+            "a participant listed on more than one gateway needs a primary " +
+                "(participant.<id>.primary): " +
+                undecided.entries.joinToString(", ") { "${it.key} by ${it.value.sorted()}" }
+        }
+        for ((participant, primary) in primaries) {
+            val by = listings[participant].orEmpty()
+            require(by.size > 1) {
+                "participant $participant has a primary but is listed on ${by.size} gateway(s); " +
+                    "a primary is only for a participant on several"
+            }
+            require(primary in by) {
+                "participant $participant's primary is $primary, which does not list it " +
+                    "(listed by ${by.sorted()})"
+            }
         }
     }
 
     private val byGatewayId: Map<String, GatewayIdentity> = gateways.associateBy { it.gatewayId }
+
+    private val soleListing: Map<Long, String> = gateways
+        .flatMap { g -> g.listed().map { it to g.gatewayId } }
+        .groupBy({ it.first }, { it.second })
+        .filterValues { it.size == 1 }
+        .mapValues { it.value.single() }
 
     /**
      * Precomputed so a session open costs no allocation beyond decoding the principal. Session
@@ -108,8 +170,23 @@ data class ParticipantRegistry(
 
     fun gateway(gatewayId: String): GatewayIdentity? = byGatewayId[gatewayId]
 
-    /** The participants [gatewayId] speaks for, or null if the registry has never heard of it. */
+    /**
+     * The participants [gatewayId] speaks for, cancel-only included, or null if the registry has
+     * never heard of it.
+     */
     fun participantsOf(gatewayId: String): LongArray? = participantsByGatewayId[gatewayId]
+
+    /** The gateway [participantId] is bound to at session open, or null if nobody lists it. */
+    fun primaryOf(participantId: Long): String? =
+        primaries[participantId] ?: soleListing[participantId]
+
+    fun mayPlace(gatewayId: String, participantId: Long): Boolean =
+        byGatewayId[gatewayId]?.mayPlace(participantId) ?: false
+
+    fun mayCancel(gatewayId: String, participantId: Long): Boolean =
+        byGatewayId[gatewayId]?.mayCancel(participantId) ?: false
+
+    fun mayOperate(gatewayId: String): Boolean = byGatewayId[gatewayId]?.operator ?: false
 
     /**
      * True when [token] is the shared secret [gatewayId] was registered with.
@@ -134,7 +211,10 @@ data class ParticipantRegistry(
     fun fingerprint(): String = java.lang.Long.toHexString(fingerprintValue())
 
     fun fingerprintValue(): Long {
-        val canonical = gateways.sortedBy { it.gatewayId }.joinToString(",") { it.canonical() }
+        val canonical = gateways.sortedBy { it.gatewayId }.joinToString(",") { it.canonical() } +
+            // Appended only when present, for the reason GatewayIdentity.canonical gives.
+            if (primaries.isEmpty()) "" else
+                "|primary=" + primaries.toSortedMap().entries.joinToString(",") { "${it.key}>${it.value}" }
         var hash = 1125899906842597L
         for (c in "$shardId|$canonical") hash = hash * 31 + c.code
         return hash
@@ -162,10 +242,25 @@ data class ParticipantRegistry(
         for (gateway in ordered) {
             appendLine()
             appendLine("gateway.${gateway.gatewayId}.secret=${gateway.secretSha256}")
-            appendLine(
-                "gateway.${gateway.gatewayId}.participants=" +
-                    gateway.participants.sorted().joinToString(",")
-            )
+            if (gateway.participants.isNotEmpty() || !gateway.operator) {
+                appendLine(
+                    "gateway.${gateway.gatewayId}.participants=" +
+                        gateway.participants.sorted().joinToString(",")
+                )
+            }
+            if (gateway.cancelOnly.isNotEmpty()) {
+                appendLine(
+                    "gateway.${gateway.gatewayId}.cancelOnly=" +
+                        gateway.cancelOnly.sorted().joinToString(",")
+                )
+            }
+            if (gateway.operator) appendLine("gateway.${gateway.gatewayId}.operator=true")
+        }
+        if (primaries.isNotEmpty()) {
+            appendLine()
+            for ((participant, primary) in primaries.toSortedMap()) {
+                appendLine("participant.$participant.primary=$primary")
+            }
         }
     }
 
@@ -218,11 +313,19 @@ data class ParticipantRegistry(
          * gateway.gw-a.participants=100,101
          *
          * gateway.gw-b.secret=<sha-256 of the shared secret, hex>
-         * gateway.gw-b.participants=200
+         * gateway.gw-b.participants=200,100
+         * gateway.gw-b.cancelOnly=201           # optional: may cancel, may not place
+         *
+         * gateway.control.secret=<sha-256 of the shared secret, hex>
+         * gateway.control.operator=true         # optional, default false
+         *
+         * participant.100.primary=gw-a          # required iff listed on several gateways
          * ```
          *
-         * Nothing has a default. A gateway with no participants is a typo, and a missing secret
-         * would otherwise become "authenticates with anything".
+         * Nothing has a default that widens access. `participants` is required unless the gateway
+         * is an operator, a missing secret would otherwise become "authenticates with anything",
+         * and an `operator` value that is not `true` or `false` is refused rather than read as
+         * false.
          */
         fun from(properties: Properties): ParticipantRegistry {
             val shardId = required(properties, "shard.id").toIntOrNull()
@@ -232,19 +335,44 @@ data class ParticipantRegistry(
                 .split(',').map { it.trim() }.filter { it.isNotEmpty() }
 
             val gateways = ids.map { id ->
+                val operator = when (val flag = properties.getProperty("gateway.$id.operator")?.trim()) {
+                    null, "false" -> false
+                    "true" -> true
+                    else -> error("gateway.$id.operator must be true or false, not '$flag'")
+                }
+                val participantsKey = "gateway.$id.participants"
                 GatewayIdentity(
                     gatewayId = id,
                     secretSha256 = required(properties, "gateway.$id.secret").lowercase(),
-                    participants = required(properties, "gateway.$id.participants")
-                        .split(',').map { it.trim() }.filter { it.isNotEmpty() }
-                        .map {
-                            it.toLongOrNull()
-                                ?: error("gateway.$id.participants holds a non-numeric id: $it")
-                        },
+                    participants = ids(
+                        participantsKey,
+                        if (operator) properties.getProperty(participantsKey)
+                        else required(properties, participantsKey),
+                    ),
+                    cancelOnly = ids(
+                        "gateway.$id.cancelOnly",
+                        properties.getProperty("gateway.$id.cancelOnly"),
+                    ),
+                    operator = operator,
                 )
             }
-            return ParticipantRegistry(shardId, gateways)
+
+            val primaries = properties.stringPropertyNames()
+                .mapNotNull { PRIMARY_KEY.matchEntire(it) }
+                .associate { match ->
+                    val participant = match.groupValues[1].toLongOrNull()
+                        ?: error("${match.value} names a non-numeric participant")
+                    participant to properties.getProperty(match.value).trim()
+                }
+            return ParticipantRegistry(shardId, gateways, primaries)
         }
+
+        private val PRIMARY_KEY = Regex("""participant\.([^.]+)\.primary""")
+
+        private fun ids(key: String, value: String?): List<Long> =
+            value.orEmpty().split(',').map { it.trim() }.filter { it.isNotEmpty() }.map {
+                it.toLongOrNull() ?: error("$key holds a non-numeric id: $it")
+            }
 
         fun load(path: String): ParticipantRegistry {
             val file = File(path)

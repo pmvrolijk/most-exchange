@@ -27,7 +27,7 @@ driver's threading mode — 1.6x behind one enum (Handover §2i).
 | Local setup | [`LocalTesting.md`](LocalTesting.md) — §9 benchmarks, §9a attributes by stage |
 | Measurements | [`Measurements.md`](Measurements.md) — every figure with its machine, load and rate |
 | Baselines | [`baselines/`](baselines/) — the `.hgrm` histograms to diff a core change against |
-| CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; still needs a runner |
+| CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.8 and §5.7 carry the threading configuration and the measured capacity |
@@ -53,8 +53,8 @@ that authors reference data and drives the market over REST, and a console that 
 - **Native images build and pass e2e.** All four core processes, plus a `linux/amd64` container
   (§2a). Untested: a trade *through* native containers, which needs an x86-64 host.
 - **Zero allocation is proven**, by three measurements that are each mutation-validated (§2b).
-  `--gc=epsilon` is still off for want of a runner and an hours-long soak, not for want of a
-  measured path — the pipeline that would run the assertion now exists.
+  `--gc=epsilon` is still off for want of an hours-long soak, not for want of a
+  measured path — the pipeline that runs the assertion is live since pipeline 34.
 - **Latency is attributed, and the ceiling is found.** The exchange's own code is **0.9–2.0%** of a
   client round trip; the rest is consensus, the archive write and the wire, and the shard's throughput
   ceiling is the media driver's threading mode — `--driver-threading DEDICATED` is worth 1.6x (§2i).
@@ -188,13 +188,21 @@ In the order I would tackle them.
    has to come through the log, which probably means a sequenced command that installs a registry
    version rather than a poller. Every existing config, e2e script and Docker stack would also have
    to name its participants. Worth deciding the shape before writing any of it.
-1. **Get a GitLab runner onto the pipeline.** [`.gitlab-ci.yml`](../.gitlab-ci.yml) is written and
-   validated: build, `test:core` (which is where the allocation proofs live), `test:control`,
-   `test:web`, `e2e`, `e2e:restart`, a native build that greps the binary for the exports a missing
-   `--add-exports` would have silently dropped, and two manual measurement jobs. What is missing is
-   a runner — `test:control` needs one that can run `docker:dind` privileged, and the e2e jobs need
-   ~4 GB for five JVMs. Nothing here has ever executed on GitLab; the first pipeline should be
-   treated as the test of the pipeline.
+1. ~~**Get a GitLab runner onto the pipeline.**~~ **Done.** A self-hosted Docker-executor runner
+   (`clytemnestra`, privileged for `docker:dind`) runs [`.gitlab-ci.yml`](../.gitlab-ci.yml), and
+   pipeline 34 on `d198ad6` is green end to end: build, `test:core` — so the allocation proofs now
+   hold on a machine that is not this laptop, and a noisy one — `test:control`, `test:web`, `e2e`,
+   `e2e:restart` and `native:engine` (3 `jdk.internal.misc.Unsafe` references in the image).
+   The first pipeline was the test of the pipeline, as predicted, and failed four jobs for four
+   reasons that had nothing to do with the exchange: Docker caps `/dev/shm` at 64 MB, below one
+   16 MB-term IPC log, so the three driver-backed test classes now keep `aeron.dir` under `build/`;
+   `run-restart.sh` grepped once for restore lines that the engine prints *after* `awaiting shutdown
+   signal` (the snapshot loads on the service thread once the container has launched), and now
+   waits for them; the GraalVM image lacks `xargs`; and dind needs a privileged runner.
+   `measure:attribution` passes. **`measure:sweep` fails, correctly**: every rate was marked
+   `INVALID` on pacing lateness (p99.9 11–53 ms, load average 3.1) — the generator stalled, the
+   script refused to print rows, and that is the validation working on a machine that cannot be
+   quoted from. Both stay manual and `allow_failure`.
 2. **Advertise several gateways per shard** — promoted from item 5, because C1–C2 turned it from
    tidying into the cheapest throughput lever the system has. The gateway is one thread carrying every
    order inbound and every report outbound (~1.3M messages/sec at the ceiling), it is the only
@@ -241,7 +249,7 @@ In the order I would tackle them.
    `CORE_TARGET=native docker compose up` and a repeat of the §9 benchmark.
 7. **Run a long soak, then enable Epsilon.** Shaped for hours rather than seconds, to bound the
    Aeron client conductor's per-duty-cycle allocation — it shares this heap and would be invisible
-   in a 20-second run. With that and a runner on the pipeline, `engine.useEpsilonGc=true` is a
+   in a 20-second run. The runner is in place, so with the soak `engine.useEpsilonGc=true` is a
    one-line change backed by measurement.
 8. **Bring up a three-node cluster.** Expect the fixed single-node member string in
    `ClusterCommand.kt` to need generalising. What is untested is specifically the multi-node part:

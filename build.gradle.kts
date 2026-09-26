@@ -99,5 +99,9 @@ subprojects {
             "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
             "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
         )
+        // Embedded media drivers (AeronAllocationTest, BookImageTest, SnapshotRestoreTest) default
+        // to /dev/shm on Linux, which a Docker container caps at 64 MB -- less than one 16 MB-term
+        // IPC log. The e2e scripts keep their Aeron directory under build/ for the same reason.
+        systemProperty("aeron.dir", project.layout.buildDirectory.dir("aeron-test").get().asFile.absolutePath)
     }
 }

@@ -330,8 +330,8 @@ sleep 2
 # The engine's own report, not a rendered book. A book rebuilt by replaying the whole log from
 # genesis looks identical from outside and is a different operational event with a very different
 # recovery time -- this line is the only thing that tells them apart.
-grep -q "restored 3 resting orders" "$LOGS/engine-same.log" \
-  || { tail -20 "$LOGS/engine-same.log" >&2; fail "the book was not restored from a snapshot"; }
+wait_for "$LOGS/engine-same.log" "restored 3 resting orders" 30 "the restore report" \
+  || fail "the book was not restored from a snapshot"
 grep -o "matching-engine: restored .*" "$LOGS/engine-same.log"
 pass "three resting orders restored from the snapshot, with both sequences carried"
 
@@ -619,8 +619,11 @@ write_engine_config "$RUN/securities-without-msft.properties"
 start_engine drop
 wait_for "$LOGS/engine-drop.log" "awaiting shutdown signal" 45 "engine" || {
   tail -20 "$LOGS/engine-drop.log" >&2; fail "the engine refused to drop an empty book"; }
-grep -q "security 2 left the shard; its book was empty" "$LOGS/engine-drop.log" \
-  || { tail -20 "$LOGS/engine-drop.log" >&2; fail "the drop was not reported"; }
+# Waited for, not grepped once: the container prints "awaiting shutdown signal" as soon as it has
+# launched, and the snapshot is loaded afterwards on the service's own thread. On a fast machine
+# the restore line happens to land first; on a CI runner it did not.
+wait_for "$LOGS/engine-drop.log" "security 2 left the shard; its book was empty" 30 "the drop report" \
+  || fail "the drop was not reported"
 pass "an emptied security left the shard, with a line saying so"
 kill "$ENGINE_PID" 2>/dev/null; wait "$ENGINE_PID" 2>/dev/null
 kill "$CLUSTER_PID" 2>/dev/null; wait "$CLUSTER_PID" 2>/dev/null; sleep 1
@@ -633,8 +636,8 @@ write_engine_config "$RUN/securities-with-goog.properties"
 start_engine add
 wait_for "$LOGS/engine-add.log" "awaiting shutdown signal" 45 "engine" || {
   tail -20 "$LOGS/engine-add.log" >&2; fail "the engine refused a newly added security"; }
-grep -q "security 3 joined the shard; its book starts empty" "$LOGS/engine-add.log" \
-  || { tail -20 "$LOGS/engine-add.log" >&2; fail "the addition was not reported"; }
+wait_for "$LOGS/engine-add.log" "security 3 joined the shard; its book starts empty" 30 "the addition report" \
+  || fail "the addition was not reported"
 pass "a new security joined the shard with an empty book"
 
 echo

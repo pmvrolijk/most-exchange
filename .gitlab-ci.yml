@@ -106,8 +106,9 @@ test:control:
   stage: test
   needs: []
   services:
+    # Reachable as `docker`: GitLab derives that alias from the image name, and naming it again
+    # only earns an "alias is already in use" warning.
     - name: docker:27-dind
-      alias: docker
   variables:
     DOCKER_HOST: "tcp://docker:2375"
     # dind over plain TCP; the runner must allow privileged mode for this to come up at all.
@@ -195,6 +196,8 @@ native:engine:
     # image's entrypoint, so without clearing it the job never gets a shell.
     entrypoint: [""]
   before_script:
+    # The image is Oracle Linux slim and ships without xargs, which gradlew needs to start at all.
+    - microdnf install -y findutils
     - chmod +x gradlew
   variables:
     # Design.md §7: pin -march explicitly. -march=native SIGILLs when the build host's CPU differs

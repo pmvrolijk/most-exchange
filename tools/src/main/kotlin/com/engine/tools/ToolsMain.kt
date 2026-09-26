@@ -18,7 +18,7 @@ private val USAGE = """
       most purge  [--trading-date YYYYMMDD] [--shard N]
       most image  [--shard N]
       most cluster [--dir DIR] [--fresh]
-      most cluster snapshot [--ingress 0=HOST:PORT | --dir DIR]
+      most cluster snapshot [--ingress 0=HOST:PORT [--identity ID --secret-file F] | --dir DIR]
       most cluster shutdown [--dir DIR]
       most counters [--match REGEX] [--interval-ms N] [--samples N] [--all]
 
@@ -39,6 +39,9 @@ private val USAGE = """
                   `cluster snapshot` asks for a snapshot -- with --ingress through
                   consensus, so every member takes one at the same log position and the
                   request is answered; with --dir through the local control toggle.
+                  A node with a participant registry refuses a session with no
+                  credentials, so --ingress then needs --identity and --secret-file: an
+                  operator-only entry in that registry.
                   `cluster shutdown` snapshots and then stops the node, which SIGTERM
                   does not.
       counters    Print the media driver's counters -- the driver's own, the archive's and
@@ -73,6 +76,11 @@ private val USAGE = """
       --l1-channel URI         --l1-stream N
       --l2-channel URI         --l2-stream N
       --participant ID         Participant id to trade as (default 1)
+      --order-entry-channel URI  --order-entry-stream N
+      --report-channel URI       --report-stream N
+                               A gateway other than the one the directory advertises: the
+                               participant's own, or one with operator=true for define,
+                               session, purge and image (Design.md §1).
       --timeout SECONDS        How long to wait for a directory (default 15)
 """.trimIndent()
 

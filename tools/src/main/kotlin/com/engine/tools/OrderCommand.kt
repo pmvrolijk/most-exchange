@@ -173,11 +173,12 @@ private fun sendAndFollow(
             reportNoDirectory(config)
             return
         }
-        val security = directory.routeForSymbol(resolveSymbol)
-        if (security == null) {
+        val listed = directory.routeForSymbol(resolveSymbol)
+        if (listed == null) {
             System.err.println("most: unknown symbol '$resolveSymbol' -- try `most securities`")
             return
         }
+        val security = GatewayOverride.from(args).applyTo(listed)
 
         // Listen before sending, so a fast acknowledgement is not missed.
         val reports = aeron.addSubscription(

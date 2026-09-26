@@ -13,7 +13,11 @@ fun parsePhase(text: String): Byte = OperatorCommands.parsePhase(text)
 
 fun todayAsTradingDate(): Int = OperatorCommands.tradingDateOf(LocalDate.now())
 
-/** Operator commands go to the gateway like any other message and pass through untouched. */
+/**
+ * Operator commands go to the gateway like any other message and pass through untouched -- but only
+ * a gateway whose registry entry has `operator=true` forwards them (Design.md §1), so
+ * `--order-entry-channel` / `--order-entry-stream` exist to address one the directory does not name.
+ */
 private fun sendToShard(
     args: Args,
     resolveShard: (com.engine.reference.DirectoryClient) -> ShardRoute?,
@@ -28,11 +32,12 @@ private fun sendToShard(
             reportNoDirectory(config)
             return
         }
-        val route = resolveShard(directory)
-        if (route == null) {
+        val listed = resolveShard(directory)
+        if (listed == null) {
             System.err.println("most: no such shard in the directory")
             return
         }
+        val route = GatewayOverride.from(args).applyTo(listed)
 
         val publication = aeron.addPublication(route.orderEntryChannel, route.orderEntryStreamId)
         val idle = SleepingIdleStrategy(Duration.ofMillis(1).toNanos())

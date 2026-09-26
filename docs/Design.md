@@ -2752,9 +2752,10 @@ It found three defects that unit tests could not:
   stated rather than hidden. **Enforcement** is decided and being built, at the gateway rather than
   in the engine (§1, "Enforcement, at the gateway"): the registry model, the gateway's checks and
   hot reload, and the engine's primary-aware binding and `undeclaredParticipantMessages` counter
-  are in, and `e2e/run-restart.sh` §4f exercises them against a live shard. The CLI and
-  control-plane identities, and — last, since it needs those identities — the refusal of anonymous
-  sessions follow. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
+  are in, and `e2e/run-restart.sh` §4f exercises them against a live shard. The CLI can address a
+  gateway the directory does not advertise (`--order-entry-channel` and friends) and name itself
+  to the cluster (`cluster snapshot --ingress --identity --secret-file`). The control plane's
+  identity, and — last, since it needs it — the refusal of anonymous sessions follow. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
   by nothing. **Granularity:** the identity is the
   gateway's, not the end participant's — this is authentication of the process, and the participant
   ids it claims are trusted because the file says so, not because each client proved anything.

@@ -1,5 +1,6 @@
 package com.engine.tools
 
+import com.engine.reference.GatewayCredentialsSupplier
 import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ParticipantRegistrySource
 import com.engine.reference.RegistryAuthenticatorSupplier
@@ -172,6 +173,9 @@ private fun runClusterHost(args: Args) {
 private fun runClusterSnapshot(args: Args) {
     val ingressEndpoints = args.optional("ingress")
     if (ingressEndpoints != null) {
+        // A node with a participant registry refuses a session with no credentials (Design.md §1),
+        // so the CLI presents an operator-only registry identity exactly as a gateway would.
+        val credentials = clusterCredentials(args)
         val aeronDir = args.optional("aeron-dir")
         val context = Aeron.Context()
         aeronDir?.let(context::aeronDirectoryName)
@@ -182,6 +186,9 @@ private fun runClusterSnapshot(args: Args) {
                 .ingressChannel(args.optional("ingress-channel") ?: "aeron:udp")
                 .egressChannel(args.optional("egress-channel") ?: "aeron:udp?endpoint=localhost:0")
                 .ingressEndpoints(ingressEndpoints)
+            credentials?.let { (identity, secret) ->
+                clusterContext.credentialsSupplier(GatewayCredentialsSupplier(identity, secret))
+            }
 
             val cluster = try {
                 AeronCluster.connect(clusterContext)

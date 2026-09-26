@@ -585,15 +585,19 @@ echo "== 4f. the gateway enforces the registry -- before the log, and without a 
 # Design.md §1, "Enforcement, at the gateway". gw-1 lists 7 and 14 and is not an operator. Each
 # refusal below is the gateway's own REJECTED; none of it reaches the cluster, which is what makes
 # it legal to decide from a file the gateway re-reads on its own schedule.
+# Addressed with the CLI's gateway override rather than gw-1's own directory: gw-0's directory,
+# pointed at gw-1's endpoint. Were the override ignored this would reach gw-0 -- which lists 8 and
+# is an operator -- and both checks below would fail.
+TO_B="--order-entry-channel aeron:ipc --order-entry-stream 40 --report-channel aeron:ipc --report-stream 41"
 $MOST send --symbol AAPL --side buy --price 99.00 --qty 1 --clordid 7001 --participant 8 \
-  --follow 2 $CONN_B > "$RUN/unlisted.out" 2>&1 || fail "send an unlisted participant through B"
+  --follow 2 $CONN $TO_B > "$RUN/unlisted.out" 2>&1 || fail "send an unlisted participant through B"
 grep -q "REJECTED.*UNAUTHORIZED_PARTICIPANT" "$RUN/unlisted.out" \
   || { cat "$RUN/unlisted.out" >&2; fail "gateway B accepted a participant it does not list"; }
 pass "participant 8 is not on gw-1, and gw-1 refused it UNAUTHORIZED_PARTICIPANT"
 
 # An operator command through a gateway that is not an operator is consumed and counted. There is
 # no client report for it, so the evidence is the counter at shutdown (below).
-$MOST image --shard 0 $CONN_B > "$RUN/refused-image.out" 2>&1 || fail "send an image request through B"
+$MOST image --shard 0 $CONN $TO_B > "$RUN/refused-image.out" 2>&1 || fail "send an image request through B"
 
 # Revocation, gracefully: move 14 to cancelOnly on gw-1 and publish. The gateway must pick it up
 # without a restart, refuse 14's new order, and still let 14 cancel what it has resting.

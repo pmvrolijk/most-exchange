@@ -137,6 +137,13 @@ participant in `gateway.gw-0.cancelOnly` may cancel but not place; and operator 
 gateway re-reads the file every `gateway.participantRegistry.reloadMs` (5 s), so none of this needs
 a restart. Participants 20–23 are the ones `most load` sends as.
 
+The directory advertises one gateway per shard. To reach another — a participant's own, or an
+operator gateway for `define`/`session`/`purge`/`image` — every command that talks to a gateway
+takes `--order-entry-channel URI --order-entry-stream N` and `--report-channel URI --report-stream N`,
+each replacing only its own part of the directory's route. `most cluster snapshot --ingress`, which
+talks to the cluster directly, takes `--identity ID --secret-file FILE`: an operator-only registry
+entry (`gateway.<id>.operator=true` and no participants).
+
 ---
 
 ## 3. Process configuration

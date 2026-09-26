@@ -59,6 +59,7 @@ fun runLoad(args: Args) {
             return
         }
 
+        val override = GatewayOverride.from(args)
         val securities = ArrayList<RoutedSecurity>(symbols.size)
         for (symbol in symbols) {
             val security = directory.routeForSymbol(symbol)
@@ -66,7 +67,7 @@ fun runLoad(args: Args) {
                 System.err.println("most: unknown symbol '$symbol' -- try `most securities`")
                 return
             }
-            securities += security
+            securities += override.applyTo(security)
         }
         // One publication drives the run, so every symbol has to be reachable through it. Two
         // shards would need two schedules, and interleaving them on one clock is a different

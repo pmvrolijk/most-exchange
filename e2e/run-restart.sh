@@ -90,12 +90,19 @@ sha256() { # sha256 <text>
 }
 GATEWAY_SECRET="restart-e2e-secret"
 printf '%s\n' "$GATEWAY_SECRET" > "$RUN/gateway.secret"
+# The operator's own identity. This node runs with a registry, so it refuses a session with no
+# credentials -- the CLI reaching the cluster directly (`cluster snapshot --ingress`) needs an
+# operator-only entry, as the control plane does (Design.md §1).
+CONTROL_SECRET="restart-e2e-operator"
+printf '%s\n' "$CONTROL_SECRET" > "$RUN/control.secret"
 cat > "$RUN/participants.properties" <<EOF
 shard.id=0
-registry.gateways=gw-0,gw-1
+registry.gateways=gw-0,gw-1,control
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
 gateway.gw-0.operator=true
+gateway.control.secret=$(sha256 "$CONTROL_SECRET")
+gateway.control.operator=true
 gateway.gw-1.secret=$(sha256 "$GATEWAY_SECRET-b")
 gateway.gw-1.participants=7,14
 # §4d cancels participant 7 through gw-1, so gw-1 lists it too; gw-0 stays where its fills go.
@@ -533,10 +540,12 @@ kill "$GATEWAY_B_PID" 2>/dev/null; wait "$GATEWAY_B_PID" 2>/dev/null
 ROTATED="$GATEWAY_SECRET-rotated"
 cat > "$RUN/participants.properties" <<EOF
 shard.id=0
-registry.gateways=gw-0,gw-1
+registry.gateways=gw-0,gw-1,control
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
 gateway.gw-0.operator=true
+gateway.control.secret=$(sha256 "$CONTROL_SECRET")
+gateway.control.operator=true
 gateway.gw-1.secret=$(sha256 "$ROTATED")
 gateway.gw-1.participants=7,14
 # §4d cancels participant 7 through gw-1, so gw-1 lists it too; gw-0 stays where its fills go.
@@ -603,10 +612,12 @@ $MOST image --shard 0 $CONN $TO_B > "$RUN/refused-image.out" 2>&1 || fail "send 
 # without a restart, refuse 14's new order, and still let 14 cancel what it has resting.
 cat > "$RUN/participants.properties" <<EOF
 shard.id=0
-registry.gateways=gw-0,gw-1
+registry.gateways=gw-0,gw-1,control
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
 gateway.gw-0.operator=true
+gateway.control.secret=$(sha256 "$CONTROL_SECRET")
+gateway.control.operator=true
 gateway.gw-1.secret=$(sha256 "$ROTATED")
 gateway.gw-1.participants=7
 gateway.gw-1.cancelOnly=14
@@ -633,6 +644,22 @@ grep -q "unauthorizedRejects=2 " "$LOGS/gateway-b-rotated.log" \
   || { grep "gateway: stopped" "$LOGS/gateway-b-rotated.log" >&2
        fail "gw-1 did not count its two refusals"; }
 pass "gw-1 refused the operator command and counted both refusals"
+
+# The side door. An anonymous cluster session reaches the engine without passing any gateway, so a
+# node with a registry must refuse it -- and the CLI, named by an operator-only entry, must still get
+# through. Both through consensus, since that is the path that opens a session.
+$MOST cluster snapshot --ingress 0=localhost:20110 --aeron-dir "$AERON_DIR" \
+  > "$RUN/anonymous-snapshot.out" 2>&1
+grep -q "refused this client" "$RUN/anonymous-snapshot.out" \
+  || { cat "$RUN/anonymous-snapshot.out" >&2; fail "an anonymous cluster session was accepted"; }
+grep -q "presented no credentials" "$LOGS/cluster-same.log" \
+  || fail "the consensus module did not say why it refused the anonymous session"
+pass "an anonymous cluster session is refused, and the consensus module says why"
+$MOST cluster snapshot --ingress 0=localhost:20110 --aeron-dir "$AERON_DIR" \
+  --identity control --secret-file "$RUN/control.secret" > "$RUN/operator-snapshot.out" 2>&1
+grep -q "snapshot requested" "$RUN/operator-snapshot.out" \
+  || { cat "$RUN/operator-snapshot.out" >&2; fail "the operator identity could not request a snapshot"; }
+pass "the CLI, named by an operator-only entry, requested a snapshot through consensus"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

@@ -133,12 +133,18 @@ services:
       # port is the consensus module's, bound (like every other endpoint on this shard) by the
       # media driver in the cluster-host container, which is why it is shard0 and not engine.
       CONTROL_CLUSTER_INGRESS_0: "0=shard0:20110"
+      # And who it is when it gets there. The cluster host runs with a participant registry, which
+      # refuses a session with no credentials (Design.md §1); `control` is an operator-only entry
+      # in config/shard-0-participants.properties.
+      CONTROL_CLUSTER_IDENTITY_0: control
+      CONTROL_CLUSTER_SECRETFILE_0: /config/control.secret
       # The calendar is off by default here. It opens markets unattended, which is a surprising
       # thing for a dev stack to do while you are reading its logs.
       CONTROL_SCHEDULER_ENABLED: ${CONTROL_SCHEDULER_ENABLED:-false}
     volumes:
       - client-aeron:/aeron
       - releases:/releases
+      - ./config/control.secret:/config/control.secret:ro
     networks: [data, aeron, edge]
     ports: ["8080:8080"]
     healthcheck:

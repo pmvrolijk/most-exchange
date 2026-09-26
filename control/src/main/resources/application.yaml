@@ -92,6 +92,12 @@ control:
   # control.cluster.identity.<shardId> (CONTROL_CLUSTER_IDENTITY_<shardId>) and
   # control.cluster.secretFile.<shardId> (CONTROL_CLUSTER_SECRETFILE_<shardId>), both or neither.
   # The secret is read from the file only.
+  #
+  # Operator commands (session transitions, purges, definitions, image requests) go through a
+  # gateway, and only one whose registry entry has operator=true forwards them -- unacknowledged, so
+  # a refusal is invisible here. They go to the shard's advertised order-entry endpoint unless
+  # control.cluster.operatorChannel.<shardId> (and optionally control.cluster.operatorStream.<shardId>)
+  # names a dedicated operator gateway.
   cluster:
     ingressChannel: ${CONTROL_CLUSTER_INGRESS_CHANNEL:aeron:udp}
     egressChannel: ${CONTROL_CLUSTER_EGRESS_CHANNEL:aeron:udp?endpoint=0.0.0.0:0}

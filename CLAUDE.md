@@ -166,8 +166,12 @@ SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and w
   `cluster.clientSessions()` and needs **no snapshot state of its own**. → R§8
 - **Traffic still wins for the order it arrived on**, and `onSessionClose` drops only routes that
   session **still owns**. Both directions are mutation-tested in `ParticipantBindingTest`. → R§8
-- **Wrong credentials are rejected, never downgraded to anonymous.** *No* credentials still
-  authenticate anonymously — the control plane and CLI are addressed by nobody. → R§8
+- **A node with a registry authenticates everything or nothing.** Wrong credentials are rejected,
+  never downgraded to anonymous, and *no* credentials are rejected too — an anonymous session skips
+  every gateway check. The control plane (`control.cluster.identity.<shard>`) and the CLI
+  (`--identity`/`--secret-file`) hold operator-only entries: `operator=true`, no participants.
+  The control plane's operator commands go through a gateway, which must be an operator
+  (`control.cluster.operatorChannel.<shard>` names one). → R§8
 - **The registry is re-read while a node runs**, by fingerprint, not mtime. A file that cannot be
   parsed, or one for another shard, is reported and ignored. The gateway re-reads it the same way,
   because it is where the registry is enforced. → R§8

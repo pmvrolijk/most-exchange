@@ -70,15 +70,34 @@ class RegistryAuthenticatorTest {
     }
 
     @Test
-    fun `a client with no credentials authenticates anonymously`() {
-        // The control plane and the `most` CLI connect to send operator commands and are addressed
-        // by nobody. Demanding a secret of them would buy nothing and stop the shard being
-        // operable, so the null principal stays a first-class outcome.
+    fun `a client with no credentials is rejected, and says why`() {
+        // Design.md §1: a node started with a registry authenticates everything or nothing. An
+        // anonymous session reaches the engine without passing any gateway, so it could act for any
+        // participant and send any operator command -- every gateway check would be decoration.
+        // The control plane and the CLI hold operator-only identities instead.
         val proxy = connect(1L, ByteArray(0))
 
-        assertEquals(0, proxy.authenticatedAs?.size)
-        assertEquals(false, proxy.rejected)
+        assertTrue(proxy.rejected)
+        assertNull(proxy.authenticatedAs)
+        assertEquals(1L, authenticator.rejectedSessions)
         assertEquals(0L, authenticator.authenticatedGateways)
+        assertContains(rejections.single(), "no credentials")
+    }
+
+    @Test
+    fun `an operator only identity authenticates like any gateway`() {
+        val withOperator = RegistryAuthenticator(
+            { registry.copy(gateways = registry.gateways + GatewayIdentity(
+                "control", ParticipantRegistry.sha256Hex("west"), emptyList(), operator = true,
+            )) },
+            { rejections += it },
+        )
+        withOperator.onConnectRequest(1L, ParticipantRegistry.encodeCredentials("control", "west"), 0L)
+        val proxy = FakeSessionProxy(1L)
+        withOperator.onConnectedSession(proxy, 0L)
+
+        assertEquals("control", proxy.authenticatedAs?.let { String(it, Charsets.US_ASCII) })
+        assertEquals(false, proxy.rejected)
     }
 
     @Test

@@ -2750,14 +2750,14 @@ It found three defects that unit tests could not:
   restarts the gateway, crosses the offer and checks the maker's `cumQty` advanced — which it can
   only do if the fill reached a gateway the maker had not spoken to. Two things are left, and are
   stated rather than hidden. **Enforcement** is decided and being built, at the gateway rather than
-  in the engine (§1, "Enforcement, at the gateway"): the registry model, the gateway's checks and
-  hot reload, and the engine's primary-aware binding and `undeclaredParticipantMessages` counter
-  are in, and `e2e/run-restart.sh` §4f exercises them against a live shard. The CLI can address a
-  gateway the directory does not advertise (`--order-entry-channel` and friends) and name itself
-  to the cluster (`cluster snapshot --ingress --identity --secret-file`). The control plane
-  authors all of it (V6: `operator`, `cancel_only`, `is_primary`, several gateways per
-  participant) and presents its own identity for snapshots. Last, since it needs those identities,
-  the refusal of anonymous sessions follows. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
+  in the engine (§1, "Enforcement, at the gateway"), and **done**: the gateway refuses
+  `UNAUTHORIZED_PARTICIPANT` for orders and cancels, refuses operator commands unless it is an
+  operator, and re-reads the registry while it runs; the engine binds by primary, rebinds on
+  close and counts undeclared participants; a node with a registry refuses anonymous sessions; the
+  CLI and the control plane hold operator-only identities and can address an operator gateway the
+  directory does not advertise; the control plane authors all of it (V6). `e2e/run-restart.sh` §4f
+  exercises the gateway checks, the reload, the anonymous refusal and the operator identity against
+  a live shard. Until they land, `UNAUTHORIZED_PARTICIPANT` is still raised
   by nothing. **Granularity:** the identity is the
   gateway's, not the end participant's — this is authentication of the process, and the participant
   ids it claims are trusted because the file says so, not because each client proved anything.

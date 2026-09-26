@@ -198,6 +198,15 @@ private fun runClusterSnapshot(args: Args) {
                         "  Check that the consensus module is running and that --ingress names it."
                 )
                 return
+            } catch (e: io.aeron.security.AuthenticationException) {
+                System.err.println(
+                    "most: the cluster refused this client (${e.message}).\n" +
+                        if (credentials == null) "  It runs with a participant registry, which refuses " +
+                            "anonymous sessions: pass --identity and --secret-file for an operator entry."
+                        else "  Check that '${credentials.first}' is in the shard's registry and the " +
+                            "secret file holds its current secret."
+                )
+                return
             }
             cluster.use {
                 val correlationId = it.context().aeron().nextCorrelationId()

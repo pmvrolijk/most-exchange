@@ -64,3 +64,54 @@ class ClusterAdminIdentityTest {
         }
     }
 }
+
+/**
+ * Where the control plane's operator commands go. Only an `operator=true` gateway forwards them
+ * (Design.md §1), and they are unacknowledged, so a dedicated operator endpoint must win over the
+ * shard's advertised one whenever it is configured.
+ */
+class OperatorEndpointTest {
+
+    private val shard = ShardRow(
+        shardId = 0,
+        orderEntryChannel = "aeron:udp?endpoint=shard0:20121",
+        orderEntryStreamId = 20,
+        executionReportChannel = "aeron:udp?endpoint=control:20122",
+        executionReportStreamId = 21,
+    )
+
+    @Test
+    fun `with nothing configured the shard's advertised endpoint is used`() {
+        assertEquals(
+            "aeron:udp?endpoint=shard0:20121" to 20,
+            ClusterLink.operatorEndpointFor(MockEnvironment(), shard),
+        )
+    }
+
+    @Test
+    fun `a configured operator channel wins, keeping the shard's stream unless one is given`() {
+        val channelOnly = MockEnvironment()
+            .withProperty("control.cluster.operatorChannel.0", "aeron:udp?endpoint=shard0:20131")
+        val both = MockEnvironment()
+            .withProperty("control.cluster.operatorChannel.0", "aeron:udp?endpoint=shard0:20131")
+            .withProperty("control.cluster.operatorStream.0", "30")
+
+        assertEquals("aeron:udp?endpoint=shard0:20131" to 20, ClusterLink.operatorEndpointFor(channelOnly, shard))
+        assertEquals("aeron:udp?endpoint=shard0:20131" to 30, ClusterLink.operatorEndpointFor(both, shard))
+        assertEquals(
+            "aeron:udp?endpoint=shard0:20121" to 20,
+            ClusterLink.operatorEndpointFor(both, shard.copy(shardId = 1)),
+            "configured for shard 0 only",
+        )
+    }
+
+    @Test
+    fun `a stream that is not a number is refused rather than defaulted`() {
+        assertFailsWith<IllegalArgumentException> {
+            ClusterLink.operatorEndpointFor(
+                MockEnvironment().withProperty("control.cluster.operatorStream.0", "thirty"),
+                shard,
+            )
+        }
+    }
+}

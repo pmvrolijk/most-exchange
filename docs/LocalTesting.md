@@ -109,13 +109,19 @@ The secret is stored as its SHA-256; the secret itself goes in a file the gatewa
 SECRET="local-dev-secret"
 printf '%s\n' "$SECRET" > "$RUN/gateway-0.secret"
 HASH=$(printf '%s' "$SECRET" | shasum -a 256 | cut -d' ' -f1)   # sha256sum on Linux
+# The operator's own identity, for `most cluster snapshot --ingress` (see §8): a node with a
+# registry refuses a cluster session with no credentials.
+printf '%s\n' "local-operator-secret" > "$RUN/operator.secret"
+OPERATOR_HASH=$(printf '%s' "local-operator-secret" | shasum -a 256 | cut -d' ' -f1)
 
 cat > "$RUN/shard-0-participants.properties" <<EOF
 shard.id=0
-registry.gateways=gw-0
+registry.gateways=gw-0,operator
 gateway.gw-0.secret=$HASH
 gateway.gw-0.participants=7,8,20,21,22,23
 gateway.gw-0.operator=true
+gateway.operator.secret=$OPERATOR_HASH
+gateway.operator.operator=true
 EOF
 ```
 
@@ -738,7 +744,8 @@ last one — which after a session's trading is the difference between seconds a
 
 ```sh
 $MOST cluster snapshot --dir "$RUN/cluster-host"          # local, via the control toggle
-$MOST cluster snapshot --ingress 0=localhost:20110        # through consensus; every member snapshots
+$MOST cluster snapshot --ingress 0=localhost:20110 \
+  --identity operator --secret-file "$RUN/operator.secret"  # through consensus; every member snapshots
 $MOST cluster shutdown --dir "$RUN/cluster-host"          # snapshot, then stop
 ```
 

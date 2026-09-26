@@ -115,7 +115,10 @@ Session transitions, purges, definitions and image requests are sent to the shar
 `order_entry_channel`, like `most` does, and are unacknowledged — so if the gateway behind that
 endpoint is not an `operator`, it consumes and counts them (`refusedCommands`) and nothing here can
 tell. The database does not know which gateway id serves an endpoint, so this cannot be checked
-before sending. Snapshots are the exception: they go straight to the cluster, and a node with a
+before sending — and `control.cluster.operatorChannel.<shardId>` (with an optional
+`control.cluster.operatorStream.<shardId>`) therefore sends them to a named operator gateway
+instead, which is the configuration to prefer whenever the advertised gateway is a participant's
+rather than the operator's. Snapshots are the exception: they go straight to the cluster, and a node with a
 registry refuses them unless `control.cluster.identity.<shardId>` and
 `control.cluster.secretFile.<shardId>` name an operator entry of that shard's registry.
 

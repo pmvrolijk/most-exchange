@@ -34,13 +34,14 @@ class GatewayCredentialsSupplier(
  * survives both failover and a snapshot restore, because the session and its principal are
  * consensus state rather than anything the service has to remember.
  *
- * Three outcomes, and the middle one is the one worth stating:
+ * A node started with a registry **authenticates everything or nothing** (Design.md §1). Three
+ * outcomes:
  *
- *  - **No credentials at all** authenticate anonymously, with the null principal. The control
- *    plane and the `most` CLI connect to send operator commands and are addressed by nobody, so
- *    demanding a secret of them would buy nothing. An engine that sees the null principal falls
- *    back to learning routes from traffic, which is exactly the behaviour that shipped before this
- *    existed.
+ *  - **No credentials at all are rejected.** An anonymous session reaches the engine without
+ *    passing any gateway, so it could act for any participant and send any operator command, and
+ *    every check the gateway makes would be decoration. The control plane and the `most` CLI,
+ *    which reach the cluster directly, present operator-only identities instead. A node started
+ *    *without* a registry installs no authenticator and accepts everyone, as before this existed.
  *  - **Credentials that do not verify are rejected**, never downgraded to anonymous. A gateway
  *    presenting the wrong secret and silently becoming an unbound anonymous session is the
  *    failure this is meant to prevent: it would connect, trade, and lose precisely the fills that
@@ -64,8 +65,8 @@ class RegistryAuthenticator(
     ) : this({ registry }, onRejection)
 
     /**
-     * The decision taken at connect, held until Aeron asks for it. A null value is the anonymous
-     * session; an absent key is a rejection. Entries are dropped as soon as either is applied.
+     * The decision taken at connect, held until Aeron asks for it: the principal to stamp. An
+     * absent key is a rejection. Entries are dropped as soon as either is applied.
      */
     private val decisions = Long2ObjectHashMap<ByteArray>()
 
@@ -79,7 +80,10 @@ class RegistryAuthenticator(
 
     override fun onConnectRequest(sessionId: Long, encodedCredentials: ByteArray, nowMs: Long) {
         if (encodedCredentials.isEmpty()) {
-            decisions.put(sessionId, NULL_PRINCIPAL)
+            onRejection(
+                "session $sessionId presented no credentials; this node has a participant registry " +
+                    "and accepts only a gateway or operator identity from it"
+            )
             return
         }
         val credentials = ParticipantRegistry.decodeCredentials(encodedCredentials)
@@ -113,17 +117,13 @@ class RegistryAuthenticator(
         }
         if (sessionProxy.authenticate(principal)) {
             decisions.remove(sessionId)
-            if (principal.isNotEmpty()) authenticatedGateways++
+            authenticatedGateways++
         }
     }
 
     /** Unreachable: nothing here ever challenges, so no session can be in the challenged state. */
     override fun onChallengedSession(sessionProxy: SessionProxy, nowMs: Long) =
         sessionProxy.reject()
-
-    private companion object {
-        val NULL_PRINCIPAL = ByteArray(0)
-    }
 }
 
 /**

@@ -52,6 +52,8 @@ class ClusterLink(
     @Value("\${control.snapshot.streamId:4}") private val snapshotStreamId: Int,
     @Value("\${control.depth.publishMs:250}") private val depthPublishMs: Long,
     @Value("\${control.depth.maxLevels:25}") private val depthMaxLevels: Int,
+    /** Per-shard lookups -- the operator gateway endpoint -- read on demand, as ClusterAdmin does. */
+    private val environment: org.springframework.core.env.Environment,
 ) {
     private val log = LoggerFactory.getLogger(ClusterLink::class.java)
 
@@ -140,18 +142,28 @@ class ClusterLink(
     // ---------------------------------------------------------------- sending
 
     /**
-     * Offers one encoded command to a shard's gateway.
+     * Offers one encoded command to a shard's operator gateway.
      *
      * Endpoints come from the database rather than the directory: the control plane is the
      * authority on topology, and a command must still be sendable when discovery is down. Where the
      * two disagree, [routingDrift] reports it rather than one silently winning.
+     *
+     * **Only a gateway whose registry entry has `operator=true` forwards these** (Design.md §1), and
+     * they are unacknowledged -- one sent to a gateway that is not an operator is consumed and
+     * counted there, and nothing here can tell. So the shard's advertised endpoint is used only when
+     * no dedicated one is configured; see [operatorEndpointFor].
      */
     fun send(shardId: Int, encode: (UnsafeBuffer) -> Int): SendOutcome {
         val link = aeron ?: return SendOutcome(false, "no cluster link: $detail")
         val shard = topology.shard(shardId) ?: return SendOutcome(false, "no such shard: $shardId")
+        val (channel, streamId) = try {
+            operatorEndpointFor(environment, shard)
+        } catch (e: IllegalArgumentException) {
+            return SendOutcome(false, e.message ?: "bad operator endpoint for shard $shardId")
+        }
 
         val publication = publications.computeIfAbsent(shardId) {
-            link.addPublication(shard.orderEntryChannel, shard.orderEntryStreamId)
+            link.addPublication(channel, streamId)
         }
         if (!publication.isConnected) {
             // Give a freshly created publication a moment to see the gateway's subscription.
@@ -162,8 +174,7 @@ class ClusterLink(
         if (!publication.isConnected) {
             return SendOutcome(
                 false,
-                "no gateway listening on ${shard.orderEntryChannel}:${shard.orderEntryStreamId} " +
-                    "for shard $shardId",
+                "no gateway listening on $channel:$streamId for shard $shardId",
             )
         }
 
@@ -171,7 +182,7 @@ class ClusterLink(
         val length = encode(buffer)
         val result = publication.offer(buffer, 0, length)
         return if (result >= 0) {
-            SendOutcome(true, "offered to ${shard.orderEntryChannel}:${shard.orderEntryStreamId}")
+            SendOutcome(true, "offered to $channel:$streamId")
         } else {
             SendOutcome(false, "the gateway did not accept the command (offer returned $result)")
         }
@@ -270,18 +281,44 @@ class ClusterLink(
         }
     }
 
-    private companion object {
-        const val FRAGMENT_LIMIT = 64
+    companion object {
+        private const val FRAGMENT_LIMIT = 64
 
         /**
          * Depth runs at orders of magnitude the volume of L3, and a snapshot cycle arrives as a
          * burst of one message per level. A larger drain per poll keeps a cycle from being spread
          * across so many iterations that the images fall behind the increments.
          */
-        const val DEPTH_FRAGMENT_LIMIT = 256
-        const val COMMAND_BUFFER = 512
-        val POLL_IDLE: Duration = Duration.ofMillis(1)
-        val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(5)
+        private const val DEPTH_FRAGMENT_LIMIT = 256
+        private const val COMMAND_BUFFER = 512
+        private val POLL_IDLE: Duration = Duration.ofMillis(1)
+        private val CONNECT_TIMEOUT: Duration = Duration.ofSeconds(5)
+
+        /**
+         * Where [send] delivers a shard's operator commands: a dedicated operator gateway if one is
+         * configured, otherwise the shard's advertised order-entry endpoint.
+         *
+         * `control.cluster.operatorChannel.<shardId>` (`CONTROL_CLUSTER_OPERATORCHANNEL_<shardId>`)
+         * and, optionally, `control.cluster.operatorStream.<shardId>`, which defaults to the shard's
+         * own stream. Two keys rather than one `channel:stream`, because a channel URI is full of
+         * colons of its own. Deployment, not topology, so this process's configuration rather than
+         * the database -- the line ClusterAdmin draws for cluster ingress.
+         */
+        fun operatorEndpointFor(
+            environment: org.springframework.core.env.Environment,
+            shard: ShardRow,
+        ): Pair<String, Int> {
+            val channel = environment.getProperty("control.cluster.operatorChannel.${shard.shardId}")
+                ?.trim()?.ifEmpty { null }
+            val stream = environment.getProperty("control.cluster.operatorStream.${shard.shardId}")
+                ?.trim()?.ifEmpty { null }
+                ?.let {
+                    requireNotNull(it.toIntOrNull()) {
+                        "control.cluster.operatorStream.${shard.shardId} must be a stream id, not '$it'"
+                    }
+                }
+            return (channel ?: shard.orderEntryChannel) to (stream ?: shard.orderEntryStreamId)
+        }
     }
 }
 

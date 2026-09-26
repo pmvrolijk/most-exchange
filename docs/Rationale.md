@@ -295,9 +295,13 @@ decide from a file it re-reads on its own schedule. It rejects earlier and cheap
 make it enforcement rather than a filter: **cancels are checked as well as orders** (the engine's
 own cancel check is participant equality, which is only as good as the participant id), and
 **operator commands need `operator=true`** — before this, any client of any gateway could halt the
-market. What remains open is the side door: an anonymous cluster session skips every gateway, so a
-node with a registry must refuse them, which needs the control plane and the CLI to hold
-identities first. The engine keeps one thing: it *counts* a message for a participant the sending
+market. The side door is closed as well: an anonymous cluster session skips every gateway, so a
+node with a registry refuses one, and the control plane and the CLI — the two things that reach the
+cluster directly — hold operator-only registry identities instead. That last step had to wait for
+those identities, or it would have locked the control plane out of its own snapshots. And because
+the control plane's *operator commands* go through a gateway and are unacknowledged, it can be
+pointed at a dedicated operator gateway (`control.cluster.operatorChannel.<shard>`) rather than
+trusting that the shard's advertised one is an operator. The engine keeps one thing: it *counts* a message for a participant the sending
 gateway does not list, as defence in depth against a misconfigured gateway, and never branches on it.
 
 **The control plane authors the registry.** `gateway` and `gateway_participant` (V5) hold gateway

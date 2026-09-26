@@ -82,7 +82,8 @@ cat > "$RUN/participants.properties" <<EOF
 shard.id=0
 registry.gateways=gw-0
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
-gateway.gw-0.participants=7,8
+gateway.gw-0.participants=7,8,20,21,22,23
+gateway.gw-0.operator=true
 EOF
 
 cat > "$RUN/engine.properties" <<EOF

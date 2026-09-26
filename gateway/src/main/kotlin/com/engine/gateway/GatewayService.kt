@@ -58,9 +58,11 @@ interface GatewaySink {
  * FIX. Translating a client's own session protocol happens in a separate upstream gateway, so
  * adding a client protocol means adding a process, not changing this one.
  *
- * Two jobs. Inbound, it validates `securityId` against the shard map and rejects out-of-shard
- * orders locally, without spending a cluster round trip or a slot in the replicated log. Outbound,
- * it translates the engine's report into the client-facing shape.
+ * Three jobs. Inbound, it enforces what the participant registry grants this gateway -- which
+ * participants may place, which may only cancel, whether it may send operator commands
+ * ([GatewayAccess], Design.md §1) -- and validates `securityId` against the shard map, rejecting
+ * locally in both cases without spending a cluster round trip or a slot in the replicated log.
+ * Outbound, it translates the engine's report into the client-facing shape.
  *
  * **It holds no per-order state**, and that is deliberate. It used to hold `origQty` for every
  * live order, because the engine had no room for it; the engine now carries it in the cold word
@@ -73,6 +75,8 @@ class GatewayService(
     private val sink: GatewaySink,
     /** Hot-path timing, or null to keep the clock out of the path entirely. */
     private val metrics: GatewayMetrics? = null,
+    /** What the registry grants this gateway. [GatewayAccess.OPEN] when it has no identity. */
+    private val access: GatewayAccess = GatewayAccess.OPEN,
 ) {
     private val securityIds = shardSecurityIds.copyOf()
 
@@ -97,6 +101,18 @@ class GatewayService(
 
     /** Operator commands lost the same way. They have no client to reject to. */
     var undeliverableCommands = 0L
+        private set
+
+    /**
+     * Orders and cancels refused `UNAUTHORIZED_PARTICIPANT`: the participant is not one this
+     * gateway may act for (or, for an order, is cancel-only here). Counted apart from
+     * [rejectedLocally], because it says something about who is connected, not about the order.
+     */
+    var unauthorizedRejects = 0L
+        private set
+
+    /** Operator commands consumed unsent because this gateway is not an operator. */
+    var refusedCommands = 0L
         private set
 
     // ------------------------------------------------------------- inbound
@@ -132,10 +148,15 @@ class GatewayService(
                 onCancel(buffer, offset, length)
             }
 
-            // Session transitions, purges and security definitions are operator commands and
-            // pass through untouched. There is no client session to reject to, so a lost one is
-            // counted; the poller is about to stop anyway, since only a dead session fails here.
-            else -> when (sink.toCluster(buffer, offset, length)) {
+            // Session transitions, purges, security definitions and image requests are operator
+            // commands, and so is anything else this gateway does not recognise: deny by default.
+            // Only an operator gateway forwards them, untouched. There is no client session to
+            // reject to, so a refused or lost one is counted; the poller is about to stop anyway on
+            // a loss, since only a dead session fails here.
+            else -> if (!access.mayOperate()) {
+                refusedCommands++
+                ClientMessageAction.CONSUME
+            } else when (sink.toCluster(buffer, offset, length)) {
                 ClusterOffer.SENT -> ClientMessageAction.CONSUME
                 ClusterOffer.RETRY -> ClientMessageAction.RETRY
                 ClusterOffer.FAILED -> {
@@ -160,9 +181,12 @@ class GatewayService(
         val price = newOrder.price()
         val side = newOrder.side()
 
-        val reason = validate(securityId, qty, price)
+        // First, so a participant this gateway may not act for learns nothing about the shard.
+        val reason = if (!access.mayPlace(participantId)) RejectReason.UNAUTHORIZED_PARTICIPANT
+        else validate(securityId, qty, price)
         if (reason != RejectReason.NONE) {
-            rejectedLocally++
+            if (reason == RejectReason.UNAUTHORIZED_PARTICIPANT) unauthorizedRejects++
+            else rejectedLocally++
             emitClientReport(
                 participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
                 price = price, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = qty,
@@ -193,13 +217,22 @@ class GatewayService(
         length: Int,
     ): ClientMessageAction {
         val securityId = cancel.securityId()
-        if (indexOf(securityId) < 0) {
-            rejectedLocally++
+        // Checked, not trusted: the engine's own cancel check is that this participant id matches
+        // the order's, which only means something once the gateway has established the id is one
+        // this endpoint may use (Design.md §1).
+        val reason = when {
+            !access.mayCancel(cancel.participantId()) -> RejectReason.UNAUTHORIZED_PARTICIPANT
+            indexOf(securityId) < 0 -> RejectReason.UNKNOWN_SECURITY
+            else -> RejectReason.NONE
+        }
+        if (reason != RejectReason.NONE) {
+            if (reason == RejectReason.UNAUTHORIZED_PARTICIPANT) unauthorizedRejects++
+            else rejectedLocally++
             emitClientReport(
                 cancel.participantId(), cancel.clOrdId(), cancel.exchangeOrderId(), securityId,
                 ExecType.REJECTED, cancel.side(),
                 price = 0L, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = 0L,
-                rejectReason = RejectReason.UNKNOWN_SECURITY,
+                rejectReason = reason,
             )
             return ClientMessageAction.CONSUME
         }

@@ -114,22 +114,28 @@ cat > "$RUN/shard-0-participants.properties" <<EOF
 shard.id=0
 registry.gateways=gw-0
 gateway.gw-0.secret=$HASH
-gateway.gw-0.participants=7,8
+gateway.gw-0.participants=7,8,20,21,22,23
+gateway.gw-0.operator=true
 EOF
 ```
 
 Three things it enforces, each with a reason:
 
-* **A participant belongs to at most one gateway.** Two claims would be settled by whichever
-  session opened last, which is routing decided by connection timing.
+* **A participant on several gateways names its primary** (`participant.<id>.primary=gw-0`). Two
+  claims without one would be settled by whichever session opened last, which is routing decided
+  by connection timing.
 * **Credentials that do not verify are rejected**, never downgraded to an anonymous session. A
   gateway that connected anonymously by accident trades perfectly well and loses only the fills of
   whichever participants have gone quiet — invisible until someone reconciles a `cumQty`.
 * **Every node needs an identical copy.** Each process prints the registry's `fingerprint` at
   startup for the same reason it prints the shard's.
 
-It is *not* enforcement: the engine binds routes from it but does not yet refuse an order whose
-`participantId` is not bound to the session it arrived on.
+**The gateway enforces it** (Design.md §1): an order or cancel for a participant not in its
+`participants` is rejected `UNAUTHORIZED_PARTICIPANT` locally and never reaches the cluster; a
+participant in `gateway.gw-0.cancelOnly` may cancel but not place; and operator commands — the
+`most session`/`most image` calls below — pass only through a gateway with `operator=true`. The
+gateway re-reads the file every `gateway.participantRegistry.reloadMs` (5 s), so none of this needs
+a restart. Participants 20–23 are the ones `most load` sends as.
 
 ---
 

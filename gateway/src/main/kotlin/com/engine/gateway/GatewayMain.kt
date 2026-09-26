@@ -4,6 +4,7 @@ import com.engine.reference.GatewayCredentialsSupplier
 import com.engine.reference.GatewayIdentity
 import com.engine.reference.LatencyHistogram
 import com.engine.reference.ParticipantRegistry
+import com.engine.reference.ParticipantRegistrySource
 import com.engine.reference.ShardSpec
 import io.aeron.Aeron
 import io.aeron.Publication
@@ -58,8 +59,35 @@ fun main(args: Array<String>) {
         println(
             "gateway: identity=${identity.gatewayId} " +
                 "registry=${config.participantRegistry?.fingerprint()} " +
-                "participants=${identity.participants.sorted()}"
+                "reload=${config.registryReloadMs}ms " + grants(identity)
         )
+    }
+
+    // Re-read while the gateway runs, because this is where the registry is enforced: revoking a
+    // participant must not wait for a restart (Design.md §1). Legal here for the reason it would
+    // not be in the engine -- a refusal never reaches the log, so no two processes need to agree
+    // on when a new file took effect.
+    val registrySource: ParticipantRegistrySource? =
+        if (identity == null) null
+        else config.participantRegistryFile?.let { path ->
+            lateinit var source: ParticipantRegistrySource
+            // Each swap is announced with this gateway's own grants, since that -- not the whole
+            // file's fingerprint -- is what an operator revoking a participant is waiting to see.
+            source = ParticipantRegistrySource(path, config.participantRegistry!!) { event ->
+                println("gateway: $event")
+                val now = source.registry().gateway(identity.gatewayId)
+                println(
+                    if (now == null) "gateway: ${identity.gatewayId} is no longer in the registry: " +
+                        "placing nothing, forwarding no operator command, passing cancels it allowed"
+                    else "gateway: now ${grants(now)}"
+                )
+            }
+            source.also { if (config.registryReloadMs > 0) it.startPolling(config.registryReloadMs) }
+        }
+    val access: GatewayAccess = when {
+        identity == null -> GatewayAccess.OPEN
+        registrySource != null -> RegistryAccess(registrySource::registry, identity.gatewayId)
+        else -> config.participantRegistry!!.let { fixed -> RegistryAccess({ fixed }, identity.gatewayId) }
     }
 
     val aeronContext = Aeron.Context()
@@ -164,7 +192,7 @@ fun main(args: Array<String>) {
                 }
             }
             val metrics = if (config.metricsEnabled) GatewayMetrics(SystemNanoClock.INSTANCE) else null
-            service = GatewayService(config.shard.securityIds, sink, metrics = metrics)
+            service = GatewayService(config.shard.securityIds, sink, metrics = metrics, access = access)
 
             // Controlled, so a message the cluster cannot take right now is left in the
             // subscription rather than consumed and lost. COMMIT rather than CONTINUE on the
@@ -211,6 +239,7 @@ fun main(args: Array<String>) {
             barrier.use {
                 it.await()
                 worker.interrupt()
+                registrySource?.close()
                 // Inside the barrier: closing it releases the signal and the JVM exits at once.
                 println(
                     "gateway: stopped. forwardedToCluster=${sink.forwardedToCluster} " +
@@ -220,6 +249,8 @@ fun main(args: Array<String>) {
                         "rejectedLocally=${service.rejectedLocally} " +
                         "unreachableRejects=${service.unreachableRejects} " +
                         "undeliverableCommands=${service.undeliverableCommands} " +
+                        "unauthorizedRejects=${service.unauthorizedRejects} " +
+                        "refusedCommands=${service.refusedCommands} " +
                         "untrackedReports=${service.untrackedReports}"
                 )
                 metrics?.let { m ->
@@ -245,6 +276,11 @@ fun main(args: Array<String>) {
 
 private const val FRAGMENT_LIMIT = 64
 
+/** What a registry entry lets this gateway do, as printed at startup and on every reload. */
+private fun grants(identity: GatewayIdentity): String =
+    "participants=${identity.participants.sorted()} cancelOnly=${identity.cancelOnly.sorted()} " +
+        "operator=${identity.operator}"
+
 /** Comfortably inside the consensus module's session timeout, which defaults to 10 seconds. */
 private val KEEP_ALIVE_INTERVAL_NS = java.util.concurrent.TimeUnit.SECONDS.toNanos(1)
 private const val SHUTDOWN_TIMEOUT_MS = 5_000L
@@ -267,11 +303,17 @@ data class GatewayConfig(
     /**
      * Which gateway speaks for which participant, or null to connect anonymously.
      *
-     * The gateway reads it for one reason only -- to check at boot that the id it is about to
-     * present is actually in the file, and to say which participants that makes it responsible
-     * for. The authority is the consensus module, which reads the same file.
+     * Read for two reasons: to check at boot that the id this gateway is about to present is in
+     * the file, and to **enforce** what that entry grants on every client message -- which
+     * participants may place, which may only cancel, whether operator commands pass
+     * (Design.md §1, "Enforcement, at the gateway"). The consensus module authenticates against
+     * the same file.
      */
     val participantRegistry: ParticipantRegistry? = null,
+    /** Where [participantRegistry] was read from, so it can be re-read. */
+    val participantRegistryFile: String? = null,
+    /** How often to re-read it, in milliseconds; 0 turns reloading off. */
+    val registryReloadMs: Long = DEFAULT_REGISTRY_RELOAD_MS,
     /** This gateway's id in [participantRegistry]. Null connects anonymously. */
     val gatewayId: String? = null,
     /**
@@ -318,6 +360,9 @@ data class GatewayConfig(
     companion object {
         const val SECURITIES_FILE = "gateway.securitiesFile"
         const val PARTICIPANT_REGISTRY = "gateway.participantRegistry"
+        const val PARTICIPANT_REGISTRY_RELOAD_MS = "gateway.participantRegistry.reloadMs"
+        /** The same default the nodes use (`engine.participantRegistry.reloadMs`). */
+        const val DEFAULT_REGISTRY_RELOAD_MS = 5_000L
         const val GATEWAY_ID = "gateway.gatewayId"
         const val CREDENTIAL_TOKEN = "gateway.credentialToken"
         const val CREDENTIAL_TOKEN_FILE = "gateway.credentialTokenFile"
@@ -346,6 +391,9 @@ data class GatewayConfig(
             metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
             participantRegistry = registry,
+            participantRegistryFile = properties.getProperty(PARTICIPANT_REGISTRY)?.trim()?.ifEmpty { null },
+            registryReloadMs = properties.getProperty(PARTICIPANT_REGISTRY_RELOAD_MS)?.trim()?.toLong()
+                ?: DEFAULT_REGISTRY_RELOAD_MS,
             gatewayId = properties.getProperty(GATEWAY_ID)?.trim()?.ifEmpty { null },
             credentialToken = credentialToken(properties),
         )

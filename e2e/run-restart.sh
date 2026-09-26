@@ -95,8 +95,11 @@ shard.id=0
 registry.gateways=gw-0,gw-1
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
+gateway.gw-0.operator=true
 gateway.gw-1.secret=$(sha256 "$GATEWAY_SECRET-b")
-gateway.gw-1.participants=14
+gateway.gw-1.participants=7,14
+# §4d cancels participant 7 through gw-1, so gw-1 lists it too; gw-0 stays where its fills go.
+participant.7.primary=gw-0
 EOF
 printf '%s\n' "$GATEWAY_SECRET-b" > "$RUN/gateway-b.secret"
 
@@ -533,8 +536,11 @@ shard.id=0
 registry.gateways=gw-0,gw-1
 gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
 gateway.gw-0.participants=7,8,9,11,12,13
+gateway.gw-0.operator=true
 gateway.gw-1.secret=$(sha256 "$ROTATED")
-gateway.gw-1.participants=14
+gateway.gw-1.participants=7,14
+# §4d cancels participant 7 through gw-1, so gw-1 lists it too; gw-0 stays where its fills go.
+participant.7.primary=gw-0
 EOF
 
 # Both node processes must say so. Waiting on the line rather than on a sleep is the point: a
@@ -571,9 +577,58 @@ $MOST send --symbol AAPL --side sell --price 105.00 --qty 3 --clordid 6001 --par
 grep -q "NEW" "$RUN/rotated.out" \
   || { cat "$RUN/rotated.out" >&2; fail "the rotated gateway could not trade"; }
 pass "the new secret authenticates and trades, with no node restarted"
+ROTATED_ID=$(grep -o "orderId=[0-9]*" "$RUN/rotated.out" | head -1 | cut -d= -f2)
+
+# ------------------------------------------------------------------------- 4f
+echo
+echo "== 4f. the gateway enforces the registry -- before the log, and without a restart"
+# Design.md §1, "Enforcement, at the gateway". gw-1 lists 7 and 14 and is not an operator. Each
+# refusal below is the gateway's own REJECTED; none of it reaches the cluster, which is what makes
+# it legal to decide from a file the gateway re-reads on its own schedule.
+$MOST send --symbol AAPL --side buy --price 99.00 --qty 1 --clordid 7001 --participant 8 \
+  --follow 2 $CONN_B > "$RUN/unlisted.out" 2>&1 || fail "send an unlisted participant through B"
+grep -q "REJECTED.*UNAUTHORIZED_PARTICIPANT" "$RUN/unlisted.out" \
+  || { cat "$RUN/unlisted.out" >&2; fail "gateway B accepted a participant it does not list"; }
+pass "participant 8 is not on gw-1, and gw-1 refused it UNAUTHORIZED_PARTICIPANT"
+
+# An operator command through a gateway that is not an operator is consumed and counted. There is
+# no client report for it, so the evidence is the counter at shutdown (below).
+$MOST image --shard 0 $CONN_B > "$RUN/refused-image.out" 2>&1 || fail "send an image request through B"
+
+# Revocation, gracefully: move 14 to cancelOnly on gw-1 and publish. The gateway must pick it up
+# without a restart, refuse 14's new order, and still let 14 cancel what it has resting.
+cat > "$RUN/participants.properties" <<EOF
+shard.id=0
+registry.gateways=gw-0,gw-1
+gateway.gw-0.secret=$(sha256 "$GATEWAY_SECRET")
+gateway.gw-0.participants=7,8,9,11,12,13
+gateway.gw-0.operator=true
+gateway.gw-1.secret=$(sha256 "$ROTATED")
+gateway.gw-1.participants=7
+gateway.gw-1.cancelOnly=14
+participant.7.primary=gw-0
+EOF
+wait_for "$LOGS/gateway-b-rotated.log" "now participants=\\[7\\] cancelOnly=\\[14\\]" 30 "gateway B registry reload" \
+  || fail "gateway B did not reload the registry"
+$MOST send --symbol AAPL --side sell --price 105.00 --qty 2 --clordid 6002 --participant 14 \
+  --follow 2 $CONN_B > "$RUN/revoked.out" 2>&1 || fail "send as a cancel-only participant"
+grep -q "REJECTED.*UNAUTHORIZED_PARTICIPANT" "$RUN/revoked.out" \
+  || { cat "$RUN/revoked.out" >&2; fail "a cancel-only participant could still place"; }
+$MOST cancel --symbol AAPL --side sell --order-id "$ROTATED_ID" --orig-clordid 6001 --participant 14 \
+  --follow 3 $CONN_B > "$RUN/revoked-cancel.out" 2>&1 || fail "cancel as a cancel-only participant"
+grep -q "CANCELED" "$RUN/revoked-cancel.out" \
+  || { cat "$RUN/revoked-cancel.out" >&2; fail "a cancel-only participant could not cancel"; }
+pass "moved to cancelOnly by a reload, 14 could no longer place and could still cancel"
 
 kill "$GATEWAY_B_PID" "$DISCOVERY_B_PID" 2>/dev/null
 wait "$GATEWAY_B_PID" "$DISCOVERY_B_PID" 2>/dev/null
+grep -q "refusedCommands=1 " "$LOGS/gateway-b-rotated.log" \
+  || { grep "gateway: stopped" "$LOGS/gateway-b-rotated.log" >&2
+       fail "gw-1 is not an operator, yet did not refuse the image request"; }
+grep -q "unauthorizedRejects=2 " "$LOGS/gateway-b-rotated.log" \
+  || { grep "gateway: stopped" "$LOGS/gateway-b-rotated.log" >&2
+       fail "gw-1 did not count its two refusals"; }
+pass "gw-1 refused the operator command and counted both refusals"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

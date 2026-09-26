@@ -168,17 +168,22 @@ SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and w
 - **Wrong credentials are rejected, never downgraded to anonymous.** *No* credentials still
   authenticate anonymously — the control plane and CLI are addressed by nobody. → R§8
 - **The registry is re-read while a node runs**, by fingerprint, not mtime. A file that cannot be
-  parsed, or one for another shard, is reported and ignored. The gateway does not reload, it
-  restarts, which now costs nothing. → R§8
+  parsed, or one for another shard, is reported and ignored. The gateway re-reads it the same way,
+  because it is where the registry is enforced. → R§8
 - **This is legal only because what it feeds is node-local egress routing.** It stops being legal
-  the moment the engine *rejects* an order on a binding, so `UNAUTHORIZED_PARTICIPANT` must arrive
-  through the log. `engine.participantRegistry.reloadMs` is excluded from
-  `EngineConfig.fingerprint()` for the same reason metrics are. → R§8
+  the moment the engine *rejects* an order on a binding, **so the engine never does.**
+  `UNAUTHORIZED_PARTICIPANT` is raised by the **gateway**, before the log, where a node-local file
+  is exactly what a refusal may rest on. The engine may only *count* an undeclared participant.
+  `engine.participantRegistry.reloadMs` is excluded from `EngineConfig.fingerprint()` for the same
+  reason metrics are. → R§8
+- **The gateway checks cancels as well as orders**, and refuses operator commands unless its entry
+  has `operator=true`. The engine's cancel check is participant equality, which means nothing if the
+  participant id was never checked. → R§8
 - **The registry is not in `ShardSpec.fingerprint()`** and must not be folded into it. It has its
   own. → R§8
 - **Execution reports route by `participantId → clusterSessionId`.** Undeliverable reports are
   counted and dropped, never blocked on.
-- **All of this is optional and off by default**, and enforcement is not built.
+- **All of this is optional and off by default.** A gateway without an identity enforces nothing.
 
 ## The control plane
 

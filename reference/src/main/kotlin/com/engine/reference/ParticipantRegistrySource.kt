@@ -8,9 +8,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  * Onboarding a participant, moving one between gateways or rotating a gateway secret is a change
  * to this file and to nothing else. Before this existed it was also a restart of every process
  * that reads it — the gateway, the consensus module and the engine — which made adding a client to
- * a shard a maintenance event on the cluster itself. The gateway still restarts, because a session
- * is bound at open and it holds no state that makes restarting it cost anything (Design.md §1);
- * the two node processes swap the file underneath themselves instead.
+ * a shard a maintenance event on the cluster itself. Now all three swap the file underneath
+ * themselves: the two node processes for routing, and the gateway because it is where the file is
+ * enforced (Design.md §1).
  *
  * **Why that is legal in the engine, and the line it must not cross.** The map the engine derives
  * from a principal is node-local *egress routing*: it is rebuilt in `onStart` from

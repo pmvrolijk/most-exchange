@@ -68,6 +68,29 @@ class GatewayIdentityConfigTest {
         assertEquals(true, registry.verify("gw-a", "north"))
     }
 
+    /** Design.md §1: the gateway re-reads the registry like the nodes, on the same default. */
+    @Test
+    fun `the registry is re-read every five seconds unless told otherwise`() {
+        val defaulted = config(
+            entries = arrayOf(
+                GatewayConfig.GATEWAY_ID to "gw-a",
+                GatewayConfig.CREDENTIAL_TOKEN to "north",
+                GatewayConfig.PARTICIPANT_REGISTRY to "/releases/current/shard-1-participants.properties",
+            ),
+        )
+        val tuned = config(
+            entries = arrayOf(
+                GatewayConfig.GATEWAY_ID to "gw-a",
+                GatewayConfig.CREDENTIAL_TOKEN to "north",
+                GatewayConfig.PARTICIPANT_REGISTRY_RELOAD_MS to "250",
+            ),
+        )
+
+        assertEquals(5_000L, defaulted.registryReloadMs)
+        assertEquals("/releases/current/shard-1-participants.properties", defaulted.participantRegistryFile)
+        assertEquals(250L, tuned.registryReloadMs)
+    }
+
     @Test
     fun `no id at all connects anonymously, exactly as before this existed`() {
         val config = config(registry = null)

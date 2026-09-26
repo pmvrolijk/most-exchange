@@ -274,7 +274,7 @@ sessions *without* replaying `onSessionOpen`, the engine rebuilds the bindings i
 `ParticipantRegistrySource` polls the file, compares content by fingerprint (a release is published
 to a new directory and put in force by moving a symlink, so mtime says nothing) and swaps an
 immutable registry behind a volatile reference. The consensus module and the engine both read it
-through that; the gateway does not reload, it restarts, which now costs nothing. **A file that
+through that, and so does the gateway, which enforces it. **A file that
 cannot be parsed, or one for another shard, is reported and ignored** — standing down on a bad file
 would turn a typo into a shard that authenticates nobody.
 
@@ -282,10 +282,23 @@ The reason it is legal in the engine: what it feeds is node-local *egress routin
 rebuilt in `onStart` from `cluster.clientSessions()`, is deliberately not snapshotted, and only the
 leader's egress reaches anyone, so two nodes holding different versions can disagree about where to
 send a report and cannot diverge the log, the books or a snapshot. **That stops being true the
-moment the engine rejects an order on a binding**, so `UNAUTHORIZED_PARTICIPANT` has to arrive
-through the log rather than from a file each node reads on its own schedule. Same argument that
-keeps metrics out of `EngineConfig.fingerprint()`, and `engine.participantRegistry.reloadMs` is
-excluded from it for the same reason.
+moment the engine rejects an order on a binding.** Same argument that keeps metrics out of
+`EngineConfig.fingerprint()`, and `engine.participantRegistry.reloadMs` is excluded from it for the
+same reason.
+
+**So enforcement lives in the gateway, and the engine never rejects on the registry.** For a long
+time the line above was read as "enforcement must come through the log" — a sequenced command
+installing a registry version, a snapshot field, a wire change. The simpler reading is that a
+refusal which never *enters* the log has no determinism to protect: the gateway rejects
+`UNAUTHORIZED_PARTICIPANT` locally, exactly as it rejects `UNKNOWN_SECURITY`, and may therefore
+decide from a file it re-reads on its own schedule. It rejects earlier and cheaper, too. Two things
+make it enforcement rather than a filter: **cancels are checked as well as orders** (the engine's
+own cancel check is participant equality, which is only as good as the participant id), and
+**operator commands need `operator=true`** — before this, any client of any gateway could halt the
+market. What remains open is the side door: an anonymous cluster session skips every gateway, so a
+node with a registry must refuse them, which needs the control plane and the CLI to hold
+identities first. The engine keeps one thing: it *counts* a message for a participant the sending
+gateway does not list, as defence in depth against a misconfigured gateway, and never branches on it.
 
 **The control plane authors the registry.** `gateway` and `gateway_participant` (V5) hold gateway
 identity, the SHA-256 of its secret and its participant claims; `ReleasePublisher` renders

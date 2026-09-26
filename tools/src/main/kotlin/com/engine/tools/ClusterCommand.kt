@@ -1,9 +1,12 @@
 package com.engine.tools
 
+import com.engine.reference.AdminResponses
 import com.engine.reference.GatewayCredentialsSupplier
 import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ParticipantRegistrySource
 import com.engine.reference.RegistryAuthenticatorSupplier
+import com.engine.reference.RegistryAuthorisationService
+import com.engine.reference.requestSnapshot
 import io.aeron.Aeron
 import io.aeron.archive.Archive
 import io.aeron.archive.ArchiveThreadingMode
@@ -13,6 +16,8 @@ import io.aeron.cluster.ConsensusModule
 import io.aeron.cluster.client.AeronCluster
 import io.aeron.driver.MediaDriver
 import io.aeron.driver.ThreadingMode
+import io.aeron.security.AuthorisationService
+import io.aeron.security.AuthorisationServiceSupplier
 import org.agrona.concurrent.ShutdownSignalBarrier
 import java.io.File
 
@@ -143,6 +148,14 @@ private fun runClusterHost(args: Args) {
         .deleteDirOnStart(fresh)
         .errorHandler { it.printStackTrace() }
     authenticator?.let(consensusContext::authenticatorSupplier)
+    // Who may ask for a snapshot through consensus (Design.md §1). Aeron's default grants no
+    // snapshot request at all, so without this every `snapshot --ingress` and every control-plane
+    // snapshot was refused. With a registry, only an operator=true identity; without one, anyone,
+    // since nothing there is authenticated to check.
+    consensusContext.authorisationServiceSupplier(
+        registrySource?.let { source -> AuthorisationServiceSupplier { RegistryAuthorisationService(source::registry) } }
+            ?: AuthorisationServiceSupplier { AuthorisationService.ALLOW_ALL }
+    )
 
     ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
         println("cluster: started, awaiting shutdown signal")
@@ -180,9 +193,12 @@ private fun runClusterSnapshot(args: Args) {
         val context = Aeron.Context()
         aeronDir?.let(context::aeronDirectoryName)
         Aeron.connect(context).use { aeron ->
+            val responses = AdminResponses()
             val clusterContext = AeronCluster.Context()
                 .aeron(aeron)
                 .ownsAeronClient(false)
+                // The cluster answers on egress, and that answer -- not the offer -- is the result.
+                .egressListener(responses)
                 .ingressChannel(args.optional("ingress-channel") ?: "aeron:udp")
                 .egressChannel(args.optional("egress-channel") ?: "aeron:udp?endpoint=localhost:0")
                 .ingressEndpoints(ingressEndpoints)
@@ -209,11 +225,22 @@ private fun runClusterSnapshot(args: Args) {
                 return
             }
             cluster.use {
-                val correlationId = it.context().aeron().nextCorrelationId()
-                if (it.sendAdminRequestToTakeASnapshot(correlationId)) {
-                    println("cluster: snapshot requested (correlationId=$correlationId)")
+                val outcome = requestSnapshot(
+                    responses,
+                    correlationId = it.context().aeron().nextCorrelationId(),
+                    timeout = java.time.Duration.ofSeconds(args.long("timeout", 30L)),
+                    send = it::sendAdminRequestToTakeASnapshot,
+                    poll = it::pollEgress,
+                )
+                if (outcome.confirmed) {
+                    println("cluster: snapshot taken, the cluster answered ${outcome.code}")
                 } else {
-                    System.err.println("most: the cluster refused the snapshot request")
+                    System.err.println(
+                        "most: no snapshot -- ${outcome.message}" +
+                            if (outcome.code == io.aeron.cluster.codecs.AdminResponseCode.UNAUTHORISED_ACCESS)
+                                "\n  Only an operator=true registry identity may request one (Design.md §1)."
+                            else ""
+                    )
                 }
             }
         }

@@ -178,6 +178,18 @@ reaches the engine without passing any gateway, so it could act for any particip
 operator command, and every check below would be decoration. The control plane and the operator
 CLI, which reach the cluster directly, therefore hold registry identities of their own.
 
+**The same identity is what may ask for a snapshot.** A snapshot requested through consensus
+(`most cluster snapshot --ingress`, the control plane's snapshot and the scheduler's at session
+close) is a cluster *admin request*, and the consensus module authorises each one. On a node with a
+registry it is granted only to a session whose principal is an `operator=true` entry; any other
+admin request is refused except the backup and standby traffic Aeron's own default allows. On a node
+without a registry every admin request is allowed, as nothing there is authenticated. **Aeron's
+default grants no snapshot request at all** — before this, every snapshot asked for over the network
+was refused, and the refusal went unread. A requester therefore reports the cluster's **answer**, not
+the offer: `OK` once the snapshot has been taken, the denial and its message otherwise, and a
+timeout as a timeout. The local toggle (`most cluster snapshot --dir`, `cluster shutdown`) opens no
+session and needs no identity.
+
 #### Enforcement, at the gateway
 
 `UNAUTHORIZED_PARTICIPANT` is raised by the **gateway**, locally, as an `ExecutionReport` it writes

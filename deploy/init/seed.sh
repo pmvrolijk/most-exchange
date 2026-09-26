@@ -70,8 +70,67 @@ resp=$(curl -sS $AUTH -H 'Content-Type: text/plain' -X POST "$API/api/import" \
 expect_ok "$resp" "import"
 say "import said: $(body_of "$resp")"
 
+# ------------------------------------------------------- participants and gateways
+# Exactly what the running stack enforces: config/shard-0-participants.properties, which the cluster
+# host, the engine and the gateway booted from. Authored here so the control plane describes the
+# shard as it is -- before this, the database had no gateways at all, and the release it published
+# said shard 0's clients connect anonymously while the cluster was refusing anonymous sessions.
+#
+# 7 and 8 are the README's traders, 20-23 are what `most load` sends as.
+for p in "7 North" "8 South" "20 Load-A" "21 Load-B" "22 Load-C" "23 Load-D"; do
+  id=${p%% *}
+  expect_ok "$(api POST /api/participants "{\"participantId\": $id, \"name\": \"${p#* }\"}")" \
+    "participant $id"
+done
+
+# Create (a second run answers 409), then PUT the row so a re-run converges on this definition,
+# then set the secret to the one the process presents -- read from the same file it is mounted
+# from, so the value exists in exactly one place. Create alone would issue a random one.
+gateway() { # gateway <id> <secret file> <json row>
+  expect_ok "$(api POST /api/gateways "$3")" "gateway $1"
+  expect_ok "$(api PUT "/api/gateways/$1" "$3")" "gateway $1 grants"
+  expect_ok "$(api PUT "/api/gateways/$1/secret" "{\"secret\": \"$(tr -d '\n' < "$2")\"}")" \
+    "gateway $1 secret"
+}
+# gw-0 is also the operator gateway: the CLI's and this control plane's session transitions,
+# purges, definitions and image requests go through it (Design.md §1).
+gateway gw-0 /config/gateway-0.secret '{
+  "gatewayId": "gw-0", "shardId": 0, "enabled": true, "operator": true,
+  "participants": [7, 8, 20, 21, 22, 23], "cancelOnly": [], "primaryFor": []
+}'
+# The control plane's own identity, for the snapshots it sends straight to the cluster. Operator
+# only: it speaks for nobody.
+gateway control /config/control.secret '{
+  "gatewayId": "control", "shardId": 0, "enabled": true, "operator": true,
+  "participants": [], "cancelOnly": [], "primaryFor": []
+}'
+
 say "publishing release"
-expect_ok "$(api POST '/api/releases?note=dev%20stack')" "release"
+resp=$(api POST '/api/releases?note=dev%20stack')
+expect_ok "$resp" "release"
+# The check that the database and the running shard agree about who may do what: this must equal
+# the registry fingerprint cluster-host, engine and gateway print at startup
+# (`docker compose logs cluster-host | grep participants=`).
+say "release registry fingerprint for shard 0: $(body_of "$resp" \
+  | sed -n 's/.*"registryFingerprints":{"0":"\([0-9a-f]*\)".*/\1/p')"
+
+# ---------------------------------------------------------------- the calendar
+# The one in docs/ControlPlane.md. Assigned, but the scheduler is OFF in this stack
+# (CONTROL_SCHEDULER_ENABLED=false) -- it opens and closes markets on the wall clock, which is a
+# surprising thing for a dev stack to do while you read its logs. Turn it on to watch it reconcile.
+say "creating the equities schedule"
+expect_ok "$(api PUT /api/schedules/equities '{
+  "name": "equities", "zone": "Europe/Amsterdam",
+  "weekdays": ["MONDAY", "TUESDAY", "WEDNESDAY", "THURSDAY", "FRIDAY"],
+  "purgeTime": "07:00",
+  "entries": [
+    { "at": "08:00", "phase": "pre-open" },
+    { "at": "08:55", "phase": "open-auction" },
+    { "at": "09:00", "phase": "continuous" },
+    { "at": "17:30", "phase": "closed" }
+  ]
+}')" "schedule equities"
+expect_ok "$(api PUT /api/shards/0/schedule '{"scheduleName": "equities"}')" "shard 0 schedule"
 
 # ------------------------------------------------------------- reference prices
 # NOT geometry, and deliberately not in the security file: these arrive at runtime as

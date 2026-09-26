@@ -655,11 +655,32 @@ grep -q "refused this client" "$RUN/anonymous-snapshot.out" \
 grep -q "presented no credentials" "$LOGS/cluster-same.log" \
   || fail "the consensus module did not say why it refused the anonymous session"
 pass "an anonymous cluster session is refused, and the consensus module says why"
+# What the cluster ANSWERS is the result, and the recording log is the proof -- for a long time the
+# offer was reported as success while Aeron's default authorisation refused every request and no
+# snapshot was ever written (Design.md §1). Count SNAPSHOT entries before and after.
+snapshots() {
+  java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED --add-opens java.base/sun.nio.ch=ALL-UNNAMED \
+    -cp "$(dirname "$MOST")/../lib/*" io.aeron.cluster.ClusterTool "$RUN/cluster-host/cluster" recording-log \
+    2>/dev/null | grep -o "type=SNAPSHOT" | wc -l | tr -d ' '
+}
+BEFORE=$(snapshots)
 $MOST cluster snapshot --ingress 0=localhost:20110 --aeron-dir "$AERON_DIR" \
   --identity control --secret-file "$RUN/control.secret" > "$RUN/operator-snapshot.out" 2>&1
-grep -q "snapshot requested" "$RUN/operator-snapshot.out" \
-  || { cat "$RUN/operator-snapshot.out" >&2; fail "the operator identity could not request a snapshot"; }
-pass "the CLI, named by an operator-only entry, requested a snapshot through consensus"
+grep -q "snapshot taken, the cluster answered OK" "$RUN/operator-snapshot.out" \
+  || { cat "$RUN/operator-snapshot.out" >&2; fail "the operator identity's snapshot was not answered OK"; }
+AFTER=$(snapshots)
+[ "$AFTER" -gt "$BEFORE" ] \
+  || fail "the cluster answered OK but the recording log gained no snapshot ($BEFORE -> $AFTER)"
+pass "the CLI, as an operator-only entry, took a snapshot through consensus ($BEFORE -> $AFTER in the recording log)"
+
+# And an identity that authenticates but is not an operator is refused the snapshot: gw-1 is a
+# real gateway with a valid secret, so this is authorisation, not authentication.
+$MOST cluster snapshot --ingress 0=localhost:20110 --aeron-dir "$AERON_DIR" \
+  --identity gw-1 --secret-file "$RUN/gateway-b.secret" > "$RUN/gateway-snapshot.out" 2>&1
+grep -q "UNAUTHORISED_ACCESS" "$RUN/gateway-snapshot.out" \
+  || { cat "$RUN/gateway-snapshot.out" >&2; fail "a gateway that is not an operator was not refused a snapshot"; }
+[ "$(snapshots)" -eq "$AFTER" ] || fail "a refused snapshot request still wrote a snapshot"
+pass "a gateway identity that is not an operator is refused a snapshot, and none is written"
 
 $MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
 sleep 2

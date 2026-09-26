@@ -1,7 +1,10 @@
 package com.engine.reference
 
+import io.aeron.cluster.AllowBackupAndStandbyAuthorisationService
+import io.aeron.cluster.codecs.AdminRequestType
 import io.aeron.security.Authenticator
 import io.aeron.security.AuthenticatorSupplier
+import io.aeron.security.AuthorisationService
 import io.aeron.security.CredentialsSupplier
 import io.aeron.security.SessionProxy
 import org.agrona.collections.Long2ObjectHashMap
@@ -137,4 +140,37 @@ class RegistryAuthenticatorSupplier(
 
     val authenticator = RegistryAuthenticator(registrySupplier)
     override fun get(): Authenticator = authenticator
+}
+
+/**
+ * Authorises the consensus module's admin requests from the same registry the authenticator reads
+ * (Design.md §1): a snapshot requested through consensus is granted only to a session whose
+ * principal is an `operator=true` entry. Everything else falls through to Aeron's default, which
+ * allows cluster backup and standby traffic and nothing more.
+ *
+ * Needed at all because that default grants **no** snapshot request: every `sendAdminRequestToTake
+ * ASnapshot` was refused, and nothing read the refusal. Installed only on a node with a registry; a
+ * node without one allows every admin request, since nothing there is authenticated to check.
+ *
+ * Read per request through a supplier, like [RegistryAuthenticator], so revoking `operator` in a
+ * reload revokes the right to snapshot at once. Runs on the leader's consensus module, never in the
+ * replicated state machine.
+ */
+class RegistryAuthorisationService(
+    private val registrySupplier: () -> ParticipantRegistry,
+) : AuthorisationService {
+
+    override fun isAuthorised(
+        protocolId: Int,
+        actionId: Int,
+        type: Any?,
+        encodedPrincipal: ByteArray?,
+    ): Boolean {
+        if (type == AdminRequestType.SNAPSHOT) {
+            val principal = encodedPrincipal?.takeIf { it.isNotEmpty() } ?: return false
+            return registrySupplier().mayOperate(String(principal, Charsets.US_ASCII))
+        }
+        return AllowBackupAndStandbyAuthorisationService.INSTANCE
+            .isAuthorised(protocolId, actionId, type, encodedPrincipal)
+    }
 }

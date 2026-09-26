@@ -138,6 +138,12 @@ services:
       # in config/shard-0-participants.properties.
       CONTROL_CLUSTER_IDENTITY_0: control
       CONTROL_CLUSTER_SECRETFILE_0: /config/control.secret
+      # Where the consensus module answers. The default endpoint 0.0.0.0:0 is not an address it can
+      # send to, so the admin session never connected and every snapshot from here timed out at
+      # POLL_RESPONSE. The name is the media driver's, not this container's: control-driver binds
+      # every UDP socket this process uses (one media driver is one network identity). Port 0 is
+      # still ephemeral -- Aeron resolves it before advertising the response channel.
+      CONTROL_CLUSTER_EGRESS_CHANNEL: "aeron:udp?endpoint=control-driver:0"
       # The calendar is off by default here. It opens markets unattended, which is a surprising
       # thing for a dev stack to do while you are reading its logs.
       CONTROL_SCHEDULER_ENABLED: ${CONTROL_SCHEDULER_ENABLED:-false}

@@ -1,14 +1,15 @@
 package com.engine.control
 
+import com.engine.reference.AdminResponses
 import com.engine.reference.GatewayCredentialsSupplier
+import com.engine.reference.requestSnapshot
 import io.aeron.Aeron
 import io.aeron.cluster.client.AeronCluster
-import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import java.io.File
-import java.util.concurrent.ConcurrentHashMap
+import java.time.Duration
 
 /**
  * Asks a shard's cluster to take a snapshot.
@@ -24,8 +25,11 @@ import java.util.concurrent.ConcurrentHashMap
  * carries topology, deployment stays in each process's config -- and keeping cluster ingress out of
  * the directory is what stops an upstream adapter from finding the cluster and skipping the gateway.
  *
- * Also unlike the four operator commands, a snapshot **is** acknowledged. Aeron answers the admin
- * request, so `confirmed` here means confirmed rather than merely sent.
+ * Also unlike the four operator commands, a snapshot **is** acknowledged: the cluster answers the
+ * admin request on egress, and `confirmed` means that answer was OK. It used to mean only that the
+ * request was offered, while Aeron's default authorisation was refusing every one (Design.md §1) --
+ * the consensus module now grants it to an `operator=true` identity, which is what
+ * [credentialsFor] presents.
  */
 @Component
 class ClusterAdmin(
@@ -43,10 +47,6 @@ class ClusterAdmin(
     private val egressChannel: String,
 ) {
     private val log = LoggerFactory.getLogger(ClusterAdmin::class.java)
-
-    // One connection per shard, held open. Connecting costs a round trip and a pair of buffers,
-    // and a scheduled snapshot at every session close would otherwise pay it every time.
-    private val clusters = ConcurrentHashMap<Int, AeronCluster>()
 
     /**
      * Aeron's member-endpoint form -- `0=host:port` for one node, comma-separated across members so
@@ -85,8 +85,9 @@ class ClusterAdmin(
             return CommandResult("snapshot", sent = false, confirmed = false, detail = e.message ?: "bad identity")
         }
 
+        val responses = AdminResponses()
         val cluster = try {
-            connect(shardId, aeron, endpoints, credentials)
+            connect(aeron, endpoints, credentials, responses)
         } catch (e: Exception) {
             // Never fatal, for the same reason the rest of the link is optional: authoring
             // reference data must keep working with no exchange running anywhere near it.
@@ -99,44 +100,49 @@ class ClusterAdmin(
             )
         }
 
-        return try {
+        // Connected per request and closed after, never cached: a held session that sends no
+        // keepalives is closed by the consensus module after its session timeout, and the next
+        // snapshot would then be offered to a dead session.
+        return cluster.use {
             val correlationId = aeron.nextCorrelationId()
-            if (cluster.sendAdminRequestToTakeASnapshot(correlationId)) {
-                CommandResult(
-                    command = "snapshot",
-                    sent = true,
-                    // The cluster answers this one, which none of the four operator commands do.
-                    confirmed = true,
-                    detail = "shard $shardId took a snapshot (correlationId=$correlationId)",
+            val outcome = try {
+                requestSnapshot(
+                    responses, correlationId, SNAPSHOT_TIMEOUT,
+                    send = it::sendAdminRequestToTakeASnapshot,
+                    poll = it::pollEgress,
                 )
-            } else {
-                CommandResult("snapshot", sent = true, confirmed = false, detail = "the cluster refused the request")
+            } catch (e: Exception) {
+                return@use CommandResult("snapshot", sent = false, confirmed = false, detail = "snapshot failed: ${e.message}")
             }
-        } catch (e: Exception) {
-            clusters.remove(shardId)?.let { runCatching { it.close() } }
-            CommandResult("snapshot", sent = false, confirmed = false, detail = "snapshot failed: ${e.message}")
+            // Confirmed means the cluster answered OK, which it does once the snapshot is taken --
+            // not that the request was offered. A refusal is reported with the cluster's message.
+            CommandResult(
+                command = "snapshot",
+                sent = outcome.sent,
+                confirmed = outcome.confirmed,
+                detail = if (outcome.confirmed) "shard $shardId took a snapshot (correlationId=$correlationId)"
+                else "shard $shardId: ${outcome.message}",
+            )
         }
     }
 
     private fun connect(
-        shardId: Int,
         aeron: Aeron,
         endpoints: String,
         credentials: Pair<String, String>?,
+        responses: AdminResponses,
     ): AeronCluster {
-        clusters[shardId]?.let { if (!it.isClosed) return it else clusters.remove(shardId) }
         val context = AeronCluster.Context()
             .aeron(aeron)
             .ownsAeronClient(false)
+            .egressListener(responses)
             .ingressChannel(ingressChannel)
             .egressChannel(egressChannel)
             .ingressEndpoints(endpoints)
         credentials?.let { (identity, secret) ->
             context.credentialsSupplier(GatewayCredentialsSupplier(identity, secret))
         }
-        val cluster = AeronCluster.connect(context)
-        clusters[shardId] = cluster
-        return cluster
+        return AeronCluster.connect(context)
     }
 
     companion object {
@@ -151,6 +157,9 @@ class ClusterAdmin(
          * `control.cluster.secretFile.<shardId>`, for the reason [endpointsFor] is. The secret comes
          * from a file only, so it is never in the YAML or the environment listing.
          */
+        /** Long enough for a snapshot of full books to be written; a timeout is reported as one. */
+        private val SNAPSHOT_TIMEOUT: Duration = Duration.ofSeconds(30)
+
         fun credentialsFor(
             environment: org.springframework.core.env.Environment,
             shardId: Int,
@@ -171,11 +180,5 @@ class ClusterAdmin(
             require(secret.isNotEmpty()) { "control.cluster.secretFile.$shardId is empty: $secretFile" }
             return identity to secret
         }
-    }
-
-    @PreDestroy
-    fun stop() {
-        clusters.values.forEach { runCatching { it.close() } }
-        clusters.clear()
     }
 }

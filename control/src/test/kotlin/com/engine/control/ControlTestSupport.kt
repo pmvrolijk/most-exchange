@@ -8,6 +8,7 @@ import org.springframework.test.context.DynamicPropertySource
 import org.testcontainers.containers.PostgreSQLContainer
 import org.testcontainers.utility.DockerImageName
 import java.nio.file.Files
+import java.nio.file.Path
 
 /** The operator every test authenticates as; seeded once into the shared context. */
 const val TEST_ADMIN_USER = "admin"
@@ -55,6 +56,10 @@ abstract class PostgresTest {
         // The Spring context is shared across test classes, so observed feed state outlives a
         // truncate. A halt left behind by one test would make the next one skip.
         clusterLink.state.clear()
+        // RESTART IDENTITY numbers releases from 1 again, so a directory an earlier test published
+        // would otherwise be written into a second time -- and a file that test wrote and this one
+        // did not (a participants file, say) would still be there to be found.
+        Path.of(releaseDir).toFile().listFiles()?.forEach { it.deleteRecursively() }
     }
 
     companion object {

@@ -4,7 +4,6 @@ import com.engine.reference.ParticipantRegistry
 import org.junit.jupiter.api.Test
 import org.springframework.beans.factory.annotation.Autowired
 import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.dao.DataIntegrityViolationException
 import java.nio.file.Files
 import java.nio.file.Path
 import kotlin.test.assertEquals
@@ -105,14 +104,144 @@ class GatewayRegistryTest : PostgresTest() {
         assertTrue(release.fingerprints.containsKey(0), "the shard file is published regardless")
     }
 
-    /** Structural, not checked: participant_id is the join table's primary key. */
+    // --------------------------------------------------- several gateways per participant, primary
+    // Design.md §1: a participant may be listed on several gateways, and then one must be named its
+    // primary. The rule lives in `reference`; what is checked here is that the control plane can
+    // author it and that the published file carries it.
+
+    private fun registryOf(release: ReleaseRow): ParticipantRegistry = ParticipantRegistry.load(
+        Path.of(release.directory).resolve(ReleasePublisher.participantsFileName(0)).toString()
+    )
+
     @Test
-    fun `a participant claimed by two gateways is refused`() {
+    fun `a participant on two gateways with a primary publishes, and the file names the primary`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L).copy(primaryFor = listOf(7L)))
+        topology.createGateway(gateway("gw-1", 7L, 8L, secret = "another-secret-token"))
+
+        val booted = registryOf(publisher.publish("failover"))
+
+        assertEquals("gw-0", booted.primaryOf(7L))
+        assertTrue(booted.mayPlace("gw-1", 7L))
+    }
+
+    /** The domain type refuses it, and the draft view says so before anyone publishes. */
+    @Test
+    fun `a participant on two gateways with no primary is a problem in the draft view`() {
         seed()
         topology.createGateway(gateway("gw-0", 7L))
-        assertFailsWith<DataIntegrityViolationException> {
-            topology.createGateway(gateway("gw-1", 7L, secret = "another-secret-token"))
+        topology.createGateway(gateway("gw-1", 7L, secret = "another-secret-token"))
+
+        val problem = topology.view().shards.single { it.shard.shardId == 0 }.problem
+        assertTrue(problem != null && "primary" in problem, "expected a primary problem, got $problem")
+    }
+
+    @Test
+    fun `two gateways on one shard cannot both be a participant's primary`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L).copy(primaryFor = listOf(7L)))
+        assertFailsWith<IllegalArgumentException> {
+            topology.createGateway(
+                gateway("gw-1", 7L, secret = "another-secret-token").copy(primaryFor = listOf(7L))
+            )
         }
+    }
+
+    @Test
+    fun `a gateway cannot be primary for a participant it does not list`() {
+        seed()
+        assertFailsWith<IllegalArgumentException> {
+            topology.createGateway(gateway("gw-0", 7L).copy(primaryFor = listOf(8L)))
+        }
+    }
+
+    /**
+     * A primary flag on a participant only one gateway lists means nothing, and is left out of the
+     * file rather than refused -- otherwise disabling a failover would break the shard's registry.
+     */
+    @Test
+    fun `a primary flag on a participant only one gateway lists is not published`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L).copy(primaryFor = listOf(7L)))
+
+        val booted = registryOf(publisher.publish("one gateway"))
+
+        assertEquals("gw-0", booted.primaryOf(7L))
+        assertTrue(booted.primaries.isEmpty())
+    }
+
+    /** The old primary key on participant_id alone confined a participant to one gateway anywhere. */
+    @Test
+    fun `a participant may be on gateways of two shards, each its own primary`() {
+        seed()
+        topology.createShard(shardRow(1))
+        topology.createSecurity(securityRow(2, 1, "MSFT", ISIN_MICROSOFT))
+        topology.createGateway(gateway("gw-0", 7L).copy(primaryFor = listOf(7L)))
+        topology.createGateway(
+            gateway("gw-1", 7L, secret = "another-secret-token").copy(shardId = 1, primaryFor = listOf(7L))
+        )
+
+        assertEquals("gw-0", topology.participantRegistry(0)!!.primaryOf(7L))
+        assertEquals("gw-1", topology.participantRegistry(1)!!.primaryOf(7L))
+    }
+
+    // ------------------------------------------------------------------ cancel only and operator
+
+    @Test
+    fun `a cancel only participant publishes as cancel only`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L).copy(cancelOnly = listOf(8L)))
+
+        val booted = registryOf(publisher.publish("revoking 8"))
+
+        assertTrue(booted.mayCancel("gw-0", 8L))
+        assertFalse(booted.mayPlace("gw-0", 8L))
+    }
+
+    @Test
+    fun `a participant cannot be both placing and cancel only on one gateway`() {
+        seed()
+        assertFailsWith<IllegalArgumentException> {
+            topology.createGateway(gateway("gw-0", 7L).copy(cancelOnly = listOf(7L)))
+        }
+    }
+
+    /**
+     * How the control plane and the CLI get named (Design.md §1): an operator-only identity lists
+     * nobody. It must still be published -- a registry that dropped it would leave them anonymous,
+     * which a node with a registry refuses.
+     */
+    @Test
+    fun `an operator only gateway lists nobody and is still published`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L))
+        topology.createGateway(gateway("control", secret = "operator-secret-token").copy(operator = true))
+
+        val booted = registryOf(publisher.publish("with an operator"))
+
+        assertTrue(booted.mayOperate("control"))
+        assertFalse(booted.mayOperate("gw-0"))
+        assertEquals(emptyList(), booted.participantsOf("control")!!.toList())
+    }
+
+    @Test
+    fun `a gateway that lists nobody and is not an operator is refused`() {
+        seed()
+        assertFailsWith<IllegalArgumentException> { topology.createGateway(gateway("gw-0")) }
+    }
+
+    @Test
+    fun `an update carries operator, cancel only and primary through`() {
+        seed()
+        topology.createGateway(gateway("gw-0", 7L))
+        topology.updateGateway(
+            GatewayRow("gw-0", shardId = 0, participants = listOf(7L), cancelOnly = listOf(8L), operator = true),
+        )
+
+        val stored = topology.gateway("gw-0")!!
+        assertEquals(listOf(7L), stored.participants)
+        assertEquals(listOf(8L), stored.cancelOnly)
+        assertTrue(stored.operator)
     }
 
     @Test

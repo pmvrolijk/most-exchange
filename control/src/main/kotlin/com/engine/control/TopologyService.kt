@@ -133,6 +133,7 @@ class TopologyService(private val repository: TopologyRepository) {
     fun createGateway(row: GatewayRow): GatewayRow {
         row.toIdentity()
         requireShardExists(row.shardId)
+        requireSinglePrimary(row)
         repository.insertGateway(row)
         return row
     }
@@ -143,6 +144,7 @@ class TopologyService(private val repository: TopologyRepository) {
         // carry the secret, and constructing the identity is what checks the id and the claims.
         val stored = repository.gateway(row.gatewayId) ?: return null
         row.copy(secretSha256 = stored.secretSha256).toIdentity()
+        requireSinglePrimary(row)
         return if (repository.updateGateway(row)) row.copy(secretSha256 = stored.secretSha256)
         else null
     }
@@ -160,9 +162,36 @@ class TopologyService(private val repository: TopologyRepository) {
      * connect anonymously, which is the behaviour that shipped before the registry existed.
      */
     fun participantRegistry(shardId: Int): ParticipantRegistry? {
-        val gateways = repository.gatewaysOfShard(shardId).filter { it.participants.isNotEmpty() }
+        // Every enabled gateway, an operator-only one included: dropping it would leave the control
+        // plane or the CLI anonymous, which a node with a registry refuses (Design.md §1).
+        val gateways = repository.gatewaysOfShard(shardId)
         if (gateways.isEmpty()) return null
-        return ParticipantRegistry(shardId, gateways.map { it.toIdentity() })
+        // A primary flag is published only where it means something -- a participant several of
+        // this shard's gateways list. On a participant only one lists, the file format refuses it
+        // as a typo, and here it would be a leftover of a failover since disabled or deleted.
+        val listings = gateways.flatMap { g -> (g.participants + g.cancelOnly).map { it to g.gatewayId } }
+            .groupBy({ it.first }, { it.second })
+        val primaries = gateways
+            .flatMap { g -> g.primaryFor.map { it to g.gatewayId } }
+            .filter { (participantId, _) -> listings[participantId].orEmpty().size > 1 }
+            .toMap()
+        return ParticipantRegistry(shardId, gateways.map { it.toIdentity() }, primaries)
+    }
+
+    /**
+     * One primary per participant per shard. The published registry cannot even express two -- it
+     * is a map -- so this is a storage-shape rule rather than a domain one, and the database cannot
+     * check it without the gateway's shard beside each listing.
+     */
+    private fun requireSinglePrimary(row: GatewayRow) {
+        if (row.primaryFor.isEmpty()) return
+        val contested = repository.gateways()
+            .filter { it.shardId == row.shardId && it.gatewayId != row.gatewayId }
+            .flatMap { other -> other.primaryFor.filter { it in row.primaryFor }.map { it to other.gatewayId } }
+        require(contested.isEmpty()) {
+            "gateway ${row.gatewayId} cannot be primary for " +
+                contested.joinToString(", ") { "${it.first}, whose primary on shard ${row.shardId} is ${it.second}" }
+        }
     }
 
     // ------------------------------------------------------------- validation

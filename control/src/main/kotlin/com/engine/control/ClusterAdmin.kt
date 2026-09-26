@@ -1,11 +1,13 @@
 package com.engine.control
 
+import com.engine.reference.GatewayCredentialsSupplier
 import io.aeron.Aeron
 import io.aeron.cluster.client.AeronCluster
 import jakarta.annotation.PreDestroy
 import org.slf4j.LoggerFactory
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
+import java.io.File
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -77,8 +79,14 @@ class ClusterAdmin(
                 detail = "no Aeron media driver: ${link.status().detail}",
             )
 
+        val credentials = try {
+            credentialsFor(environment, shardId)
+        } catch (e: IllegalArgumentException) {
+            return CommandResult("snapshot", sent = false, confirmed = false, detail = e.message ?: "bad identity")
+        }
+
         val cluster = try {
-            connect(shardId, aeron, endpoints)
+            connect(shardId, aeron, endpoints, credentials)
         } catch (e: Exception) {
             // Never fatal, for the same reason the rest of the link is optional: authoring
             // reference data must keep working with no exchange running anywhere near it.
@@ -110,7 +118,12 @@ class ClusterAdmin(
         }
     }
 
-    private fun connect(shardId: Int, aeron: Aeron, endpoints: String): AeronCluster {
+    private fun connect(
+        shardId: Int,
+        aeron: Aeron,
+        endpoints: String,
+        credentials: Pair<String, String>?,
+    ): AeronCluster {
         clusters[shardId]?.let { if (!it.isClosed) return it else clusters.remove(shardId) }
         val context = AeronCluster.Context()
             .aeron(aeron)
@@ -118,9 +131,46 @@ class ClusterAdmin(
             .ingressChannel(ingressChannel)
             .egressChannel(egressChannel)
             .ingressEndpoints(endpoints)
+        credentials?.let { (identity, secret) ->
+            context.credentialsSupplier(GatewayCredentialsSupplier(identity, secret))
+        }
         val cluster = AeronCluster.connect(context)
         clusters[shardId] = cluster
         return cluster
+    }
+
+    companion object {
+        /**
+         * The identity this process presents to [shardId]'s cluster, or null for none.
+         *
+         * A node running with a participant registry refuses a session with no credentials, since
+         * an anonymous session skips every gateway check (Design.md §1). The control plane is then
+         * named by an operator-only entry in that shard's registry -- `operator=true`, no
+         * participants -- authored here like any other gateway, and presented exactly as a gateway
+         * presents its own. Per shard, as `control.cluster.identity.<shardId>` and
+         * `control.cluster.secretFile.<shardId>`, for the reason [endpointsFor] is. The secret comes
+         * from a file only, so it is never in the YAML or the environment listing.
+         */
+        fun credentialsFor(
+            environment: org.springframework.core.env.Environment,
+            shardId: Int,
+        ): Pair<String, String>? {
+            val identity = environment.getProperty("control.cluster.identity.$shardId")
+                ?.trim()?.ifEmpty { null }
+            val secretFile = environment.getProperty("control.cluster.secretFile.$shardId")
+                ?.trim()?.ifEmpty { null }
+            require((identity == null) == (secretFile == null)) {
+                "control.cluster.identity.$shardId and control.cluster.secretFile.$shardId go " +
+                    "together: an identity with no secret cannot authenticate, and a secret with no " +
+                    "identity has nothing to authenticate as"
+            }
+            if (identity == null || secretFile == null) return null
+            val file = File(secretFile)
+            require(file.isFile) { "control.cluster.secretFile.$shardId not found: $secretFile" }
+            val secret = file.readText().trim()
+            require(secret.isNotEmpty()) { "control.cluster.secretFile.$shardId is empty: $secretFile" }
+            return identity to secret
+        }
     }
 
     @PreDestroy

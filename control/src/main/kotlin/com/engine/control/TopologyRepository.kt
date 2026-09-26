@@ -174,21 +174,22 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
     fun insertGateway(row: GatewayRow) {
         jdbc.update(
             """
-            INSERT INTO gateway (gateway_id, shard_id, secret_sha256, enabled)
-            VALUES (:gatewayId, :shardId, :secret, :enabled)
+            INSERT INTO gateway (gateway_id, shard_id, secret_sha256, enabled, operator)
+            VALUES (:gatewayId, :shardId, :secret, :enabled, :operator)
             """.trimIndent(),
             gatewayParameters(row),
         )
-        replaceGatewayParticipants(row.gatewayId, row.participants)
+        replaceGatewayParticipants(row)
     }
 
     /** Leaves the secret alone; rotating it is [updateGatewaySecret] and a separate endpoint. */
     fun updateGateway(row: GatewayRow): Boolean {
         val updated = jdbc.update(
-            "UPDATE gateway SET shard_id = :shardId, enabled = :enabled WHERE gateway_id = :gatewayId",
+            "UPDATE gateway SET shard_id = :shardId, enabled = :enabled, operator = :operator " +
+                "WHERE gateway_id = :gatewayId",
             gatewayParameters(row),
         ) > 0
-        if (updated) replaceGatewayParticipants(row.gatewayId, row.participants)
+        if (updated) replaceGatewayParticipants(row)
         return updated
     }
 
@@ -200,31 +201,44 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
     fun deleteGateway(gatewayId: String): Boolean =
         jdbc.update("DELETE FROM gateway WHERE gateway_id = :id", mapOf("id" to gatewayId)) > 0
 
-    private fun replaceGatewayParticipants(gatewayId: String, participants: List<Long>) {
+    private fun replaceGatewayParticipants(row: GatewayRow) {
         jdbc.update(
             "DELETE FROM gateway_participant WHERE gateway_id = :id",
-            mapOf("id" to gatewayId),
+            mapOf("id" to row.gatewayId),
         )
-        for (participantId in participants) {
-            // The primary key on participant_id is what refuses a second claim, so a participant
-            // already spoken for by another gateway fails here rather than at render time.
+        for ((participantId, cancelOnly) in row.participants.map { it to false } + row.cancelOnly.map { it to true }) {
             jdbc.update(
-                "INSERT INTO gateway_participant (participant_id, gateway_id) " +
-                    "VALUES (:participantId, :gatewayId)",
-                mapOf("participantId" to participantId, "gatewayId" to gatewayId),
+                "INSERT INTO gateway_participant (participant_id, gateway_id, cancel_only, is_primary) " +
+                    "VALUES (:participantId, :gatewayId, :cancelOnly, :primary)",
+                mapOf(
+                    "participantId" to participantId,
+                    "gatewayId" to row.gatewayId,
+                    "cancelOnly" to cancelOnly,
+                    "primary" to (participantId in row.primaryFor),
+                ),
             )
         }
     }
 
+    private data class Listing(val gatewayId: String, val participantId: Long, val cancelOnly: Boolean, val primary: Boolean)
+
     private fun withParticipants(rows: List<GatewayRow>): List<GatewayRow> {
         if (rows.isEmpty()) return rows
-        val claims = jdbc.query(
-            "SELECT gateway_id, participant_id FROM gateway_participant " +
+        val listings = jdbc.query(
+            "SELECT gateway_id, participant_id, cancel_only, is_primary FROM gateway_participant " +
                 "WHERE gateway_id IN (:ids) ORDER BY participant_id",
             mapOf("ids" to rows.map { it.gatewayId }),
-        ) { rs, _ -> rs.getString("gateway_id") to rs.getLong("participant_id") }
-            .groupBy({ it.first }, { it.second })
-        return rows.map { it.copy(participants = claims[it.gatewayId] ?: emptyList()) }
+        ) { rs, _ ->
+            Listing(rs.getString("gateway_id"), rs.getLong("participant_id"), rs.getBoolean("cancel_only"), rs.getBoolean("is_primary"))
+        }.groupBy { it.gatewayId }
+        return rows.map { row ->
+            val mine = listings[row.gatewayId].orEmpty()
+            row.copy(
+                participants = mine.filterNot { it.cancelOnly }.map { it.participantId },
+                cancelOnly = mine.filter { it.cancelOnly }.map { it.participantId },
+                primaryFor = mine.filter { it.primary }.map { it.participantId },
+            )
+        }
     }
 
     private fun gatewayParameters(row: GatewayRow) = MapSqlParameterSource()
@@ -232,6 +246,7 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
         .addValue("shardId", row.shardId)
         .addValue("secret", row.secretSha256)
         .addValue("enabled", row.enabled)
+        .addValue("operator", row.operator)
 
     private fun participantParameters(row: ParticipantRow) = MapSqlParameterSource()
         .addValue("participantId", row.participantId)
@@ -275,6 +290,7 @@ class TopologyRepository(private val jdbc: NamedParameterJdbcTemplate) {
                 gatewayId = rs.getString("gateway_id"),
                 shardId = rs.getInt("shard_id"),
                 enabled = rs.getBoolean("enabled"),
+                operator = rs.getBoolean("operator"),
                 // CHAR(64) comes back space-padded on an empty tail; the domain type rejects it.
                 secretSha256 = rs.getString("secret_sha256").trim(),
             )

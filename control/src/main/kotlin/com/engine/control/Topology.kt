@@ -111,7 +111,8 @@ data class ParticipantRow(
 }
 
 /**
- * A gateway process's identity on a shard, and the participants it speaks for.
+ * A gateway process's identity on a shard, and what it may do (Design.md §1): the participants it
+ * may place for, those it may only cancel for, and whether it may send operator commands.
  *
  * The editable shape of `reference`'s `GatewayIdentity`. [toIdentity] is the crossing point where
  * the domain type validates -- the alphabet, the digest's shape, the participant list -- exactly as
@@ -122,17 +123,32 @@ data class GatewayRow(
     val gatewayId: String,
     val shardId: Int,
     val enabled: Boolean = true,
-    /** Participants this gateway speaks for. At most one gateway may claim each. */
+    /** Participants that may place and cancel through this gateway. */
     val participants: List<Long> = emptyList(),
+    /** Participants that may cancel and not place: revocation made graceful. */
+    val cancelOnly: List<Long> = emptyList(),
+    /** May send operator commands. With no participants, this is how an operator is named. */
+    val operator: Boolean = false,
+    /**
+     * Among the participants this gateway lists, those it is the primary for -- the gateway they
+     * are bound to when more than one listing gateway is connected. Meaningful only for a
+     * participant several gateways on the shard list; published only then.
+     */
+    val primaryFor: List<Long> = emptyList(),
     /** Never serialised out; see [GatewayController]. */
     @get:JsonIgnore
     val secretSha256: String = "",
 ) {
     init {
         require(shardId >= 0) { "shardId must be non-negative: $shardId" }
-        require(participants.all { it > 0L }) { "participant ids must be positive" }
-        require(participants.distinct().size == participants.size) {
-            "gateway $gatewayId claims a participant twice"
+        val listed = participants + cancelOnly
+        require(listed.all { it > 0L }) { "participant ids must be positive" }
+        require(listed.distinct().size == listed.size) {
+            "gateway $gatewayId lists a participant twice, or as both placing and cancel-only"
+        }
+        require(primaryFor.all { it in listed }) {
+            "gateway $gatewayId is primary for ${primaryFor.filterNot { it in listed }}, " +
+                "which it does not list"
         }
     }
 
@@ -141,6 +157,8 @@ data class GatewayRow(
         gatewayId = gatewayId,
         secretSha256 = secretSha256,
         participants = participants.sorted(),
+        cancelOnly = cancelOnly.sorted(),
+        operator = operator,
     )
 }
 

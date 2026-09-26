@@ -70,8 +70,8 @@ security(security_id, shard_id, symbol, isin, name, currency,
 
 participant(participant_id, name, smp_id, enabled)
 
-gateway(gateway_id, shard_id, secret_sha256, enabled)     -- published as the registry
-gateway_participant(participant_id, gateway_id)           -- participant_id is the PK
+gateway(gateway_id, shard_id, secret_sha256, enabled, operator)   -- published as the registry
+gateway_participant(participant_id, gateway_id, cancel_only, is_primary)   -- PK is the pair
 
 spec_release(version, created_at, universe_version, directory, note)
 spec_release_shard(version, shard_id, fingerprint, registry_fingerprint)
@@ -93,16 +93,31 @@ what processes must agree on at boot — seeding a reference price must not inva
 does not. They record what an operator *seeded*, not what the engine currently holds, and cannot: an
 executing uncross moves `staticReference` with nobody asking.
 
-**Gateways and their participants are published; enforcement is still not.** `gateway` and
-`gateway_participant` render each shard's participant registry, which the consensus module
-authenticates connecting gateways against and the engine binds participants from at session open
-(`docs/Design.md` §1). What is still true is that nothing *refuses* an order for an unbound
-participant — `UNAUTHORIZED_PARTICIPANT` is raised by nothing — so this decides where a
-participant's fills are delivered, not whether it may trade.
+**Gateways and what they may do are published, and the gateway enforces them.** `gateway` and
+`gateway_participant` render each shard's participant registry (`docs/Design.md` §1, "Enforcement,
+at the gateway"): the consensus module authenticates connecting gateways against it, the engine
+binds participants from it at session open, and **the gateway refuses** an order or cancel for a
+participant it does not list (`UNAUTHORIZED_PARTICIPANT`, before the log), a new order from a
+`cancel_only` participant, and an operator command unless the gateway is an `operator`. An
+**operator-only** gateway — `operator` and no participants — is how the control plane and the CLI
+are named to a node that refuses anonymous sessions; it is published like any other.
 
-`participant_id` is the primary key of `gateway_participant`, so **a participant belongs to at most
-one gateway** is structural here rather than checked, the same way `security_id` being the primary
-key of `security` makes one-shard-per-security structural.
+A participant may be listed on **several gateways** (V6 made the key the pair; V5's key on
+`participant_id` alone had also, less visibly, confined a participant to one gateway on one shard).
+Where several of a shard's gateways list it, one must be its primary (`is_primary`), or the draft
+view reports the shard's registry as a problem. One primary per participant **per shard** is checked
+by the service, because the table cannot see a listing's shard. A primary flag on a participant only
+one gateway lists is kept but not published — the registry format would refuse it as a typo, and it
+is usually the leftover of a failover since disabled.
+
+**The control plane's live commands need an operator gateway at the shard's advertised endpoint.**
+Session transitions, purges, definitions and image requests are sent to the shard's
+`order_entry_channel`, like `most` does, and are unacknowledged — so if the gateway behind that
+endpoint is not an `operator`, it consumes and counts them (`refusedCommands`) and nothing here can
+tell. The database does not know which gateway id serves an endpoint, so this cannot be checked
+before sending. Snapshots are the exception: they go straight to the cluster, and a node with a
+registry refuses them unless `control.cluster.identity.<shardId>` and
+`control.cluster.secretFile.<shardId>` name an operator entry of that shard's registry.
 
 **The secret is stored only as its SHA-256, and that cannot be BCrypt.** The cluster verifies the
 digest against what a gateway presents, so it has to be reproducible. The plaintext is returned

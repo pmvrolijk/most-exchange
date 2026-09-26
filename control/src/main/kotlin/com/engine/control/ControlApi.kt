@@ -140,6 +140,11 @@ data class GatewaySecretRequest(val secret: String? = null)
  */
 data class GatewaySecretIssued(val gatewayId: String, val secret: String)
 
+/** What a gateway row grants, as the audit log records it. */
+private fun grants(row: GatewayRow): String =
+    "participants ${row.participants.sorted()}, cancelOnly ${row.cancelOnly.sorted()}, " +
+        "operator ${row.operator}, primaryFor ${row.primaryFor.sorted()}"
+
 /**
  * Gateway identity, and which participants each gateway speaks for.
  *
@@ -183,7 +188,7 @@ class GatewayController(
         topology.createGateway(row.copy(secretSha256 = ParticipantRegistry.sha256Hex(issued)))
         audit.record(
             "gateway.create", "gateway:${row.gatewayId}",
-            "shard ${row.shardId}, participants ${row.participants.sorted()}", true, http,
+            "shard ${row.shardId}, ${grants(row)}", true, http,
         )
         return ResponseEntity.status(HttpStatus.CREATED)
             .body(GatewaySecretIssued(row.gatewayId, issued))
@@ -199,8 +204,7 @@ class GatewayController(
             ?: return ResponseEntity.notFound().build()
         audit.record(
             "gateway.update", "gateway:$gatewayId",
-            "shard ${row.shardId}, participants ${row.participants.sorted()}, " +
-                "enabled ${row.enabled}", true, http,
+            "shard ${row.shardId}, ${grants(row)}, enabled ${row.enabled}", true, http,
         )
         return ResponseEntity.ok(updated)
     }

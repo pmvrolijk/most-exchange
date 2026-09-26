@@ -86,6 +86,12 @@ control:
   # Set control.cluster.ingress.<shardId>, or CONTROL_CLUSTER_INGRESS_<shardId> in the environment.
   # Not declared here: the keys are looked up per shard rather than bound as a map, so a shard needs
   # no entry in this file to be configurable.
+  #
+  # A node running with a participant registry refuses a session with no credentials, so this
+  # process then names itself with an operator-only entry of that shard's registry (Design.md §1):
+  # control.cluster.identity.<shardId> (CONTROL_CLUSTER_IDENTITY_<shardId>) and
+  # control.cluster.secretFile.<shardId> (CONTROL_CLUSTER_SECRETFILE_<shardId>), both or neither.
+  # The secret is read from the file only.
   cluster:
     ingressChannel: ${CONTROL_CLUSTER_INGRESS_CHANNEL:aeron:udp}
     egressChannel: ${CONTROL_CLUSTER_EGRESS_CHANNEL:aeron:udp?endpoint=0.0.0.0:0}

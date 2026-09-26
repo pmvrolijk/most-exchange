@@ -27,18 +27,38 @@ const issued = ref<GatewaySecretIssued | null>(null)
 function create() {
   editingId.value = null
   saveError.value = null
-  draft.value = { gatewayId: '', shardId: 0, enabled: true, participants: [] }
+  draft.value = {
+    gatewayId: '',
+    shardId: 0,
+    enabled: true,
+    participants: [],
+    cancelOnly: [],
+    operator: false,
+    primaryFor: [],
+  }
 }
 
 function edit(g: Gateway) {
   editingId.value = g.gatewayId
   saveError.value = null
-  draft.value = { ...g, participants: [...g.participants] }
+  draft.value = {
+    ...g,
+    participants: [...g.participants],
+    cancelOnly: [...g.cancelOnly],
+    primaryFor: [...g.primaryFor],
+  }
+}
+
+/** Everyone the draft lists, which is what it may be primary for. */
+function listed(g: Gateway): number[] {
+  return [...g.participants, ...g.cancelOnly].sort((a, b) => a - b)
 }
 
 async function submit() {
   const row = draft.value
   if (!row) return
+  // A primary flag for a participant no longer listed would be refused; drop it quietly instead.
+  row.primaryFor = row.primaryFor.filter((p) => listed(row).includes(p))
   const ok = await runSave(async () => {
     if (editingId.value === null) {
       issued.value = await api.post<GatewaySecretIssued>('/gateways', row)
@@ -75,17 +95,19 @@ async function confirmDelete() {
 <template>
   <h1>Gateways</h1>
   <p class="lede">
-    Which gateway process speaks for which participant. The consensus module authenticates a
-    connecting gateway against this, stamps its id on the session as the encoded principal, and the
-    engine binds every one of that gateway's participants at session open — so a participant that
-    has been quiet since its gateway connected is still sent its own fills. A participant belongs to
-    at most one gateway; two claims on one would be settled by whichever session happened to open
-    last.
+    What each gateway may do. The <strong>gateway enforces it</strong>: an order or cancel for a
+    participant it does not list is rejected <code>UNAUTHORIZED_PARTICIPANT</code> before it reaches
+    the cluster, a <em>cancel-only</em> participant may withdraw resting orders but not place new
+    ones, and operator commands pass only through an <em>operator</em> gateway. The consensus module
+    authenticates a connecting gateway against this, and the engine binds its participants at
+    session open so a quiet participant is still sent its own fills.
   </p>
   <p class="lede">
-    Publishing a release renders this as each shard's participants file. The nodes re-read it while
-    they run, so a change here costs a gateway restart rather than a node restart — and a gateway
-    holds no state, so restarting one loses nothing.
+    A participant may be listed on several gateways — a primary and a failover — and then one of
+    them must be its <em>primary</em>, where it is bound while both are connected. The control
+    plane's own live commands go through the shard's advertised order-entry endpoint, so the gateway
+    behind it must be an operator. Publishing a release renders this as each shard's participants
+    file; the nodes and the gateways re-read it while they run, so no change here costs a restart.
   </p>
 
   <div class="toolbar">
@@ -104,6 +126,8 @@ async function confirmDelete() {
             <th>Gateway</th>
             <th class="num">Shard</th>
             <th>Participants</th>
+            <th>Cancel only</th>
+            <th>Operator</th>
             <th>State</th>
             <th></th>
           </tr>
@@ -112,7 +136,19 @@ async function confirmDelete() {
           <tr v-for="g in rows" :key="g.gatewayId">
             <td><code>{{ g.gatewayId }}</code></td>
             <td class="num">{{ g.shardId }}</td>
-            <td>{{ g.participants.length ? g.participants.join(', ') : '—' }}</td>
+            <td>
+              <template v-if="g.participants.length">
+                <span v-for="(p, i) in g.participants" :key="p">
+                  {{ i ? ', ' : '' }}{{ p }}<sup v-if="g.primaryFor.includes(p)" title="primary">P</sup>
+                </span>
+              </template>
+              <template v-else>—</template>
+            </td>
+            <td>{{ g.cancelOnly.length ? g.cancelOnly.join(', ') : '—' }}</td>
+            <td>
+              <span v-if="g.operator" class="pill good">operator</span>
+              <template v-else>—</template>
+            </td>
             <td>
               <span class="pill" :class="g.enabled ? 'good' : 'bad'">
                 {{ g.enabled ? 'enabled' : 'disabled' }}
@@ -155,8 +191,41 @@ async function confirmDelete() {
           </option>
         </select>
         <p class="hint">
-          Each of these is bound to this gateway's session the moment it authenticates. A
-          participant already claimed by another gateway is refused.
+          May place and cancel. Bound to this gateway's session when it authenticates, if this is the
+          participant's primary or nobody live holds it.
+        </p>
+      </div>
+      <div class="wide">
+        <label for="g-cancel-only">Cancel only</label>
+        <select id="g-cancel-only" v-model="draft.cancelOnly" multiple size="5">
+          <option v-for="p in participants.rows.value" :key="p.participantId" :value="p.participantId">
+            {{ p.participantId }} — {{ p.name }}
+          </option>
+        </select>
+        <p class="hint">
+          May cancel, may not place: revoke a participant gracefully by moving it here, publishing,
+          and removing it once its resting orders are gone. Not also in Participants.
+        </p>
+      </div>
+      <div class="wide">
+        <label for="g-primary">Primary for</label>
+        <select id="g-primary" v-model="draft.primaryFor" multiple size="5">
+          <option v-for="p in listed(draft)" :key="p" :value="p">{{ p }}</option>
+        </select>
+        <p class="hint">
+          Needed only for a participant another gateway on this shard also lists: that participant
+          is bound here while both are connected. One primary per participant per shard.
+        </p>
+      </div>
+      <div class="wide">
+        <label>
+          <input type="checkbox" v-model="draft.operator" />
+          Operator
+        </label>
+        <p class="hint">
+          May send operator commands (session transitions, purges, definitions, image requests).
+          An operator with no participants is how the control plane or the CLI is named to a node
+          that refuses anonymous sessions.
         </p>
       </div>
       <div class="wide">
@@ -183,7 +252,7 @@ async function confirmDelete() {
   <ConfirmDialog
     v-if="deleting"
     title="Delete gateway"
-    :message="`${deleting.gatewayId} is removed, and the participants it claimed become unclaimed. Once the next release is published and reloaded, a gateway presenting this id is rejected rather than downgraded to an anonymous session.`"
+    :message="`${deleting.gatewayId} is removed, and the participants it listed are no longer listed there. Once the next release is published and reloaded, a gateway presenting this id is rejected rather than downgraded to an anonymous session.`"
     confirm-label="Delete"
     danger
     :busy="removing"

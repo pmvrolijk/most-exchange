@@ -52,7 +52,14 @@ export interface Gateway {
   gatewayId: string
   shardId: number
   enabled: boolean
+  /** May place and cancel through this gateway. */
   participants: number[]
+  /** May cancel and not place: revocation made graceful (Design.md §1). */
+  cancelOnly: number[]
+  /** May send operator commands. With no participants, this names the control plane or the CLI. */
+  operator: boolean
+  /** Of those it lists, the participants this gateway is the primary for. */
+  primaryFor: number[]
 }
 
 export interface GatewaySecretIssued {

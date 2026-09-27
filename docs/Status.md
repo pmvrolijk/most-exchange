@@ -4,10 +4,11 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2j),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated at the end of the session that put the pipeline on a runner, then built participant
-enforcement at the gateway — and on the way found that no snapshot requested over the network had
-ever been taken (Handover §2j). The work is on branch `gateway-security-multiple-per-shard`, seven
-commits, not yet merged.
+Last updated 2026-09-27, in the session that tested whether a second gateway raises the shard's
+ceiling. It does not: the gateway is ~19% busy at the knee (Measurements.md R8–R11, A5). Every
+thread on the order path now reports a duty cycle, and on this laptop the knee turns out to be the
+core count, not a stage (D1–D2). The participant-enforcement work (Handover §2j) is merged to
+`master` and green in CI (pipelines 35–37). The project is now AGPL-3.0-or-later (`LICENSE.md`).
 
 ---
 
@@ -15,7 +16,7 @@ commits, not yet merged.
 
 | | |
 | --- | --- |
-| Branch | **`gateway-security-multiple-per-shard`** — seven commits ahead of `master`, to merge |
+| Branch | `master` — CI green through pipeline 37 |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
 | Kotlin | ~25,600 lines — 14,280 main across 68 files, 11,290 test across 57 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
@@ -155,7 +156,8 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    gateways cannot name them all. `ShardEntry` carries one channel and `DirectoryClient` keeps one
    `ShardRoute` per shard. **Decided this session: participants learn their gateway out of band**,
    as member connectivity usually works, and the CLI takes `--order-entry-channel` to reach one the
-   directory does not name. What remains is the throughput case (§3 item 2), not addressing.
+   directory does not name. The throughput case is **closed**: a second gateway raises nothing (R8–R11) and the one gateway is
+   ~19% busy at the knee (A5). What remains is convenience, not capacity.
 6a. **The release publisher writes into an existing directory.** `Files.createDirectories` does not
    fail on one, while its own KDoc promises a directory a running process points at never changes.
    Latent in production (release numbers repeat only after a database restore); it bit the control
@@ -207,10 +209,9 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 In the order I would tackle them.
 
-0. **Merge `gateway-security-multiple-per-shard`.** Push it and let the pipeline run first: CI has
-   not seen these seven commits, and `e2e:restart` now carries the enforcement, anonymous-refusal
-   and snapshot checks. Then re-seed any long-lived dev stack (`docker compose down -v && up`), since
-   V6 changes the gateway tables and the seed now authors the registry.
+0. ~~**Merge `gateway-security-multiple-per-shard`.**~~ **Done**, and green in CI on `master`
+   (pipelines 35–37, `e2e:restart` included). Re-seed any long-lived dev stack
+   (`docker compose down -v && up`) if it predates the merge: V6 changes the gateway tables.
 1. ~~**Get a GitLab runner onto the pipeline.**~~ **Done.** A self-hosted Docker-executor runner
    (`clytemnestra`, privileged for `docker:dind`) runs [`.gitlab-ci.yml`](../.gitlab-ci.yml), and
    pipeline 34 on `d198ad6` is green end to end: build, `test:core` — so the allocation proofs now
@@ -226,31 +227,25 @@ In the order I would tackle them.
    `INVALID` on pacing lateness (p99.9 11–53 ms, load average 3.1) — the generator stalled, the
    script refused to print rows, and that is the validation working on a machine that cannot be
    quoted from. Both stay manual and `allow_failure`.
-2. **Advertise several gateways per shard, as a throughput lever** — addressing is settled (out of
-   band, open issue 6); what is left is whether a second gateway raises the ceiling, because C1–C2
-   made it the cheapest throughput lever the system has. The gateway is one thread carrying every
-   order inbound and every report outbound (~1.3M messages/sec at the ceiling), it is the only
-   saturating stage that scales sideways **today** (stateless, `origQty` in the engine,
-   `run-restart.sh` §4c already covers multi-gateway), and the sole blocker is that `ShardEntry` carries
-   one channel and `DirectoryClient` one `ShardRoute` per shard. A wire change — use the `wire-change`
-   skill. Measure with a sweep either side; a virtual address in front of the tier works meanwhile.
-3. **Find what binds at ~550k/s.** Eliminated: the engine (A1–A4), storage (R6 and the
-   archive-threading cell of R7), the ingress term length (16m moved latency, not the knee), the
-   driver's threading mode (R7 — that *was* the ~350k ceiling), and now **everything Aeron reports**
-   (C1: clean sheet in genuine saturation). **The two cheap instruments are used up**, so:
-   1. **Read the loops' own metrics, not CPU%.** `engine.metrics` / `engine.metrics.stages` and
-      `gateway.metrics` already report per-stage duty. `ps` cannot help — all three busy-spin (C2).
-   2. **Run one measurement with a yielding idle strategy** in the engine, gateway and market-data, so
-      CPU% becomes meaningful for that run only. Cheap, and it does not ship.
-   3. **A gateway-stamped ingress timestamp**, read by the engine only under `engine.metrics`, which
-      measures gateway-offer-to-engine-entry directly. `NewOrderSingle` carries no timestamp, so this
-      is a wire change — `wire-change` skill, and keep the field out of `EngineConfig.fingerprint()`
-      the way the rest of metrics is.
-
-   Also worth doing cheaply: **re-run the headline sweeps with `DRIVER_THREADING=DEDICATED`**, since
-   every row in `Measurements.md` was taken 1.6x below what the shard can do.
-
-   Whatever it says, Design.md §2's 100k/s/security target then either gets restated or gets earned.
+2. ~~**Advertise several gateways per shard, as a throughput lever.**~~ **Measured first, and
+   refuted — so not built.** `run-sweep.sh` gained `GATEWAYS` and `LOADERS`, and four same-day arms
+   (R8–R11, ten securities, `DEDICATED`) put two gateways at a knee no higher than one and 100x slower
+   below it. The control arm confounds on report fan-out and core count, so A5 settled it from the
+   gateway's own histograms: at 500k/s it spends **~19% of a core** on its 1.3M messages/s (under a
+   third with a generous allowance for the untimed poll loop). The directory change stays unbuilt;
+   open issue 6 is a convenience question now, and nothing about capacity depends on it.
+3. **Find what binds at ~550k/s — answered for this machine: the core count.** Every thread on the
+   order path now reports its duty cycle (Design.md §7, "Duty cycle"; `most cluster --duty`, metrics
+   on). Measured across 250k–700k/s (Measurements.md D1–D2): the consensus module never exceeds 20%,
+   the gateway ~34%, market-data ~13%, the archive ~30%. **The engine's thread is the one that falls
+   over**, 20% → 100% in one step at ~550k/s, with its median cost unchanged and its p90 ~10x — and it
+   is not egress back-pressure (every Aeron counter sampled; flow-control events *fall*). Freeing the
+   two cores the gateway and market-data spin away (`backoff`) moved the knee one step, to ~550–600k/s,
+   without touching the engine. **On the 10P+4E laptop the knee is where busy threads outnumber
+   performance cores.** Still open, and not answerable on this laptop: where a host with a core for
+   every spinning thread knees, and whether the driver's sender — the one loop that never idles — is
+   then the limit. That wants a many-core Linux box with pinning, or the driver on its own machine.
+   Design.md §2's 100k/s/security target is neither earned nor refuted until then.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
    §4.8 "Driver threading is the throughput ceiling" carries the dev-versus-perf/prod split and the
@@ -318,7 +313,9 @@ In the order I would tackle them.
   It identified the driver thread — and then came back clean at the next knee, which is its limit: a
   stage that is merely *full* breaches no counter. Sample it above the knee with a long enough run that
   the window is steady state and not a draining queue.
-* `run-sweep.sh` also takes `INGRESS_TERM`, `DRIVER_THREADING` and `ARCHIVE_THREADING`. **Set
+* `run-sweep.sh` also takes `INGRESS_TERM`, `DRIVER_THREADING`, `ARCHIVE_THREADING`, and `GATEWAYS` /
+  `LOADERS` (several gateways, several generators; read the script header for the control arm's
+  confound). `run-attribution.sh` takes `DRIVER_THREADING` too. **Set
   `DRIVER_THREADING=DEDICATED` for any benchmark**; leave `ARCHIVE_THREADING` alone (Design.md §7).
 * `e2e/run-sweep.sh` finds the knee, validates every rate before believing it, and prints a row
   block to paste into [`Measurements.md`](Measurements.md). **`SECURITIES=n` drives n securities

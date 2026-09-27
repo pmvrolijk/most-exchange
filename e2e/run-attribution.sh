@@ -15,10 +15,19 @@
 # Knobs:
 #   ORDERS     orders in the measured run    (default 2,000,000)
 #   DELAY_US   microseconds between sends    (default 10 => 100k/s)
+#   COUNTERS_MATCH  which Aeron counters to sample mid-load (default: the duty-ns ones). '.' takes
+#              every counter, for when a duty cycle says a thread is full and not why.
+#   ENGINE_IDLE / GATEWAY_IDLE / MD_IDLE  each process's idle strategy (default: busyspin, the
+#              production setting). On a machine with fewer spare cores than busy threads, a spinning
+#              loop that is mostly idle takes a core a working one needed; backoff is how to test that.
+#   RATE       aggregate orders/sec, in place of DELAY_US -- for rates a whole microsecond cannot
+#              express, such as 550k/s and 600k/s around the DEDICATED knee
 #   MAX_ORDERS book capacity per security    (default 1,000,000)
 #   STAGES     split a new order into admit/match/settle (default true)
 #   SECURITIES how many securities to drive  (default 1, max 10)
 #   CLUSTER_HOST where the consensus log and archive live (default $RUN/cluster-host)
+#   DRIVER_THREADING media driver threading: SHARED|SHARED_NETWORK|DEDICATED (default: SHARED).
+#              Set DEDICATED to attribute near the ~550k/s knee; SHARED saturates at ~350k/s (R7).
 #
 # CLUSTER_HOST is separate from the Aeron directory on purpose. `--dir` places the archive and the
 # consensus log; `--aeron-dir` places the media driver's buffers, and it is left alone. Pointing
@@ -37,10 +46,17 @@ AERON_DIR="$RUN/aeron"
 
 ORDERS="${ORDERS:-2000000}"
 DELAY_US="${DELAY_US:-10}"
+RATE="${RATE:-$((1000000 / DELAY_US))}"
+PACING="--rate $RATE"
+COUNTERS_MATCH="${COUNTERS_MATCH:-^duty-ns}"
+ENGINE_IDLE="${ENGINE_IDLE:-busyspin}"
+GATEWAY_IDLE="${GATEWAY_IDLE:-busyspin}"
+MD_IDLE="${MD_IDLE:-busyspin}"
 MAX_ORDERS="${MAX_ORDERS:-1000000}"
 STAGES="${STAGES:-true}"
 SECURITIES="${SECURITIES:-1}"
 CLUSTER_HOST="${CLUSTER_HOST:-$RUN/cluster-host}"
+DRIVER_THREADING="${DRIVER_THREADING:-}"
 
 MOST="${MOST:-$ROOT/tools/build/install/most/bin/most}"
 ENGINE="${ENGINE:-$ROOT/engine/build/install/engine/bin/engine}"
@@ -121,6 +137,7 @@ engine.clusterDir=$CLUSTER_HOST/cluster
 engine.bookEvent.channel=aeron:ipc
 engine.bookEvent.streamId=12
 engine.metrics=true
+engine.idleStrategy=$ENGINE_IDLE
 engine.metrics.stages=$STAGES
 engine.metrics.file=$RUN/engine-latency.hgrm
 EOF
@@ -136,6 +153,7 @@ gateway.client.inbound.streamId=20
 gateway.client.outbound.channel=aeron:ipc
 gateway.client.outbound.streamId=21
 gateway.metrics=true
+gateway.idleStrategy=$GATEWAY_IDLE
 gateway.metrics.file=$RUN/gateway-latency.hgrm
 EOF
 
@@ -153,6 +171,8 @@ md.l3.streamId=33
 md.snapshot.channel=aeron:ipc
 md.snapshot.streamId=34
 md.snapshot.cycleMs=500
+md.metrics=true
+md.idleStrategy=$MD_IDLE
 EOF
 
 cat > "$RUN/discovery.properties" <<EOF
@@ -172,8 +192,9 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
       --l1-channel aeron:ipc --l1-stream 31 --l2-channel aeron:ipc --l2-stream 32
       --snapshot-channel aeron:ipc --snapshot-stream 34"
 
-echo "== starting the shard ($SECURITIES security(s), $ORDERS orders, ${DELAY_US}us apart, stages=$STAGES)"
-$MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" > "$LOGS/cluster.log" 2>&1 &
+echo "== starting the shard ($SECURITIES security(s), $ORDERS orders, ${RATE}/s aggregate, stages=$STAGES)"
+$MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" \
+  ${DRIVER_THREADING:+--driver-threading "$DRIVER_THREADING"} --duty > "$LOGS/cluster.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 
@@ -202,9 +223,19 @@ sleep 1
 
 echo "== driving the load"
 $MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
-  --count "$ORDERS" --delay-us "$DELAY_US" --warmup 1000 --participant 20 --participants 4 \
+  --count "$ORDERS" $PACING --warmup 1000 --participant 20 --participants 4 \
   --clordid-base 100000 --drain-ms 20000 --histogram-file "$RUN/client-latency.hgrm" \
-  $CONN > "$RUN/load.out" 2>&1 || fail "load"
+  $CONN > "$RUN/load.out" 2>&1 &
+LOAD_PID=$!
+
+# How full each thread is, sampled over the middle 40% of the offered load so the window is neither
+# the ramp nor the drain (Design.md §7, "Duty cycle"). Every process runs with its metrics switch on
+# here and the cluster-host with --duty, so every loop on the order path has a counter.
+LOAD_MS=$((ORDERS * 1000 / RATE))
+sleep "$(awk -v ms="$LOAD_MS" 'BEGIN{printf "%.2f", ms * 0.3 / 1000}')"
+$MOST counters --aeron-dir "$AERON_DIR" --match "$COUNTERS_MATCH" --all --interval-ms $((LOAD_MS * 4 / 10 > 200 ? LOAD_MS * 4 / 10 : 200)) \
+  > "$RUN/duty.out" 2>&1
+wait "$LOAD_PID" || fail "load"
 
 grep -qE "fills +0 qty traded" "$RUN/load.out" && fail "no trades: the matching path never ran"
 grep -q "REJECTED" "$RUN/load.out" && fail "orders were rejected -- band or phase is wrong"
@@ -216,6 +247,9 @@ stop_and_wait "$ENGINE_PID" || fail "engine did not stop"
 stop_and_wait "$GATEWAY_PID" || fail "gateway did not stop"
 
 grep -q "matching-engine: latency" "$LOGS/engine.log" || fail "engine reported no latency summary"
+for thread in "engine service" "gateway" "market-data" "consensus-module" "archive" "driver"; do
+  grep -q "duty-ns: $thread" "$RUN/duty.out" || fail "no duty counter for '$thread' -- see $RUN/duty.out"
+done
 grep -q "gateway: latency" "$LOGS/gateway.log" || fail "gateway reported no latency summary"
 
 # ------------------------------------------------------------------ the attribution
@@ -252,10 +286,13 @@ awk -v c="$CLIENT" -v i="$IN" -v e="$ENG" -v o="$OUT" 'BEGIN {
 }'
 
 echo
+echo "== how full each thread was, mid-load"
+grep -E "duty-ns" "$RUN/duty.out" | sed -E 's/^ +[0-9]+ +[0-9]+ +[0-9,]+  //' | sed 's/^/  /'
+echo
 echo "  histograms: $RUN/{client,engine,gateway}-latency.hgrm"
-echo "  scope:      $SECURITIES security(s) ($SYMBOLS), ${DELAY_US}us between sends"
+echo "  scope:      $SECURITIES security(s) ($SYMBOLS), paced at ${RATE}/s"
 echo "  log+archive on $(df -h "$CLUSTER_HOST" | tail -1 | awk '{print $1}') at $CLUSTER_HOST"
 echo "  aeron dir   on $(df -h "$AERON_DIR" | tail -1 | awk '{print $1}') at $AERON_DIR"
-echo "              => $((1000000 / DELAY_US))/s aggregate, $((1000000 / DELAY_US / SECURITIES))/s/security"
+echo "              => ${RATE}/s aggregate, $((RATE / SECURITIES))/s/security"
 echo
 echo "PASS -- the round trip is attributed."

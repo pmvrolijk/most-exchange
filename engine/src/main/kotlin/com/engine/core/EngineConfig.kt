@@ -1,5 +1,6 @@
 package com.engine.core
 
+import com.engine.reference.IdleStrategySpec
 import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ShardSpec
 import java.io.File
@@ -52,6 +53,13 @@ data class EngineConfig(
     val metricsStages: Boolean = false,
     /** Where to write the percentile distributions at shutdown, for diffing against a later run. */
     val metricsFile: String? = null,
+    /**
+     * The service container's idle strategy. Busy-spin by default: in production this thread owns an
+     * isolated core and must never yield it. The others spare a development machine's cores
+     * (Design.md §7, "Duty cycle"). Node-local and not in [fingerprint], like the metrics: how a
+     * node idles cannot change what it computes.
+     */
+    val idleStrategy: IdleStrategySpec = IdleStrategySpec.BUSY_SPIN,
 ) {
     init {
         require(auctionMaxPasses > 0) { "auctionMaxPasses must be positive" }
@@ -107,6 +115,7 @@ data class EngineConfig(
         const val METRICS_ENABLED = "engine.metrics"
         const val METRICS_STAGES = "engine.metrics.stages"
         const val METRICS_FILE = "engine.metrics.file"
+        const val IDLE_STRATEGY = "engine.idleStrategy"
 
         fun from(
             properties: Properties,
@@ -130,6 +139,7 @@ data class EngineConfig(
             metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
             metricsStages = properties.getProperty(METRICS_STAGES).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
+            idleStrategy = IdleStrategySpec.parse(properties.getProperty(IDLE_STRATEGY)),
         )
 
         /** Loads [path] if given, then lets `engine.*` system properties override individual keys. */

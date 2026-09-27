@@ -2363,6 +2363,68 @@ Recording allocates nothing (`engine`'s `AllocationTest` covers the instrumented
 instrumentation that allocated would cost the zero-allocation property on exactly the runs being
 measured, and every number it produced would then describe a process that does not ship.
 
+#### Duty cycle — how full a thread is
+
+The histograms above say what a message costs. They cannot say how much of its core a loop spends
+working, and nothing else can either: `engine`, `gateway` and `market-data` busy-spin, so `ps` reads
+~100% of a core whether they work or idle, and Aeron's counters report queues and stalls, not a
+thread that is merely full (Measurements.md C1–C2). The duty cycle is the instrument for that.
+
+Every loop in the system, Aeron's agents included, has one shape: do work, then pass the amount done
+to an `IdleStrategy`. **`DutyCycleIdleStrategy`** (in `reference`) wraps any idle strategy and
+measures around it:
+
+* **An iteration** runs from the return of one `idle` call to the next `idle` call. It is **busy**
+  exactly when that next call is `idle(workCount)` with `workCount > 0`.
+* **Busy time** is the sum of busy iterations' lengths. Time spent *inside* the wrapped strategy —
+  spinning, yielding, parked — is never busy, and neither is an iteration closed by `idle(0)` or by
+  the no-argument `idle()`. Polling and finding nothing is idling.
+* **The first iteration is not counted**, since it has no start; nor is an interval that runs
+  backwards on the clock, which counts as zero.
+* **It changes nothing about idling.** Every call — `idle(n)`, `idle()`, `reset()`, `alias()` — goes
+  to the wrapped strategy unchanged, so wrapping a busy-spin loop leaves it a busy-spin loop plus two
+  clock reads per iteration.
+* **Busy time is published as cumulative nanoseconds** in an Aeron counter, whose rate of change per
+  second of wall time is the fraction of a core spent working. `most counters --interval-ms` reads it
+  live, without an Aeron client, and prints it as a share of a core. The counter is attached after
+  construction, because Aeron asks for its agents' idle strategies before its own counters exist;
+  busy time accumulated before that is published on attach, not lost.
+* **Only a thread that is still looping gets a counter.** Aeron calls some suppliers more than once
+  and runs its agent on one result, and the consensus module runs a spare through start-up and then
+  drops it; a counter on a spare would read as a permanently idle thread. So counters are attached
+  from a short-lived background thread after launch, to a wrapper only once it has been looped on
+  across a full second of polls, and two live threads under one name are suffixed `#2`.
+* **It allocates nothing and never throws**, by the same argument as the histograms.
+
+Because the wrapper works on any `IdleStrategy`, it reaches loops this project does not own: the
+consensus module, the archive and the driver's threads all accept an injected strategy, so the one
+single-threaded stage on the order path nobody has instrumented can be measured without touching
+Aeron. It is **off unless the process's metrics switch is on**. In the engine it is metrics under the
+rule above — its counter is written by the service thread and read only by an external tool, never
+by the state machine.
+
+**Switches.** `engine.metrics`, `gateway.metrics` and `md.metrics` (the last new with this, and
+market-data's only metric) wrap their process's poll loop; `most cluster --duty` wraps every thread the
+chosen driver and archive threading modes create, plus the consensus module, each around Aeron's own
+default strategy — all three back off — so the cluster-host idles exactly as it did.
+
+**What a reading means, and does not.** A duty cycle is the share of wall time a loop spent in
+iterations that found work. For a loop that handles one message per iteration it tracks load closely
+(the engine's reads within 10% of its `newOrder` histogram × rate). For a loop that **batches** —
+the driver's sender and receiver drain whatever has accumulated — it is not linear in the rate: a
+sender that rarely finds nothing to do reads ~90% at a quarter of the knee, and does more per
+iteration as the rate rises rather than running out of time. So ~100% says "never idle", and only
+with the rate held against it says "full".
+
+**The idle strategy itself is configuration**, per process:
+`engine.idleStrategy`, `gateway.idleStrategy`, `md.idleStrategy`, each one of `busyspin` (the
+default), `backoff` (Agrona's default back-off), `yielding`, or `sleeping` / `sleeping:<µs>` (1 µs
+unless given). Busy-spin stays the default because it is what production runs and what every figure
+in `Measurements.md` was taken with. The other three exist to spare the cores of a development
+machine, **not** to measure utilisation: a back-off strategy under steady load never backs off far
+enough to park, and a yielding or sleeping one adds a wake-up on every idle-to-busy transition — which
+is exactly what moves a knee.
+
 ### Process Layout
 
 A node is **two processes**, because the media driver allocates and must stay out of the engine

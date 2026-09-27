@@ -251,8 +251,9 @@ here as well:
   snapshot. `MetricsDeterminismTest` checks it, and metrics are excluded from
   `EngineConfig.fingerprint()` for the same reason. → R§11
 - Recording allocates nothing, and `AllocationTest` covers the instrumented path.
-- `engine.metrics` / `engine.metrics.stages` / `gateway.metrics`, off by default, on in `deploy/`
-  and `e2e/`. Summaries print at shutdown, so they need an orderly one.
+- `engine.metrics` / `engine.metrics.stages` / `gateway.metrics` / `md.metrics`, off by default, on
+  in `deploy/` and `e2e/`. Each also publishes its poll loop's duty cycle; the `duty-ns` counter is
+  metrics under the same rule. Summaries print at shutdown, so they need an orderly one.
 
 ## Measurement
 
@@ -279,8 +280,14 @@ here as well:
 - **A clean counter sheet does not mean nothing is saturated, and CPU% cannot fill the gap.** Aeron
   reports queues, positions and stalls, so a stage that is merely *full* breaches nothing; and the
   engine, gateway and market-data all use `BusySpinIdleStrategy`, so each reads ~100% of a core whether
-  working or idling. Get their utilisation from `engine.metrics` / `gateway.metrics`, or from a run
-  switched to a yielding strategy for that measurement only. → R§13
+  working or idling. Read their utilisation from the **`duty-ns` counters** (`most counters --match duty
+  --interval-ms 1000`; metrics on, `most cluster --duty` for the driver, archive and consensus module),
+  never from a run switched to a yielding strategy — that moves the knee it measures. A batching loop
+  (the driver's sender and receiver) reads near 100% long before it is full. → R§13, Design.md §7
+- **On the laptop the knee is the core count.** Past ~550k/s the shard's busy threads outnumber the
+  10 performance cores and the engine — cache-bound — is the thread that falls over (D1–D2); freeing
+  two spinning cores moved the knee. A knee measured there says nothing about a stage until it is
+  reproduced with a core for every spinning thread.
 - **Fill in `Measurements.md`'s `idle` column honestly, and never compare two configurations across
   two machine states.** A sweep taken with a desktop open read the knee 15% low and put that figure
   in four documents; the storage experiment that followed looked like an 82x win until an idle

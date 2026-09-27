@@ -1,5 +1,6 @@
 package com.engine.core
 
+import com.engine.reference.IdleStrategySpec
 import com.engine.reference.SecuritySpec
 import com.engine.reference.ShardSpec
 import java.util.Properties
@@ -109,6 +110,40 @@ class EngineConfigTest {
     @Test
     fun `a non-positive auction pass limit is rejected`() {
         val properties = Properties().apply { setProperty(EngineConfig.AUCTION_MAX_PASSES, "0") }
+        assertFailsWith<IllegalArgumentException> { EngineConfig.from(properties, shard(1)) }
+    }
+
+    // Design.md §7, "Duty cycle": busy-spin by default, and node-local like the metrics.
+
+    @Test
+    fun `the service thread busy-spins unless configured otherwise`() {
+        assertEquals(IdleStrategySpec.BUSY_SPIN, EngineConfig.from(Properties(), shard(1)).idleStrategy)
+    }
+
+    @Test
+    fun `the idle strategy is read from configuration`() {
+        val properties = Properties().apply { setProperty(EngineConfig.IDLE_STRATEGY, "sleeping:50") }
+        assertEquals(IdleStrategySpec.parse("sleeping:50"), EngineConfig.from(properties, shard(1)).idleStrategy)
+    }
+
+    @Test
+    fun `how a node idles is not part of what it must agree on`() {
+        // Two nodes of one cluster may idle differently, exactly as they may differ on metrics.
+        val spec = shard(1, 2)
+        val spinning = EngineConfig.from(Properties(), spec)
+        val sleeping = EngineConfig.from(
+            Properties().apply {
+                setProperty(EngineConfig.IDLE_STRATEGY, "backoff")
+                setProperty(EngineConfig.METRICS_ENABLED, "true")
+            },
+            spec,
+        )
+        assertEquals(spinning.fingerprint(), sleeping.fingerprint())
+    }
+
+    @Test
+    fun `an unknown idle strategy stops the engine at startup rather than at the first idle`() {
+        val properties = Properties().apply { setProperty(EngineConfig.IDLE_STRATEGY, "spin") }
         assertFailsWith<IllegalArgumentException> { EngineConfig.from(properties, shard(1)) }
     }
 }

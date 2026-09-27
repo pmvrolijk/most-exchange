@@ -195,6 +195,10 @@ services:
       # anonymous and the engine learns its routes from traffic alone.
       - "--participants"
       - "/config/shard-0-participants.properties"
+      # A duty-ns counter per thread -- driver, archive, consensus module -- so how full each one is
+      # can be read live with `most counters --match duty --interval-ms 1000` (Design.md §7). Aeron's
+      # own idle strategies are kept; this only measures around them.
+      - "--duty"
     volumes:
       - shard-aeron:/aeron
       - cluster-data:/cluster

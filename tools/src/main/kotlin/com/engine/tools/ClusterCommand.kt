@@ -1,6 +1,7 @@
 package com.engine.tools
 
 import com.engine.reference.AdminResponses
+import com.engine.reference.DutyCycles
 import com.engine.reference.GatewayCredentialsSupplier
 import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ParticipantRegistrySource
@@ -15,10 +16,13 @@ import io.aeron.cluster.ClusteredMediaDriver
 import io.aeron.cluster.ConsensusModule
 import io.aeron.cluster.client.AeronCluster
 import io.aeron.driver.MediaDriver
+import io.aeron.cluster.service.ClusteredServiceContainer
+import io.aeron.driver.Configuration as DriverConfiguration
 import io.aeron.driver.ThreadingMode
 import io.aeron.security.AuthorisationService
 import io.aeron.security.AuthorisationServiceSupplier
 import org.agrona.concurrent.ShutdownSignalBarrier
+import org.agrona.concurrent.SystemNanoClock
 import java.io.File
 
 /** How often the consensus module re-reads its participant registry. */
@@ -157,9 +161,18 @@ private fun runClusterHost(args: Args) {
             ?: AuthorisationServiceSupplier { AuthorisationService.ALLOW_ALL }
     )
 
+    // How full each of this process's threads is (Design.md §7, "Duty cycle"). Aeron's own idle
+    // strategies are kept -- all back off by default -- and only measured around.
+    val duty = if (args.has("duty")) DutyCycles(SystemNanoClock.INSTANCE) else null
+    duty?.let { wrapThreads(it, driverContext, driverThreading, archiveContext, archiveThreading, consensusContext) }
+
     ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
+        // The counters need a client, and a client needs the driver this call just started.
+        val counterClient = duty?.let { Aeron.connect(Aeron.Context().aeronDirectoryName(aeronDir)) }
+        counterClient?.let { duty.attachInBackground(it, { labels -> println("cluster: duty cycle counters $labels") }) }
         println("cluster: started, awaiting shutdown signal")
         ShutdownSignalBarrier().use { it.await() }
+        counterClient?.close()
         // Inside nothing that races the exit, but still worth printing: an authenticated gateway
         // count of zero on a shard that configured a registry means every gateway connected
         // anonymously, which looks identical to it working until a maker goes quiet.
@@ -172,6 +185,57 @@ private fun runClusterHost(args: Args) {
         }
         println("cluster: shutdown signal received")
     }
+}
+
+/**
+ * Wraps the idle strategy of every thread the chosen threading modes create, around Aeron's own
+ * default for that thread, so measuring changes nothing about how the thread idles. Only the threads
+ * that will exist: a wrapper for a thread that never runs would publish a counter reading zero,
+ * which reads as an idle thread rather than an absent one.
+ */
+private fun wrapThreads(
+    duty: DutyCycles,
+    driver: MediaDriver.Context,
+    driverThreading: ThreadingMode,
+    archive: Archive.Context,
+    archiveThreading: ArchiveThreadingMode,
+    consensus: ConsensusModule.Context,
+) {
+    when (driverThreading) {
+        ThreadingMode.SHARED -> driver.sharedIdleStrategy(
+            duty.wrap("driver shared", DriverConfiguration.sharedIdleStrategy(null)),
+        )
+        ThreadingMode.SHARED_NETWORK -> {
+            driver.conductorIdleStrategy(duty.wrap("driver conductor", DriverConfiguration.conductorIdleStrategy(null)))
+            driver.sharedNetworkIdleStrategy(
+                duty.wrap("driver sender+receiver", DriverConfiguration.sharedNetworkIdleStrategy(null)),
+            )
+        }
+        ThreadingMode.DEDICATED -> {
+            driver.conductorIdleStrategy(duty.wrap("driver conductor", DriverConfiguration.conductorIdleStrategy(null)))
+            driver.senderIdleStrategy(duty.wrap("driver sender", DriverConfiguration.senderIdleStrategy(null)))
+            driver.receiverIdleStrategy(duty.wrap("driver receiver", DriverConfiguration.receiverIdleStrategy(null)))
+        }
+        ThreadingMode.INVOKER -> Unit
+    }
+    when (archiveThreading) {
+        ArchiveThreadingMode.SHARED -> archive.idleStrategySupplier(
+            duty.supplier("archive", Archive.Configuration.idleStrategySupplier(null)),
+        )
+        ArchiveThreadingMode.DEDICATED -> {
+            archive.idleStrategySupplier(duty.supplier("archive conductor", Archive.Configuration.idleStrategySupplier(null)))
+            archive.recorderIdleStrategySupplier(
+                duty.supplier("archive recorder", Archive.Configuration.recorderIdleStrategySupplier(null)),
+            )
+            archive.replayerIdleStrategySupplier(
+                duty.supplier("archive replayer", Archive.Configuration.replayerIdleStrategySupplier(null)),
+            )
+        }
+        ArchiveThreadingMode.INVOKER -> Unit
+    }
+    consensus.idleStrategySupplier(
+        duty.supplier("consensus-module", ClusteredServiceContainer.Configuration.idleStrategySupplier(null)),
+    )
 }
 
 /**

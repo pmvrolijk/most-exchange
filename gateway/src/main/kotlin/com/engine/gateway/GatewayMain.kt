@@ -1,7 +1,9 @@
 package com.engine.gateway
 
+import com.engine.reference.DutyCycles
 import com.engine.reference.GatewayCredentialsSupplier
 import com.engine.reference.GatewayIdentity
+import com.engine.reference.IdleStrategySpec
 import com.engine.reference.LatencyHistogram
 import com.engine.reference.ParticipantRegistry
 import com.engine.reference.ParticipantRegistrySource
@@ -13,7 +15,6 @@ import io.aeron.cluster.client.AeronCluster
 import io.aeron.cluster.client.EgressListener
 import io.aeron.logbuffer.ControlledFragmentHandler
 import org.agrona.DirectBuffer
-import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.ShutdownSignalBarrier
 import org.agrona.concurrent.SystemNanoClock
 import java.io.File
@@ -206,7 +207,12 @@ fun main(args: Array<String>) {
                 }
             }
 
-            val idle = BusySpinIdleStrategy()
+            // One loop carries every order in and every report out, so how full it is decides
+            // whether a second gateway would help (Design.md §7, "Duty cycle"; Measurements.md A5).
+            val duty = if (config.metricsEnabled) DutyCycles(SystemNanoClock.INSTANCE) else null
+            val idle = config.idleStrategy.create().let { duty?.wrap("gateway ${config.gatewayId ?: "anonymous"}", it) ?: it }
+            duty?.attachInBackground(aeron, { println("gateway: duty cycle counters $it") })
+            println("gateway: idle strategy ${config.idleStrategy}")
             val barrier = ShutdownSignalBarrier()
             println("gateway: started")
 
@@ -300,6 +306,8 @@ data class GatewayConfig(
     val metricsEnabled: Boolean = false,
     /** Where to write percentile distributions at shutdown, for diffing against a later run. */
     val metricsFile: String? = null,
+    /** The poller's idle strategy; busy-spin unless configured (Design.md §7, "Duty cycle"). */
+    val idleStrategy: IdleStrategySpec = IdleStrategySpec.BUSY_SPIN,
     /**
      * Which gateway speaks for which participant, or null to connect anonymously.
      *
@@ -368,6 +376,7 @@ data class GatewayConfig(
         const val CREDENTIAL_TOKEN_FILE = "gateway.credentialTokenFile"
         const val METRICS_ENABLED = "gateway.metrics"
         const val METRICS_FILE = "gateway.metrics.file"
+        const val IDLE_STRATEGY = "gateway.idleStrategy"
 
         fun from(
             properties: Properties,
@@ -390,6 +399,7 @@ data class GatewayConfig(
                 properties.getProperty("gateway.client.outbound.streamId")?.toInt() ?: 21,
             metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
+            idleStrategy = IdleStrategySpec.parse(properties.getProperty(IDLE_STRATEGY)),
             participantRegistry = registry,
             participantRegistryFile = properties.getProperty(PARTICIPANT_REGISTRY)?.trim()?.ifEmpty { null },
             registryReloadMs = properties.getProperty(PARTICIPANT_REGISTRY_RELOAD_MS)?.trim()?.toLong()

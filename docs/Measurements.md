@@ -12,11 +12,14 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
   harness, not the shard.
 - **Check the reject counts.** A `maxOrders` too small for the rate, or a band outside the static
   collar or the ladder, silently invalidates a run.
-- **State the scope.** Everything to date is single-node. R1 is one security; R2–R7 are ten.
+- **State the scope.** Everything to date is single-node. R1 is one security; R2–R11 are ten.
 - **A counter cannot see a full thread, and `ps` cannot see a busy-spinning one.** Aeron reports
   queues, positions and duty-cycle breaches, so a stage that is merely full breaches none of them; and
   `engine`, `gateway` and `market-data` all busy-spin, so their ~100% CPU carries no information about
   utilisation. Read their own histograms instead — see "What C1–C2 say".
+- **Say how many cores the shard had, and what else was spinning.** On the 10P+4E laptop the knee is
+  where busy threads outnumber performance cores (D1–D2), so a knee is a property of the machine's
+  core count before it is one of the design. Freeing two spinning cores moved it one rate step.
 - **Say which driver threading mode.** `SHARED` (the default) and `DEDICATED` differ by 1.6x in
   throughput and 81x in p50 at the edge. A figure without it is not comparable — see "What R7 says".
 - **Fill in the `idle` column honestly, and take a same-day baseline.** R2–R4's knee was 15% low
@@ -57,6 +60,30 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
 | R6c | 2026-09-25 | `b537590`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 350k/s | 350,010/s | 701.4 µs | 2.84 ms | 5.89 ms | 701.4 µs | 5.89 ms | 9.3 µs | 0 | 0 |
 | R6d | 2026-09-25 | `b537590`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 400k/s | 399,991/s | 85.0 ms | 126 ms | 135 ms | 85.0 ms | 135 ms | 10.7 µs | 0 | 0 |
 | R6e | 2026-09-25 | `b537590`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,252/s | 299 ms | 317 ms | 319 ms | 299 ms | 319 ms | 16.5 µs | 0 | 0 |
+| R8a | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 450k/s | 450,034/s | 98.9 µs | 285.7 µs | 1.09 ms | 98.9 µs | 1.09 ms | 14.2 µs | 0 | 0 |
+| R8b | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 500k/s | 499,985/s | 121.7 µs | 1.68 ms | 8.69 ms | 121.7 µs | 8.69 ms | 15.8 µs | 1 | 0 |
+| R8c | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 550k/s | 550,039/s | 2.30 ms | 7.47 ms | 8.64 ms | 2.30 ms | 8.64 ms | 22.3 µs | 1 | 0 |
+| R8d | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 600k/s | 600,223/s | 48.9 ms | 63.9 ms | 66.0 ms | 48.9 ms | 66.0 ms | 16.1 µs | 1 | 0 |
+| R8e | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 650k/s | 650,156/s | 75.4 ms | 102 ms | 110 ms | 75.4 ms | 110 ms | 21.1 µs | 0 | 0 |
+| R8f | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,253/s | 102 ms | 131 ms | 137 ms | 102 ms | 137 ms | 17.5 µs | 0 | 0 |
+| R9a | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 450k/s | 450,037/s | 574.5 µs | 3.26 ms | 4.84 ms | 574.5 µs | 4.84 ms | 61.3 µs | 1 | 0 |
+| R9b | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 500k/s | 499,991/s | 22.7 ms | 33.3 ms | 36.0 ms | 22.7 ms | 36.0 ms | 74.9 µs | 0 | 0 |
+| R9c | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 550k/s | 550,040/s | 75.4 ms | 90.0 ms | 95.3 ms | 75.4 ms | 95.3 ms | 198.7 µs | 0 | 0 |
+| R9d | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 600k/s | 600,045/s | 53.3 ms | 81.8 ms | 87.6 ms | 53.3 ms | 87.6 ms | 88.2 µs | 1 | 0 |
+| R9e | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 650k/s | 650,179/s | 95.6 ms | 106 ms | 112 ms | 95.6 ms | 112 ms | 72.5 µs | 0 | 0 |
+| R9f | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,015/s | 110 ms | 153 ms | 158 ms | 110 ms | 158 ms | 124.0 µs | 0 | 0 |
+| R10a | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 450k/s | 450,037/s | 9.95 ms | 21.9 ms | 31.1 ms | 9.95 ms | 31.1 ms | 96.8 µs | 0 | 0 |
+| R10b | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 500k/s | 499,988/s | 8.35 ms | 15.4 ms | 23.8 ms | 8.35 ms | 23.8 ms | 102.3 µs | 0 | 0 |
+| R10c | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 550k/s | 550,046/s | 16.8 ms | 22.2 ms | 26.2 ms | 16.8 ms | 26.2 ms | 76.4 µs | 0 | 0 |
+| R10d | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 600k/s | 600,046/s | 41.1 ms | 47.5 ms | 52.1 ms | 41.1 ms | 52.1 ms | 281.3 µs | 0 | 0 |
+| R10e | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 650k/s | 650,177/s | 84.1 ms | 107 ms | 116 ms | 84.1 ms | 116 ms | 105.6 µs | 0 | 0 |
+| R10f | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,016/s | 107 ms | 132 ms | 140 ms | 107 ms | 140 ms | 814.1 µs | 0 | 0 |
+| R11a | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 450k/s | 450,034/s | 93.4 µs | 225.3 µs | 1.73 ms | 93.5 µs | 1.74 ms | 22.6 µs | 0 | 0 |
+| R11b | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 500k/s | 499,986/s | 161.9 µs | 1.30 ms | 2.16 ms | 162.0 µs | 2.16 ms | 14.4 µs | 1 | 0 |
+| R11c | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 550k/s | 550,039/s | 26.4 ms | 33.5 ms | 35.4 ms | 26.4 ms | 35.4 ms | 14.8 µs | 1 | 0 |
+| R11d | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 600k/s | 600,226/s | 26.9 ms | 43.5 ms | 49.0 ms | 26.9 ms | 49.0 ms | 24.7 µs | 1 | 0 |
+| R11e | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 650k/s | 650,175/s | 74.3 ms | 112 ms | 119 ms | 74.3 ms | 119 ms | 30.5 µs | 0 | 0 |
+| R11f | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,254/s | 106 ms | 139 ms | 146 ms | 106 ms | 146 ms | 16.5 µs | 0 | 0 |
 
 **R1 conditions.** Single node, Aeron IPC throughout, JVM start scripts from `./gradlew installDist`.
 One security (AAPL), `maxOrders=1000000`, `levelCount=32768`, `tickSize=0.01`. Band 99.90–100.10
@@ -369,6 +396,162 @@ today. Gateways are stateless, `origQty` lives in the engine, and `run-restart.s
 the multi-gateway case — the only gap is that **the directory cannot advertise more than one** (open
 issue 6), filed as a small tidying job. It should be re-read as the cheapest throughput lever available.
 
+**Tested in R8–R11 and A5, and refuted:** a second gateway buys no throughput, and at the knee the one
+gateway spends about a fifth of its core on messages. See the next section.
+
+---
+
+## What R8–R11 and A5 say: the gateway is not the ceiling
+
+The hypothesis from C1–C2 was that the single-threaded gateway, the stage with the least headroom by
+construction, was what capped the shard at ~550k/s, so a second one would raise it. Before building
+the directory change that would advertise a second gateway, `run-sweep.sh` gained `GATEWAYS` and
+`LOADERS` and the question was put directly. Four arms on the same afternoon, idle machine, in this
+order:
+
+| run | gateways | load generators | 450k/s | 500k/s | 550k/s | 600k/s | knee |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| R8 | 1 | 1 | **98.9 µs** | **122 µs** | 2.30 ms | 48.9 ms ✗ | ~500–550k/s |
+| R9 | 1 | 2 | 575 µs | 22.7 ms ✗ | 75.4 ms ✗ | 53.3 ms ✗ | ~450–500k/s |
+| R10 | 2 | 2 | 9.95 ms | 8.35 ms | 16.8 ms ✗ | 41.1 ms ✗ | ~450–500k/s, and slow below it |
+| R11 | 1 | 1 | **93.5 µs** | **162 µs** | 26.4 ms ✗ | 26.9 ms ✗ | ~500–550k/s |
+
+`ack response` p50; service time agrees to the digit in every cell because pacing held (p99.9 lateness
+14–814 µs, under the 1 ms limit in every row). ✗ = `SATURATED`. **R8–R11 conditions**: as R7 with
+`DRIVER_THREADING=DEDICATED`, `ARCHIVE_THREADING=SHARED`, ten securities, `ORDERS=400000` per rate
+split evenly across the generators, load average ~2 at the start of R8 and ~4.4 at the start of R11
+(the runs' own residue). With several generators, latency is the **worst** generator's percentile.
+Generator *j* sends as participants 20+4*j*..23+4*j* through gateway *j* mod `GATEWAYS`.
+
+**R8 and R11 bracket the experiment and agree with R7**, so the machine did not drift: the one-gateway
+knee is ~500–550k/s either side of the two treatments.
+
+**R10 is worse than R8, not better.** Two gateways carrying two generators' traffic knee no higher,
+and are 100x slower *below* the knee (9.95 ms against 98.9 µs at 450k/s). R9, the control, is worse
+again at 500–550k, but it is not a clean control and must not be read as one: with one gateway both
+generators subscribe to the same report stream, so each decodes every report on the shard, its
+neighbour's included (`ignored ~46k reports from outside this run` per generator in the smoke run).
+What R9 and R10 share, and R8 does not, is two more busy-spinning threads per extra generator plus
+R10's extra gateway, on a machine with 14 cores of which four are efficiency cores. The shard already
+runs ~10 busy threads at R8. **What these runs establish is that adding a gateway process does not buy
+throughput on this machine.** On their own they cannot say whether that is because the gateway is not
+busy, or because its gain is swallowed by core contention.
+
+**A5 answers that, from the gateway's own histograms.** `run-attribution.sh` (which gained
+`DRIVER_THREADING` for this) at 500k/s aggregate, ten securities, `DEDICATED`, 4,000,000 orders over
+8.0 s, one gateway; the run was at its knee (client p50 319 µs, p90 53.6 ms, p99 107 ms):
+
+| stage | messages | mean | busy time | share of 8.0 s |
+| --- | --- | --- | --- | --- |
+| gateway inbound | 4,000,041 | 0.129 µs | 0.52 s | 6.5% |
+| gateway outbound | 8,706,939 | 0.116 µs | 1.01 s | 12.6% |
+| **gateway, both legs** | | | **1.53 s** | **~19%** |
+| engine `newOrder` | 4,000,000 | 0.579 µs | 2.32 s | ~29% |
+
+The means include ~10 ns of clock read per message, which is ~0.25 s of the gateway's 1.53 s. What
+they exclude is the poll loop itself — Aeron's fragment dispatch and the egress adapter — which no
+histogram times. At a generous 50 ns per fragment that adds ~0.6 s, and the gateway is still under a
+third of its core. **The gateway is not the stage that is full at ~550k/s**, and the ~1.3M messages per
+second it carries cost it about a fifth of a core. This is the same arithmetic that put matching at
+~23% of the engine's core in C1–C2, and it is the per-message cost, not `ps`, that is quotable.
+
+**What this settles.** The second-gateway directory change (Status.md open issue 6, to-do item 2) is
+not a throughput lever and should not be built as one; addressing was already settled out of band.
+Of the five processes on the order path, the engine and the gateway now have measured headroom, the
+archive and the driver's threading were eliminated in R6–R7, and what remains is the **consensus
+module** (a single thread in the cluster-host, never instrumented) and **market-data** (single
+thread, busy-spin, consuming every book event). The consensus module is the next suspect, and it
+still has to be measured rather than inferred. **Measured in D1–D2: it is not** — ≤20% busy — and on
+this machine no stage is; the knee is the core count.
+
+**One oddity worth keeping.** A5's p50 is 319 µs where R8's at 500k/s is 122 µs. A5 ran 8 s rather
+than R8's 0.8 s with metrics on, so it sat at the knee long enough to build a queue; that is why it is
+the right run for asking what is full, and the wrong one to quote as a latency.
+
+---
+
+## What D1–D2 say: on this machine the knee is the core count, not a stage
+
+With the duty-cycle counters (Design.md §7, "Duty cycle") every thread on the order path reports how
+much of its core it spends working, so the question "which stage is full at ~550k/s" could finally be
+asked directly. `run-attribution.sh` at six rates, ten securities, `DRIVER_THREADING=DEDICATED`,
+archive `SHARED`, `engine.metrics=true` with stages off, 8 s of load per rate, counters sampled over the
+middle 40% of it (D1):
+
+| thread | 250k/s | 400k/s | 500k/s | 550k/s | 600k/s | 700k/s |
+| --- | --- | --- | --- | --- | --- | --- |
+| **engine service** | 12.2% | 17.6% | 20.4% | **99.9%** | **99.9%** | **99.9%** |
+| driver sender | 91.5% | 97.5% | 98.2% | 98.4% | 98.4% | 98.1% |
+| driver receiver | 69.3% | 70.9% | 71.2% | 69.9% | 71.6% | 72.6% |
+| gateway | 16.4% | 24.5% | 31.4% | 33.8% | 34.4% | 39.7% |
+| archive | 26.1% | 31.1% | 30.2% | 29.3% | 19.3% | 14.6% |
+| driver conductor | 19.4% | 22.0% | 22.4% | 21.8% | 20.9% | 21.2% |
+| consensus module | 14.3% | 17.4% | 18.2% | 17.4% | 11.7% | 8.5% |
+| market-data | 6.5% | 9.6% | 11.4% | 12.5% | 13.4% | 16.4% |
+| engine `newOrder` p50 / p90 | 0.33 / 0.63 µs | 0.33 / 0.63 µs | 0.33 / 0.58 µs | 0.38 / **5.50 µs** | 0.33 / **4.92 µs** | 0.38 / **3.50 µs** |
+| client response p50 | 78.8 µs | 98.4 µs | 383 µs | 213 ms ✗ | 477 ms ✗ | 410 ms ✗ |
+
+Service time equals response time to the digit in every row; pacing p99.9 18–145 µs.
+
+**The consensus module is not it.** It never exceeds 20%, and it *falls* past the knee because the
+engine stops keeping up with the log it feeds. Nor is the gateway (A5 already said so), market-data, the
+archive or the conductor. **The driver's sender reads ~98% throughout**, but it is a batching loop: it
+reads 91.5% at 250k/s, where the shard is nowhere near full, so its figure means "never idle", not
+"full" (Design.md §7).
+
+**The thread that goes over is the engine's**, and it goes from 20% to 100% in one 50k/s step. That
+is not matching getting dearer: the median `newOrder` holds at ~0.35 µs while **p90 jumps ~10x**. The
+first suspect was egress back-pressure — the engine's report publish spins on `tryClaim`, and
+`backpressureStalls` counts only one stall per **1,000,000** consecutive retries, so a zero there
+proves little. Every Aeron counter was sampled at 500k and 550k/s to test it, and it is refuted: the
+sender's flow-control events *fall*, 16/s → 1/s, and nothing else that measures back-pressure, loss or
+retransmission rises.
+
+**What is left is where the thread runs.** The machine is 10 performance cores plus 4 efficiency
+cores. At 550k/s the shard wants the driver's sender and receiver near full, the engine, gateway and
+market-data spinning a full core each whatever their duty, two load-generator threads, and the rest
+partially — about ten cores. A thread that loses its core, or is moved to another cluster, finds its
+caches cold, and the engine's cost is cache misses (Design.md §2), which is a tail effect exactly like the one
+measured. **D2 tests it** by freeing the two cores the gateway and market-data spin away while mostly
+idle (`GATEWAY_IDLE=backoff MD_IDLE=backoff`), the engine still busy-spinning, interleaved with
+controls:
+
+| run | gateway + market-data | rate | engine duty | `newOrder` p50 / p90 / p99 | response p50 | response p99 | pacing p99.9 |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| D2a | busyspin | 550k/s | 99.9% | 0.38 / 5.25 / 23.2 µs | 222 ms ✗ | 292 ms | **3764 µs** |
+| D2b | **backoff** | 550k/s | **33.8%** | 0.29 / **0.54** / 6.67 µs | **272 µs** | 130 ms | 125 µs |
+| D2c | busyspin | 600k/s | 99.9% | 0.38 / 4.63 / 22.2 µs | 478 ms ✗ | 479 ms | 38.4 µs |
+| D2d | **backoff** | 600k/s | 99.9% | 0.33 / 3.63 / 12.4 µs | 66.0 ms ✗ | 98.4 ms | 16.0 µs |
+| D2e | backoff | 500k/s | 19.6% | 0.29 / 0.54 / 1.25 µs | 104 µs | 55.4 ms | 18.4 µs |
+| D2f | backoff | 650k/s | 99.9% | 0.33 / 4.75 / 14.1 µs | 291 ms ✗ | 435 ms | 298 µs |
+
+**Freeing two cores moved the knee from ~500–550k/s to ~550–600k/s**, and at 550k/s it turned the
+engine from saturated (99.9%, p90 5.25 µs) to comfortable (33.8%, p90 0.54 µs) without touching the
+engine. D2a's pacing lateness (3.8 ms, which `run-sweep.sh` would mark `INVALID`) says the load
+generator was starved of CPU in the same run, which is the same symptom seen from outside the shard.
+D2d/D2f then saturate again, one step further up, the same way.
+
+**What this settles.** On this laptop the knee is **where the shard's busy threads outnumber the
+performance cores**, and the engine is the thread that falls over first because its cost is
+cache-bound — not a stage of the design running out of capacity. Every knee in this file from R7 on
+(~550k/s) is therefore a property of a 10+4-core laptop running the whole shard *and* its load
+generator, and should be quoted as such. The design's own single-threaded stages have measured
+headroom at that rate: consensus module ≤20%, gateway ~34%, market-data ~13%, archive ~30%.
+
+**What it does not settle.** Where a machine with enough cores for every spinning thread — the
+deployment `ProdDeployment.md` describes, with isolated cores — would knee, and whether the driver's
+sender, the one loop that never idles, is then the limit. That needs either a many-core Linux host with
+thread pinning or the driver on a second machine; this laptop cannot answer it. Also a caution: each
+cell above is one 8 s run, and R8/R11 showed the 550k/s cell moving between runs, so D2b's knee shift
+is one step of the rate ladder, not a precise figure.
+
+**Conditions (D1–D2).** Apple M4 Pro, 14 cores (10P+4E), macOS 15.7.9, JVM 21.0.11, commit
+`ba5c605`+ (the duty-cycle code, uncommitted), single node, Aeron IPC between client and gateway,
+`run-attribution.sh` with `engine.metrics=true`, stages off, `gateway.metrics=true`, `md.metrics=true`,
+`most cluster --duty`; ten securities, band 99.90–100.10, `maxOrders=1000000`; load average 2.0–4.8
+across the series (the runs' own residue), two idle Docker containers (<0.3% CPU). D1 17:33–17:39, the
+back-pressure counter sample 17:40–17:43, D2 17:43–17:48, 2026-09-27.
+
 ---
 
 ## Attribution runs
@@ -385,6 +568,7 @@ the wire. These three runs answer the question runs R2–R4 opened — the ceili
 | A2 | 2026-09-25 | `b537590`+ | 10 | 100k/s | 10k/s | 39.4 µs | 0.17 µs | 0.50 µs | 0.13 µs | 0.8 µs (**2.0%**) | 38.6 µs (98.0%) |
 | A3 | 2026-09-25 | `b537590`+ | 10 | 250k/s | 25k/s | 61.2 µs | 0.08 µs | 0.38 µs | 0.08 µs | 0.5 µs (**0.9%**) | 60.7 µs (99.1%) |
 | A3′ | 2026-09-25 | `b537590`+ | 10 | 250k/s | 25k/s | 60.8 µs | 0.08 µs | 0.38 µs | 0.08 µs | 0.5 µs (**0.9%**) | 60.3 µs (99.1%) |
+| A5 | 2026-09-27 | `ba5c605`+ | 10 | 500k/s | 50k/s | 319 µs | 0.13 µs | 0.38 µs | 0.08 µs | 0.6 µs (**0.2%**) | 318.4 µs (99.8%) |
 
 Engine stage split, same runs (`newOrder` p50, and its three stages):
 

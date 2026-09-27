@@ -2,9 +2,9 @@ package com.engine.core
 
 import io.aeron.cluster.service.ClusteredServiceContainer
 import io.aeron.exceptions.DriverTimeoutException
+import com.engine.reference.DutyCycles
 import com.engine.reference.LatencyHistogram
 import com.engine.reference.ParticipantRegistrySource
-import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.SystemNanoClock
 import org.agrona.concurrent.ShutdownSignalBarrier
 
@@ -53,6 +53,10 @@ fun main(args: Array<String>) {
     val metrics =
         if (config.metricsEnabled) EngineMetrics(SystemNanoClock.INSTANCE, config.metricsStages)
         else null
+    // How full the service thread is, which the histograms cannot say and `ps` cannot either, since
+    // it busy-spins (Design.md §7, "Duty cycle"). Metrics under the same rule: it wraps the idle
+    // strategy, which the state machine never sees, and its counter is read only from outside.
+    val duty = if (config.metricsEnabled) DutyCycles(SystemNanoClock.INSTANCE) else null
     val service = MatchingEngineService(
         shardId = config.shard.shardId,
         books = books,
@@ -97,8 +101,11 @@ fun main(args: Array<String>) {
         .serviceId(config.serviceId)
         .serviceName("matching-engine")
         .clusterDir(config.clusterDir)
-        // Busy-spin: this thread owns an isolated core and must never yield it (Design.md §7).
-        .idleStrategySupplier { BusySpinIdleStrategy() }
+        // Busy-spin unless configured otherwise: in production this thread owns an isolated core
+        // and must never yield it (Design.md §7).
+        .idleStrategySupplier {
+            config.idleStrategy.create().let { idle -> duty?.wrap("engine service", idle) ?: idle }
+        }
         .errorHandler { throwable ->
             val refusal = generateSequence(throwable) { it.cause }
                 .filterIsInstance<SnapshotRestoreFailed>()
@@ -139,6 +146,8 @@ fun main(args: Array<String>) {
     }
 
     container.use {
+        duty?.attachInBackground(context.aeron(), { println("matching-engine: duty cycle counters $it") })
+        println("matching-engine: idle strategy ${config.idleStrategy}")
         println("matching-engine: started, awaiting shutdown signal")
         registrySource.use { barrier.use {
             barrier.await()

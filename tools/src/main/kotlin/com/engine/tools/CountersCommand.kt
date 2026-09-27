@@ -1,11 +1,13 @@
 package com.engine.tools
 
+import com.engine.reference.DutyCycles
 import io.aeron.CncFileDescriptor
 import io.aeron.CommonContext
 import org.agrona.IoUtil
 import org.agrona.concurrent.status.CountersReader
 import java.io.File
 import java.nio.MappedByteBuffer
+import java.util.Locale
 
 /**
  * Reads the media driver's counters straight out of the CnC file.
@@ -84,6 +86,16 @@ private fun printSnapshot(counters: CountersReader, match: Regex?, showAll: Bool
 }
 
 /**
+ * A duty counter's rate is busy nanoseconds per second of wall time, so dividing by 1e9 gives the
+ * share of one core its thread spent working (Design.md §7, "Duty cycle").
+ */
+private fun dutyShare(typeId: Int, delta: Long, elapsedSeconds: Double): String =
+    if (typeId != DutyCycles.COUNTER_TYPE_ID) ""
+    else "   = %.1f%% of a core".format(Locale.ROOT, 100.0 * delta / (elapsedSeconds * NANOS_PER_SECOND))
+
+private const val NANOS_PER_SECOND = 1e9
+
+/**
  * Samples twice or more and reports the rate of change.
  *
  * Wall clock, deliberately: this is an observer process holding no replicated state, and the ban on
@@ -112,12 +124,13 @@ private fun printDeltas(
             .sortedByDescending { kotlin.math.abs(it.third) }
 
         println()
-        println("  sample $sample of ${samples - 1} over %.2fs".format(elapsedSeconds))
+        println("  sample $sample of ${samples - 1} over %.2fs".format(Locale.ROOT, elapsedSeconds))
         println("  %5s %20s %18s  %s".format("id", "value", "per second", "label"))
         for ((counter, value, delta) in rows) {
             println(
-                "  %5d %20d %18s  %s".format(
-                    counter.first, value, "%,.0f".format(delta / elapsedSeconds), counter.second,
+                "  %5d %20d %18s  %s%s".format(
+                    counter.first, value, "%,.0f".format(Locale.ROOT, delta / elapsedSeconds), counter.second,
+                    dutyShare(counters.getCounterTypeId(counter.first), delta, elapsedSeconds),
                 ),
             )
         }
@@ -127,6 +140,8 @@ private fun printDeltas(
         previousAt = now
     }
     println()
+    println("  A duty-ns counter's rate is busy nanoseconds per second: the share of one core its")
+    println("  thread spent working, which CPU% cannot show for a thread that spins while idle.")
     println("  A position counter that stops advancing while its feeder keeps going is the")
     println("  saturating stage. Sorted by absolute change, so the busiest is at the top.")
 }

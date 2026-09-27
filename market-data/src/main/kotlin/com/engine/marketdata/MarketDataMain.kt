@@ -1,10 +1,12 @@
 package com.engine.marketdata
 
+import com.engine.reference.DutyCycles
+import com.engine.reference.IdleStrategySpec
 import com.engine.reference.ShardSpec
 import io.aeron.Aeron
 import io.aeron.FragmentAssembler
-import org.agrona.concurrent.BusySpinIdleStrategy
 import org.agrona.concurrent.ShutdownSignalBarrier
+import org.agrona.concurrent.SystemNanoClock
 import org.agrona.concurrent.UnsafeBuffer
 import java.io.File
 import java.util.Properties
@@ -72,7 +74,12 @@ fun main(args: Array<String>) {
             service.onBookEvent(buffer, offset, length)
         }
 
-        val idle = BusySpinIdleStrategy()
+        // The one metric this process has: how full its single poll thread is, since it consumes
+        // every book event the engine publishes (Design.md §7, "Duty cycle").
+        val duty = if (config.metricsEnabled) DutyCycles(SystemNanoClock.INSTANCE) else null
+        val idle = config.idleStrategy.create().let { duty?.wrap("market-data", it) ?: it }
+        duty?.attachInBackground(aeron, { println("market-data: duty cycle counters $it") })
+        println("market-data: idle strategy ${config.idleStrategy}")
         val barrier = ShutdownSignalBarrier()
         println("market-data: started")
 
@@ -145,6 +152,10 @@ data class MarketDataConfig(
      * subscriber waits before it can trust a book, and the interval over which a gap is repaired.
      */
     val snapshotCycleMs: Long,
+    /** Publishes the poll thread's duty cycle as an Aeron counter. Off unless asked for. */
+    val metricsEnabled: Boolean = false,
+    /** The poll thread's idle strategy; busy-spin unless configured (Design.md §7, "Duty cycle"). */
+    val idleStrategy: IdleStrategySpec = IdleStrategySpec.BUSY_SPIN,
 ) {
     /**
      * Depth geometry comes from the shard's own security file, so the price that becomes ladder
@@ -156,6 +167,8 @@ data class MarketDataConfig(
 
     companion object {
         const val SECURITIES_FILE = "md.securitiesFile"
+        const val METRICS_ENABLED = "md.metrics"
+        const val IDLE_STRATEGY = "md.idleStrategy"
 
         fun from(properties: Properties, shard: ShardSpec): MarketDataConfig = MarketDataConfig(
             shard = shard,
@@ -175,6 +188,8 @@ data class MarketDataConfig(
                 ?: "aeron:udp?endpoint=239.10.1.4:40004",
             snapshotStreamId = properties.getProperty("md.snapshot.streamId")?.toInt() ?: 4,
             snapshotCycleMs = properties.getProperty("md.snapshot.cycleMs")?.toLong() ?: 1_000L,
+            metricsEnabled = properties.getProperty(METRICS_ENABLED).toBoolean(),
+            idleStrategy = IdleStrategySpec.parse(properties.getProperty(IDLE_STRATEGY)),
         )
 
         fun load(path: String?): MarketDataConfig {

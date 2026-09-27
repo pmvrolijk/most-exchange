@@ -112,3 +112,7 @@ has a source here (below), and those documents move.
 | Architecture Tour | `docs/Design.md` §1–§4, `docs/ProdDeployment.md` §2 and §7.3, `docs/Status.md`, `docs/Measurements.md`, `CLAUDE.md`, `docs/manual/assets/ui-*.png` |
 | Building with AI | the session transcripts, `git log`, the retrospective artifact, `.claude/skills/*/SKILL.md`, `CLAUDE.md`, `docs/Status.md` |
 | Inside the Code | `engine/`, `gateway/`, `market-data/` and `reference/` sources, `sbe/src/main/resources/message-schema.xml`, `deploy/docker-compose.yml`, `deploy/config/`, `e2e/*.sh`, `build.gradle.kts`, `gradle.properties`, `.gitlab-ci.yml` |
+
+## Note
+
+The exported HTML contains third-party assets the AGPL doesn't cover.

@@ -203,9 +203,10 @@ engine.bookEvent.streamId=12
 | `engine.bookEvent.streamId` | `12` | |
 | `engine.auction.maxPasses` | `64` | Safety valve on the uncross fixed-point loop, not part of the algorithm |
 | `engine.backpressure.alertThreshold` | `1000000` | Consecutive back-pressured publications before alerting |
-| `engine.metrics` | `false` | Hot-path timing; two clock reads per message |
+| `engine.metrics` | `false` | Hot-path timing; two clock reads per message. Also publishes the service thread's duty cycle as the `duty-ns: engine service` counter (5.8) |
 | `engine.metrics.stages` | `false` | Adds the admit/match/settle partition of a new order; two more clock reads |
 | `engine.metrics.file` | none | Where percentile distributions are written at shutdown |
+| `engine.idleStrategy` | `busyspin` | How the service thread waits for work: `busyspin`, `backoff`, `yielding`, `sleeping` or `sleeping:<µs>`. Leave the default on an isolated core (3.4) |
 
 ::: note Metrics are node-local and deliberately outside the fingerprint
 The engine reads `System.nanoTime()` to record these histograms, which the determinism rules
@@ -213,7 +214,8 @@ otherwise prohibit. The rule is that time must not influence **replicated state*
 not be observed: the histograms are write-only — never read by a branch, never snapshotted, never on
 a feed. Enabling metrics on one node and not another must be incapable of changing the log, the
 books or a snapshot. That is why `engine.metrics*` is excluded from the fingerprint, and it is the
-test any probe added later must pass.
+test any probe added later must pass. `engine.idleStrategy` is outside it too: how a node waits for
+work cannot change what it computes, so two members may differ.
 :::
 
 ## 4.5 Gateway
@@ -251,8 +253,9 @@ gateway.client.outbound.streamId=21
 | `gateway.client.inbound.streamId` | `20` | |
 | `gateway.client.outbound.channel` | `aeron:ipc` | Where the gateway **publishes execution reports** |
 | `gateway.client.outbound.streamId` | `21` | |
-| `gateway.metrics` | `false` | Hot-path timing on both legs |
+| `gateway.metrics` | `false` | Hot-path timing on both legs, and the poll thread's duty cycle as the `duty-ns: gateway <id>` counter (5.8) |
 | `gateway.metrics.file` | none | Percentile distributions at shutdown |
+| `gateway.idleStrategy` | `busyspin` | How the poll thread waits for work; same values as `engine.idleStrategy` |
 
 `gateway.gatewayId` and one of the two credential keys must be set **together**: an id with no secret
 cannot authenticate, and a secret with no id has nothing to authenticate as. The process refuses to
@@ -284,7 +287,9 @@ md.bookEvent.streamId=12
 | `md.l2.channel` / `.streamId` | `aeron:udp?endpoint=239.10.1.2:40002` / `2` | Aggregated depth increments |
 | `md.l3.channel` / `.streamId` | `aeron:udp?endpoint=239.10.1.3:40003` / `3` | Book events forwarded verbatim |
 | `md.snapshot.channel` / `.streamId` | `aeron:udp?endpoint=239.10.1.4:40004` / `4` | The L2 recovery feed |
-| `md.snapshot.cycleMs` | `1000` | One security's image per cycle, so a full pass is `cycleMs × securities` |
+| `md.snapshot.cycleMs` | `1000` | How long a full pass over the shard's books takes: the cycle is sliced one security per slice, so a joining subscriber waits one cycle however many securities there are |
+| `md.metrics` | `false` | Publishes the poll thread's duty cycle as the `duty-ns: market-data` counter (5.8). Market data's only metric |
+| `md.idleStrategy` | `busyspin` | How the poll thread waits for work; same values as `engine.idleStrategy`. At ~13% busy at full load, the first candidate for `backoff` where cores are short |
 
 ::: term L1, L2, L3
 **L1** is top of book plus last trade. **L2** is aggregated depth per price level, published as
@@ -346,6 +351,7 @@ otherwise.
 | `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's throughput ceiling** — see below |
 | `--archive-threading MODE` | `SHARED` | Archive threads: `SHARED` or `DEDICATED`. Leave it alone unless the cores are isolated |
 | `--ingress-term-length LEN` | `64k` | Cluster ingress term length, e.g. `16m`. Buys latency headroom at the edge, not capacity |
+| `--duty` | off | Publish a duty-cycle counter for every thread this process runs — the driver's (per threading mode), the archive's and the consensus module's (5.8). Measures around Aeron's idle strategies without changing them |
 | `--fresh` | off | **Delete the archive and cluster directories on start** |
 | `--keep` | on | Persist them. Contradicts `--fresh` |
 

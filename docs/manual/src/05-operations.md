@@ -419,6 +419,10 @@ Measured, single node, ten securities, development machine with the desktop clos
 | `SHARED` (default) | ~350,000 orders/s | ~35,000/s |
 | `DEDICATED` | ~550,000 orders/s | ~55,000/s |
 
+The `DEDICATED` figure is where the development laptop ran out of performance cores, not a limit of
+any stage (5.8, "How full each thread is"). A host with a core for every spinning thread has not yet
+been measured; do not assume the knee moves with it by any particular amount.
+
 **Plan capacity against these numbers, not against the design target** of 100,000/s per security
 across ten. Two findings behind them are worth carrying into any capacity conversation:
 
@@ -427,7 +431,8 @@ across ten. Two findings behind them are worth carrying into any capacity conver
   thread's worth of shared path — one ingress, one consensus module, one archive, one log — and
   adding securities divides it rather than multiplying it.
 - **Matching is not the constraint.** The engine's own whole-message p50 is 0.38–0.50 µs, about 23% of
-  its thread at the ceiling. The rest of that thread, and the ceiling, is the plumbing around it.
+  its thread at the ceiling; the rest of that thread is the Aeron plumbing around it. On the
+  development machine the ceiling itself was the core count (5.8).
 
 ::: warning A rate above the knee is a queue, not a latency
 Past the sustainable rate the shard still accepts everything — no rejects, no drops, every order
@@ -539,7 +544,7 @@ Aeron reports queues, positions, duty-cycle breaches and errors. A stage that is
 breaches none of them, so "every counter scaled with the offered rate and nothing exceeded a
 threshold" narrows an answer to *not a buffer, a window, a disk or a stall* and no further. Nor can
 `top` finish the job: the engine, gateway and market-data busy-spin and read ~100% of a core whether
-working or idling (3.4). The next instrument after the counters is those processes' own metrics.
+working or idling (3.4). The next instrument after the counters is the duty cycle, below.
 :::
 
 ::: note A counter that moves non-linearly names a place to look, not a cause
@@ -548,6 +553,58 @@ looked conclusive and pointed at the ingress term length. Raising it 256-fold mo
 rate not at all — back-pressure on a channel is what a slow *consumer* looks like from the
 publisher's side, so a closing window is as likely to be the symptom as the cause. Change it and
 re-measure before believing it.
+:::
+
+### How full each thread is
+
+Every loop on the order path can publish its **duty cycle** — the share of wall time it spends in
+iterations that found work — as an Aeron counter labelled `duty-ns: <thread>`. It is the one reading
+that tells a busy thread from a spinning one. Turn it on with each process's metrics switch
+(`engine.metrics`, `gateway.metrics`, `md.metrics`) and `most cluster --duty` for the driver, archive
+and consensus module; all are on in the development stack. Then:
+
+```
+$ most counters --aeron-dir build/attr-duty-check/aeron --match '^duty-ns' --all --interval-ms 3200
+counters: build/attr-duty-check/aeron/cnc.dat  pid=55343
+
+  sample 1 of 1 over 3.20s
+     id                value         per second  label
+    166           4706046275        918,693,319  duty-ns: driver sender   = 91.9% of a core
+    167           3523624174        688,061,980  duty-ns: driver receiver   = 68.8% of a core
+    168           1117142847        203,768,413  duty-ns: archive   = 20.4% of a core
+    165           1006793108        178,289,139  duty-ns: driver conductor   = 17.8% of a core
+    170            899559798        161,337,009  duty-ns: gateway anonymous   = 16.1% of a core
+    169            780158699        134,305,447  duty-ns: engine service   = 13.4% of a core
+     94            705590536        119,773,332  duty-ns: consensus-module   = 12.0% of a core
+    171            362722381         65,071,360  duty-ns: market-data   = 6.5% of a core
+
+  A duty-ns counter's rate is busy nanoseconds per second: the share of one core its
+  thread spent working, which CPU% cannot show for a thread that spins while idle.
+  A position counter that stops advancing while its feeder keeps going is the
+  saturating stage. Sorted by absolute change, so the busiest is at the top.
+```
+
+That is `e2e/run-attribution.sh` sampling mid-load: one node at 250,000 orders/s across ten
+securities, `DRIVER_THREADING=DEDICATED`, with a gateway that connected without an identity — hence
+`gateway anonymous`; a registered one is labelled with its id, `gateway gw-0`. The duty cycle costs
+two clock reads per loop iteration and changes nothing about how a thread idles, so it can stay on.
+
+Read it like this:
+
+- **A thread that climbs with the rate and reaches ~100% is full.** That is how the engine's service
+  thread looks past the development machine's knee: 20% at 500,000/s, 99.9% one step later.
+- **The driver's sender and receiver read high from the start and are not full.** They drain whatever
+  has accumulated on each pass, so ~90% at a quarter of the knee means *never idle*, not *at capacity*.
+  Judge them by whether the reading keeps rising with the rate, not by its value.
+- **A process spinning at a low duty is wasting a core.** On a machine without a core per thread that
+  core is taken from somebody who needed it; set that process to `backoff` (3.4).
+
+::: warning On a machine with fewer cores than busy threads, the knee is the core count
+On the development laptop (10 performance cores) the shard stops keeping up at ~550,000/s not because
+a stage is full — the consensus module is under 20%, the gateway ~34%, market data ~13% — but because
+its busy threads outnumber the cores, and the engine, whose cost is cache misses, loses its core first.
+Its duty jumps to 100% while its median cost per order stays put. Setting the gateway and market data
+to `backoff` moved that knee up a step. A knee measured on such a machine describes the machine.
 :::
 
 ### Who asked

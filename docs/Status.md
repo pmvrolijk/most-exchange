@@ -246,6 +246,9 @@ In the order I would tackle them.
    every spinning thread knees, and whether the driver's sender — the one loop that never idles — is
    then the limit. That wants a many-core Linux box with pinning, or the driver on its own machine.
    Design.md §2's 100k/s/security target is neither earned nor refuted until then.
+   **Paused (decided 2026-09-27) until a dedicated 16-core machine is available.** The instruments are
+   ready for it: `run-attribution.sh` with `RATE`, `COUNTERS_MATCH` and the `*_IDLE` knobs, and the
+   duty counters. Do not resume it on the laptop.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
    §4.8 "Driver threading is the throughput ceiling" carries the dev-versus-perf/prod split and the

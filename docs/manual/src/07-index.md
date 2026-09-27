@@ -15,7 +15,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Auction, opening <span class="ref">1.6, <b>5.4</b></span></li>
 <li>Auction, uncollared <span class="ref">5.4</span></li>
 <li>Back-pressure, cluster ingress <span class="ref"><b>5.4</b>, 5.8</span></li>
-<li>Busy-spin idle strategy <span class="ref">3.4, 5.8</span></li>
+<li>Busy-spin idle strategy <span class="ref"><b>3.4</b>, 4.4, 5.8</span></li>
 <li>Cancel-only participant <span class="ref"><b>4.3</b>, 6.7</span></li>
 <li>Book capacity <span class="ref">4.2, 5.4, 6.5</span></li>
 <li>Book event stream <span class="ref">1.2, 3.2, 4.4, 4.6</span></li>
@@ -37,6 +37,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Determinism <span class="ref"><b>1.1</b>, 4.4, 5.2</span></li>
 <li>Directory, see Discovery</li>
 <li>Discovery broadcast <span class="ref">1.2, 2.5, <b>4.7</b>, 5.8</span></li>
+<li>Duty cycle <span class="ref">3.4, 4.4, 4.8, <b>5.8</b></span></li>
 <li>Dynamic MDC <span class="ref">2.9, 3.7</span></li>
 <li>Egress, cluster <span class="ref">4.5, 5.4</span></li>
 <li>Expiry, order <span class="ref"><b>5.1</b>, 5.3</span></li>
@@ -55,6 +56,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <ul>
 <li>Halt, volatility <span class="ref">1.6, <b>5.4</b>, 6.4</span></li>
 <li>Huge pages <span class="ref"><b>3.3</b></span></li>
+<li>Idle strategy <span class="ref">2.9, <b>3.4</b>, 4.4, 4.5, 4.6</span></li>
 <li>IGMP querier <span class="ref">3.7, 6.6</span></li>
 <li>Ingress, cluster <span class="ref">3.6, 4.5, 4.9</span></li>
 <li>ISIN validation <span class="ref">4.2, 6.2</span></li>
@@ -64,7 +66,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Mark file, liveness <span class="ref"><b>2.12</b>, 3.8, 5.6, 6.2</span></li>
 <li>Media driver <span class="ref">1.2, <b>2.3</b>, 2.9, 3.4</span></li>
 <li>Member string <span class="ref"><b>3.6</b>, 4.8</span></li>
-<li>Metrics, hot path <span class="ref"><b>4.4</b>, 4.5, 5.7</span></li>
+<li>Metrics, hot path <span class="ref"><b>4.4</b>, 4.5, 4.6, 5.7, 5.8</span></li>
 <li>Multicast, market data <span class="ref"><b>3.7</b>, 4.6</span></li>
 <li>origQty <span class="ref"><b>2.6</b>, 4.5, 5.8</span></li>
 <li>Operator identity <span class="ref"><b>4.3</b>, 4.9, 5.6</span></li>

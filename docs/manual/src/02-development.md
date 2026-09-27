@@ -299,6 +299,8 @@ and Releases in section 4; Schedules, Audit and Operators in section 5.
 | The scheduler disabled | Enabled — it is what bounds restart time by snapshotting at each close (5.6) |
 | Hand-written `shard-0-securities.properties` | A published release, pointed at by a `current` symlink (4.2) |
 | `ThreadingMode.SHARED`, no core isolation | Dedicated threading and isolated cores (3.4) |
+| Engine, gateway and market data set to `backoff` (`*.idleStrategy`) | `busyspin`, the default, on isolated cores (3.4) |
+| Duty-cycle counters on (`*.metrics`, `most cluster --duty`) | Optional; cheap enough to leave on (5.8) |
 
 ::: note One media driver is one network identity
 In the development stack the five shard processes share a media driver that runs in the

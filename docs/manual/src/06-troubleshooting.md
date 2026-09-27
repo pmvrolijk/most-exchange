@@ -286,7 +286,6 @@ market-data: stopped. gaps=0 missed=0 foreignShard=0 droppedL1=0 droppedL2=0 dro
 | --- | --- | --- |
 | Order entry | No bulk cancel of one participant's resting orders, so revoking one relies on it withdrawing them from `cancelOnly` | 1.7, 6.7 |
 | Cluster host | Member id is hardcoded to 0; no `--member-id` | 3.6 |
-| All processes | Idle strategies are constants, not configuration, so `BusySpinIdleStrategy` is used whether or not cores are isolated | 3.4 |
 | Capacity | A shard sustains ~350,000 orders/s aggregate on the default threading and ~550,000 with `DEDICATED`, against a design target of 100,000/s per security across ten. What binds above that is measured not to be matching, storage or the ingress buffer, and is not yet identified | 4.8, 5.7 |
 | Build | `engine.march` is x86-only | 3.10 |
 | Discovery | One order-entry channel per shard, so several gateways cannot be advertised individually. Also the cheapest way to raise the capacity ceiling above, since the gateway is one thread carrying every order in and every report out | 3.2, 5.7 |

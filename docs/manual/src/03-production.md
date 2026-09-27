@@ -133,17 +133,29 @@ most cluster --members "$MEMBERS" --host shard0-a \
 (4.8). `--archive-threading DEDICATED` earns its place only *with* it and only with the cores above
 isolated — on shared cores it is measurably worse than leaving it alone.
 
-::: todo Idle strategies are hardcoded
-Threading modes are now configurable (4.8), but idle strategies are still constants:
-`BusySpinIdleStrategy` in the engine, gateway and market-data regardless of whether cores are
-isolated. On the layout above that is correct; on a machine without isolation it is the harmful case
-the warning describes, and there is no flag to change it.
-:::
+Idle strategies are configuration. The engine, gateway and market-data each take one —
+`engine.idleStrategy`, `gateway.idleStrategy`, `md.idleStrategy` (4.4–4.6) — and **all three default to
+`busyspin`**, which is right for the layout above and needs nothing set. The cluster host's threads use
+Aeron's own settings, which back off by default; on isolated cores, make them spin with Aeron's system
+properties in the cluster host's `JAVA_OPTS`:
+
+```sh
+JAVA_OPTS="-Daeron.conductor.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy \
+           -Daeron.sender.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy \
+           -Daeron.receiver.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy \
+           -Daeron.archive.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy \
+           -Daeron.archive.recorder.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy \
+           -Daeron.cluster.idle.strategy=org.agrona.concurrent.BusySpinIdleStrategy"
+```
+
+On a machine **without** a core per thread, set `backoff` on anything that is mostly idle. A spinning
+loop at 13% of its real work still takes 100% of a core, and on a development laptop that core was
+the difference between keeping up and not (5.8).
 
 ::: note This also means CPU% tells you very little about these processes
 Because the engine, gateway and market-data busy-spin, each reads ~100% of a core whether it is
-working or idling. `top` cannot tell you whether one of them is the constraint. Their own counters and
-histograms can — `engine.metrics`, `gateway.metrics` (5.7, 5.8).
+working or idling. `top` cannot tell you whether one of them is the constraint. **Their duty-cycle
+counters can** — the share of its core each thread actually spends working, live (5.8).
 :::
 
 ## 3.5 Aeron buffer sizing

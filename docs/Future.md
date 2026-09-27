@@ -5,6 +5,9 @@
       stack; `e2e/run-attribution.sh` splits a client round trip into gateway, engine and
       everything else. First result: the engine owns 0.42 µs of a 55 µs round trip, and Design.md
       §2's 0.5 µs estimate holds (Design.md §2 "Measured", §7 "Instrumentation")
+- [x] Duty cycle — every thread on the order path, Aeron's included, reports how much of its core it
+      spends working; configurable idle strategies. On the laptop the knee is the core count
+      (Design.md §7 "Duty cycle"; Measurements.md D1–D2; Handover §2k)
 - [x] Referential data and topology in Postgres — the `control` module authors them and publishes
       the shard security files and discovery registry each process boots from (docs/ControlPlane.md)
 - [x] Single backend control plane (rest) — CRUD for shards, securities and participants, plus

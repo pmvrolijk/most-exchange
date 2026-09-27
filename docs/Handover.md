@@ -1012,6 +1012,62 @@ refused `UNAUTHORISED_ACCESS` to gw-1. **Not yet run in CI**: the branch has not
 authenticated (by design — the upstream session gateways' job); the control plane cannot verify its
 operator gateway is one; the release publisher writes into an existing directory.
 
+### 2k. The ceiling question, asked directly — and the laptop's answer is its core count
+
+Merged to `master` as `dd5039f` and `029e37a`, after `ba5c605` made the project AGPL-3.0-or-later.
+Measurements.md R8–R11, A5 and D1–D2 carry every figure; this is the narrative.
+
+**The licence.** The dependency tree was checked before the relicensing was committed: 60 runtime
+artifacts across the eight modules, licences read from their POMs, parents followed. All are
+Apache-2.0, MIT, BSD or CC0 except logback (EPL-1.0 **or** LGPL-2.1 — used under the LGPL) and
+jakarta.annotation (EPL-2.0 with a GPL secondary licence); the SPA's production tree is MIT/ISC/BSD.
+Two things to act on before the repository goes public: the exported presentation decks embed a
+third-party icon font (`mc-anthropicons`) that the AGPL does not cover, and Apache NOTICE files must
+travel with any distributed binary. A "source" link in the SPA footer is deferred to the public move.
+
+**Second gateway: measured before building, and refuted.** To-do item 2 proposed advertising several
+gateways per shard as the cheapest throughput lever, which is a wire change. The question was put
+first: `run-sweep.sh` gained `GATEWAYS` and `LOADERS`, and four same-day arms (R8–R11) put two
+gateways at a knee no higher than one, and 100x slower below it. The control arm is confounded (each
+generator decodes every report through one gateway, and more processes contend for cores), so A5
+settled it from the gateway's own histograms: ~19% of a core at the knee. The directory change was
+not built.
+
+**The duty cycle.** Nothing could say how full a busy-spinning thread is — `ps` reads 100% either way
+and Aeron's counters report stalls, not fullness. `DutyCycleIdleStrategy` (`reference`) wraps any idle
+strategy and times the stretches between `idle` calls that closed on work, publishing busy ns as an
+Aeron counter that `most counters` shows as a share of a core. Because every Aeron agent takes an
+injected strategy, it reaches the consensus module, archive and driver threads without touching
+Aeron (`most cluster --duty`), as well as the engine, gateway and market-data behind their metrics
+switches (`md.metrics` is new). The idle strategies themselves became configuration
+(`*.idleStrategy`, `busyspin` default); the dev stack backs off. Specified in Design.md §7 first; the
+tests were written from the clause and mutation-checked — four correctness mutations each caught by
+the test for its clause, an escaping allocation caught, a non-escaping one not (the JIT removes it,
+the same blind spot `AllocationTest` has).
+
+**Two defects only a live run could find.** Aeron calls some idle-strategy suppliers twice and runs
+its agent on one result, and the consensus module runs its spare through start-up before dropping it:
+the first version published a permanent 0% beside the real thread. Counters are now attached from a
+short-lived background thread, only to a wrapper still looping across a full second of polls. And
+the first live run used stale jars — `installDist -q` had not refreshed them — so the installed jar
+is now checked for the new code before a run is believed.
+
+**The answer, on this machine (D1–D2).** Across 250k–700k/s the consensus module never exceeds 20%;
+the gateway, market-data and archive stay well under half. The engine's service thread goes from 20%
+to 100% in one step at ~550k/s with its median cost unchanged and its p90 ~10x. The egress
+back-pressure hypothesis was tested and refuted — the engine's `backpressureStalls` counts one stall per
+million retries, so its zero proved nothing, but every Aeron counter was sampled and flow-control
+events *fell*. Setting gateway and market-data to `backoff` moved the knee up one step without
+touching the engine. The 10P+4E laptop runs out of performance cores and the cache-bound engine loses
+first. **Paused** until a dedicated 16-core machine exists.
+
+**What the check is.** 566 tests pass (542 before). `run-e2e.sh` and `run-restart.sh` pass with the
+new start-up paths; `run-attribution.sh` fails if any thread on the order path lacks a duty counter.
+The Operator's Manual carries the settings (§3.4, §4.4–4.8) and how to read the counters (§5.8).
+
+**Still open**: the knee on a host with a core per spinning thread, and whether the driver's sender —
+which never idles, so its duty reading cannot say "full" — is then the limit.
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.

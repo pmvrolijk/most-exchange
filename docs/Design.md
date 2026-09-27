@@ -400,10 +400,19 @@ from a second instrument: the cluster-host takes ~1.6 cores under `SHARED` and ~
 What *is* known: matching is **~23% of the engine's core** at 600k/s (0.38 µs × 600k), so the rest of
 that thread is the `ClusteredServiceContainer`'s Aeron work rather than matching. Measuring the three
 busy-spinning loops needs their own in-process metrics or a run with a yielding idle strategy, not a
-counter. And the gateway is the stage with the least headroom by construction — one thread for 600k
-orders inbound and ~1.3M reports outbound — and the only one that **scales sideways today**, which
-promotes open issue 6 (the directory advertising several gateways) from tidying to the cheapest
-throughput lever available.
+counter. ~~And the gateway is the stage with the least headroom by construction … the cheapest
+throughput lever available.~~ **Refuted by measurement:** two gateways knee no higher than one
+(Measurements.md R8–R11), and the one gateway is ~19% busy at the knee by its own histograms (A5).
+
+**On the development machine, what binds at ~550k/s is the core count.** Every loop on the order path
+now reports its duty cycle (§7, "Duty cycle"). Across 250k–700k/s the consensus module stays under
+20%, the gateway ~34%, market-data ~13%, the archive ~30%; the engine's service thread goes from 20%
+to 100% in one 50k/s step, with its median `newOrder` cost unchanged and its p90 ~10x, and not from
+egress back-pressure (D1). Setting the gateway and market-data to `backoff`, freeing the two cores
+they spin while mostly idle, moved the knee up one step without touching the engine (D2). The shard's
+busy threads outnumber the laptop's 10 performance cores, and the engine — cache-bound — is the one
+that loses. **Where a host with a core for every spinning thread knees is unmeasured**, and so is
+whether the driver's sender, the one loop that never idles, is then the limit.
 
 **The archive write is not the ceiling.** That experiment has been run: with the consensus log and
 archive on a RAM disk and the media-driver buffers left on the SSD, the round trip moves 2.6% at the
@@ -2840,10 +2849,10 @@ It found three defects that unit tests could not:
   several gateways cannot advertise them all. Nothing about the gateways themselves prevents it —
   they hold no state and each needs only its own client endpoints — so the interim answer is a
   virtual address in front of the gateway tier, and the real one is a wire change nobody has needed
-  yet. **Somebody needs it now, for throughput rather than topology:** the gateway is a single thread
-  carrying every order inbound and every report outbound (~1.3M messages/sec at the measured ceiling),
-  and it is the only saturating stage that scales sideways without a redesign (§2, "Measured at full
-  fan-out"; Measurements.md C1–C2).
+  yet. ~~Somebody needs it now, for throughput rather than topology …~~ **Measured first and
+  refuted:** a second gateway raises no ceiling and the one gateway is ~19% busy at the knee
+  (Measurements.md R8–R11, A5), so nothing about capacity depends on this. Participants learn their
+  gateway out of band; this stays a convenience.
 * **`SecurityDefinition` distribution:** the Market Data Process currently learns the reference
   prices only implicitly, from trades. If downstream needs the collars or tick size, a corresponding
   book event is required.
@@ -2868,9 +2877,11 @@ It found three defects that unit tests could not:
   600k/s, so most of that thread is the service container's Aeron work. A gateway-stamped ingress
   timestamp read only under `engine.metrics` remains the definitive instrument and costs a wire change.
   Then the §2 target is either restated or earned. Also still open: the same sweep on more than one
-  node. **The gateway is the stage with the least headroom by construction** — one thread for 600k
-  orders inbound and ~1.3M reports outbound — and the only one that scales sideways today, which makes
-  the directory item below the cheapest lever available rather than a tidying job.
+  node. ~~The gateway is the stage with the least headroom … the cheapest lever available.~~
+  **Refuted** (R8–R11, A5). **The duty-cycle counters then answered it for the development machine
+  (D1–D2): no stage is full; the knee is where the shard's busy threads outnumber the performance
+  cores.** What remains open is the answer on a host with a core per spinning thread — paused until a
+  dedicated 16-core machine is available.
 * ~~**The control plane over-reported feed gaps.**~~ **Fixed.** `ClusterLink` counted a sequence only
   in the four book events it decodes while the engine numbers all seven, so every order event read as
   a gap and a busy book reported continuous loss — which hid real loss rather than revealing it. The

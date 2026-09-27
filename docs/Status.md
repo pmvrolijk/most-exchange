@@ -7,7 +7,7 @@ load-bearing decisions (§3) and lessons learned (§6).
 Last updated 2026-09-27, in the session that tested whether a second gateway raises the shard's
 ceiling. It does not: the gateway is ~19% busy at the knee (Measurements.md R8–R11, A5). Every
 thread on the order path now reports a duty cycle, and on this laptop the knee turns out to be the
-core count, not a stage (D1–D2). The participant-enforcement work (Handover §2j) is merged to
+core count, not a stage (D1–D2; Handover §2k). The participant-enforcement work (Handover §2j) is merged to
 `master` and green in CI (pipelines 35–37). The project is now AGPL-3.0-or-later (`LICENSE.md`).
 
 ---
@@ -16,11 +16,11 @@ core count, not a stage (D1–D2). The participant-enforcement work (Handover §
 
 | | |
 | --- | --- |
-| Branch | `master` — CI green through pipeline 37 |
+| Branch | `master`, pushed. CI green through pipeline 37; **pipeline 38 (`029e37a`, this session's two commits) was still running at close** — check it first |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~25,600 lines — 14,280 main across 68 files, 11,290 test across 57 |
+| Kotlin | ~26,300 lines — 14,660 main across 69 files, 11,670 test across 58 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 542, all passing |
+| Tests | 566, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -103,7 +103,9 @@ not the problem, and that is now measured rather than inferred (attribution runs
 round trip grows 39.4 → 61.2 µs, **all of it outside the gateway and the engine**, whose combined share
 falls to 0.9%. The ceiling is the shared path every order crosses whichever book it lands on, and the
 Aeron counters named it: **the media driver's single shared thread**. Storage and ingress buffering were
-eliminated on the way. What binds once the driver has its own threads is the open question.
+eliminated on the way. What binds once the driver has its own threads was answered for the laptop by
+the duty-cycle counters: **its core count** — no stage is full at ~550k/s, the shard simply has more
+busy threads than performance cores (D1–D2). A host with a core per thread is unmeasured.
 
 ---
 
@@ -189,10 +191,10 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     is not the ceiling, R6 eliminated storage, and the Aeron counters then named the cause: the media
     driver's `ThreadingMode.SHARED`. **`--driver-threading DEDICATED` moves the knee to ~550k/s**
     (R7, and Design.md §7 "Driver threading") — 1.8x short of the target rather than 2.9x. **It was
-    tuning, not architecture.** What replaces this item is *what binds at ~550k/s*: the consensus
-    module's own single thread is the next suspect, `most counters` against a DEDICATED run at its
-    knee is the cheap look, and a gateway-stamped ingress timestamp read only under `engine.metrics`
-    is the definitive one at the cost of a wire change.
+    tuning, not architecture.** *What binds at ~550k/s* was then answered for this laptop by the
+    duty-cycle counters (D1–D2): no stage is full — the consensus module stays under 20% — and the
+    knee is where the shard's busy threads outnumber the 10 performance cores. The answer on a host
+    with a core per spinning thread is **paused until a dedicated 16-core machine exists** (§3 item 3).
 14. **Auction SMP pass limit** — currently 64, still a guess.
 15. **Net resting depth** — confirms the 1M order pool and the capacity high-water mark.
 16. **`SecurityDefinition` distribution to market data** — it learns reference prices only
@@ -207,7 +209,27 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ## 3. To do next
 
-In the order I would tackle them.
+**Next session: the other open items**, the throughput work being paused (item 3). In the order I
+would take them, cheapest-and-most-dangerous first:
+
+1. **Fingerprint enforcement at boot** (item 9, open issue 11) — a node-versus-node geometry mismatch
+   still diverges silently on the first order, and `auctionMaxPasses` is in no fingerprint. Cheap, and
+   it closes the one silent-divergence path left. Use `decision-fork`: it changes a boot path.
+2. **Refuse to publish into an existing release directory** (item 11b, open issue 6a) — small, and
+   makes a KDoc promise true.
+3. **Bulk cancel of one participant's resting orders** (item 11a, open issue 3) — the operator side of
+   revocation. A new operator command through the log, so the `wire-change` skill applies; the
+   engine walks the ladders as the purge does (Design.md §4.3).
+4. **Archive retention** (item 5, open issue 5) — establish Aeron 1.53's post-snapshot behaviour
+   before writing a policy.
+5. **Tests for `discovery`** (item 11) and **Design.md §6 against the code** (item 10) — both
+   outstanding for several sessions.
+
+Also cheap and outstanding: regenerate the manual's §5.8 `/api/status` transcript and the screenshots
+from a running dev stack (item 4). Before the repository goes public: strip or annotate the embedded
+icon font in the exported presentation decks, and plan NOTICE files for distributed binaries (§2k).
+
+The full list, in the order it was written:
 
 0. ~~**Merge `gateway-security-multiple-per-shard`.**~~ **Done**, and green in CI on `master`
    (pipelines 35–37, `e2e:restart` included). Re-seed any long-lived dev stack
@@ -250,6 +272,7 @@ In the order I would tackle them.
    ready for it: `run-attribution.sh` with `RATE`, `COUNTERS_MATCH` and the `*_IDLE` knobs, and the
    duty counters. Do not resume it on the laptop.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
+   *Updated again 2026-09-27* with idle strategies (§3.4, §4.4–4.8) and the duty cycle (§5.8).
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
    §4.8 "Driver threading is the throughput ceiling" carries the dev-versus-perf/prod split and the
    measured table; §3.4 gives production the launch line and keeps an honest `todo` for the idle

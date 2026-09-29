@@ -43,6 +43,9 @@
 #   ARCHIVE_THREADING  archive threading: SHARED|DEDICATED                     (default: SHARED)
 #   GATEWAYS         gateways serving the shard, 1..5                         (default 1)
 #   LOADERS          `most load` processes, each at RATE/LOADERS    (default: GATEWAYS)
+#   EGRESS_CHANNEL   the gateway's cluster egress channel (default aeron:udp?endpoint=localhost:0).
+#                    aeron:ipc takes execution reports off the driver's UDP sender, since the gateway
+#                    and the cluster share one driver here; ...|mtu=8192 keeps UDP with bigger datagrams
 #   PIN              a cpus.env (deploy/cloud/): one physical core per spinning thread (default: unset,
 #                    no pinning -- the scheduler places everything, as on every run before it existed)
 #
@@ -81,6 +84,7 @@ INGRESS_TERM="${INGRESS_TERM:-}"
 DRIVER_THREADING="${DRIVER_THREADING:-}"
 ARCHIVE_THREADING="${ARCHIVE_THREADING:-}"
 GATEWAYS="${GATEWAYS:-1}"
+EGRESS_CHANNEL="${EGRESS_CHANNEL:-aeron:udp?endpoint=localhost:0}"
 LOADERS="${LOADERS:-$GATEWAYS}"
 
 MOST="${MOST:-$ROOT/tools/build/install/most/bin/most}"
@@ -199,7 +203,7 @@ gateway.securitiesFile=$RUN/securities.properties
 gateway.aeronDir=$AERON_DIR
 gateway.ingressChannel=aeron:udp
 gateway.ingressEndpoints=0=localhost:20110
-gateway.egressChannel=aeron:udp?endpoint=localhost:0
+gateway.egressChannel=$EGRESS_CHANNEL
 gateway.client.inbound.channel=aeron:ipc
 gateway.client.inbound.streamId=$((20 + 2 * i))
 gateway.client.outbound.channel=aeron:ipc
@@ -442,6 +446,7 @@ echo "              rates are the AGGREGATE across them ($((RATE_PER_SECURITY))/
 echo "              maxOrders=$MAX_ORDERS per security, band 99.90-100.10 inside a 5000bps static collar,"
 echo "              $ORDERS orders per rate, metrics off, $WARMUP_ORDERS-order discard pass first."
 echo "              load average at finish: $LOADAVG"
+echo "              gateway egress channel: $EGRESS_CHANNEL"
 echo "              pinning: $([ -n "${PIN:-}" ] && echo "one core per agent from $PIN (topology $TOPOLOGY), loaders on $LOADER_CPUS" || echo none)"
 echo "              log+archive on $(df -h "$CLUSTER_HOST" | tail -1 | awk '{print $1}') ($CLUSTER_HOST)"
 echo "              $(grep -m1 'ingress term length' "$LOGS/cluster.log" | sed 's/cluster: //')"

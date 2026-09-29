@@ -1129,6 +1129,42 @@ binaries matches the JVM's counts exactly (10,944 reports, 5,142 trades, 802 can
 unanswered). The attribution histograms are in `docs/baselines/linode-*`. The host ran about an hour
 and was deleted with its firewall (`bench.sh down`, verified empty by tag).
 
+**Reversed the same evening.** "The answer" and the first half of "Two things this opened" above are
+wrong, and are kept as written so the reversal can be seen. A brainstorm of what fills the engine thread
+went back to the fetched files first, and two of them overturned it.
+- **The `.hgrm` footers carry means.** At 200k/s, mean `newOrder` (2.38 µs) × rate is 47.7% against a
+  49.0% duty cycle, so almost everything the thread does is inside the handler; the "untimed service
+  work" suspect was wrong. At 300k/s the mean rises to 3.19 µs, and only in `admit` and `match`, the
+  stages that publish execution reports. `settle`, which publishes to market-data over IPC, is flat.
+- **`duty.out` holds every Aeron counter.** At 300k/s the engine's egress publication sits at its limit
+  (`pub-pos` ≥ `pub-lmt`), with the driver's sender a full 8 MB window behind. The receiving side is
+  caught up, and the sender has flow-control room.
+- **The ~2% sender figure** had been measured at 100k/s and generalised to the knee without being
+  measured there.
+- **The bytecode:** Aeron 1.53's `NetworkPublication.sendData` scans at most one MTU per call, so the
+  sender puts out one ≤1,408 B datagram per publication per duty cycle.
+
+The prediction was then tested on the laptop (Measurements.md E1–E14, the `EGRESS_CHANNEL` knob, twelve
+runs interleaved). Every UDP-1,408 B run at 550k or 650k/s sat on a full egress window with the engine
+at 99.9%. Egress over IPC, or UDP in 8 KB datagrams, ran the same rates at 26–35% engine duty and a
+66–84 µs median. The engine was never the limit, and D1's refutation of egress back-pressure had read
+`snd-bpe` (the receiver-window limit) where it needed the publication's headroom. **Lessons:**
+a thread that spins inside its work reads as full on every instrument that times work, so ask what it
+waits on before calling it saturated. A figure is valid only at the rate it was measured. And the
+first look at a result should be the fetched files, not a new run.
+
+**Then the next knee.** With `EGRESS_CHANNEL=aeron:ipc`, sweeps of 2M orders a rate (I1–I3, with a
+same-day UDP control, U1) kept up to 1.8M/s aggregate and saturated at 2.5M/s, against UDP's 0.5–0.6M/s.
+Held for 4–8 s with every counter sampled (K1–K5), 1M/s ran at an 83 µs median and 1.2M/s at 98 µs.
+From 1.5M/s the p90 queues in episodes and the one generator is past its pacing limit, and at 2.1M/s
+the engine thread is genuinely full: egress and ingress have headroom, the engine is 20.9 MB behind
+on its log, and 0.43 µs × 2.1M/s fills a core, with the gateway at 93%. Design.md §2's 1M/s at full
+fan-out is therefore met on one node with IPC egress. It isn't met with UDP egress, and multi-node is
+untested: follower replication goes over UDP through the same sender. The Operator's Manual (§4.5,
+§4.8, §5.7, §5.8, §6) was brought into line, and names IPC egress as the highest-throughput setting
+with the placement it requires: the gateway on the leader's media driver, which the separate gateway
+tier of its §3.2 does not have.
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.

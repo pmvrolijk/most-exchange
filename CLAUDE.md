@@ -269,7 +269,11 @@ here as well:
 - Every measurement to date is **single-node**. Say so when quoting one, and say how many
   securities: the fan-out result is that **the shard's ceiling is aggregate, not per-security** —
   ~350k/s across ten is the same aggregate one book reached, so Design.md §2's 1M/s/shard target is
-  over-stated by ~2.9x (Measurements.md R5), or ~1.8x with a `DEDICATED` driver (R7).
+  over-stated by ~2.9x (Measurements.md R5), or ~1.8x with a `DEDICATED` driver (R7). Both figures
+  are with UDP egress in 1,408 B datagrams. With IPC egress one node carries 1M/s at an 83 µs median
+  and knees at ~1.5M/s (K1–K5). Say which egress channel a rate was taken with.
+- **Above ~1.5M/s one `most load` is at its own limit.** Its pacing p99.9 passes 1 ms, so a rate
+  there measures the harness too. Check pacing before believing a knee up there.
 - **State the driver threading mode with any rate.** `most cluster` defaults to `ThreadingMode.SHARED`,
   which caps the shard ~1.6x below `--driver-threading DEDICATED` and costs 81x on p50 at the edge. A
   benchmark or a production node sets `DEDICATED`; leave `--archive-threading` alone, since a dedicated
@@ -285,10 +289,13 @@ here as well:
   --interval-ms 1000`; metrics on, `most cluster --duty` for the driver, archive and consensus module),
   never from a run switched to a yielding strategy — that moves the knee it measures. A batching loop
   (the driver's sender and receiver) reads near 100% long before it is full. → R§13, Design.md §7
-- **The engine's service thread is what binds, with or without a core of its own.** It steps from
-  ~50% to 100% busy across one rate step while its median cost holds — on the laptop (D1) and on a
-  16-core host with every agent pinned (L0–L4). Core count only moves where the step lands, and the
-  knee scales with the engine thread's single-core speed, so a knee is quoted with the CPU it ran on.
+- **Before calling the engine full, read the egress publication's headroom.** The engine spins on
+  `tryClaim` inside `onNewOrder`, so a full egress publication reads as 100% duty and as dearer
+  `admit`/`match` stages. What binds is the driver's UDP sender, one ≤MTU datagram per publication per
+  duty cycle. Read `pub-lmt − pub-pos` on stream 102 (≤ 0 is back-pressured), not `snd-bpe`, which is the
+  receiver's window. `EGRESS_CHANNEL=aeron:ipc` or `…|mtu=8192` removes the step (Measurements.md E1–E14).
+- **A figure holds at the rate it was measured.** "The sender is ~2% busy" was true at 100k/s and
+  reversed at the knee. Measure a stage *at* the rate you draw a conclusion about.
 - **An unpinned run on an `isolcpus` host measures nothing** — unpinned, the whole shard shares the
   few non-isolated cores. Pin (`PIN=`, `e2e/pin.sh`) or boot without `isolcpus`.
 - **Corroborate a cluster-host `duty-ns` reading against `/proc/<pid>/task/<tid>/stat`** before
@@ -331,15 +338,17 @@ here as well:
 order pool is cache-line packed. Design.md §2 has the stage-by-stage breakdown and the ~1.0 GB/shard
 memory footprint, which makes huge pages mandatory, not optional.
 
-**The budget is met and the target is still missed.** The measured ten-security ceiling is
-**~350k/s aggregate** with the default driver threading and **~550k/s with `DEDICATED`**, not 1M/s, and
-it is the *same* aggregate one book reached. Attribution puts the gateway and engine at 0.9–2.0% of a
+**The budget is met; the target is met only with IPC egress, on one node.** With UDP egress the
+measured ten-security ceiling is **~350k/s aggregate** with the default driver threading and **~550k/s
+with `DEDICATED`**, not 1M/s, and it is the *same* aggregate one book reached. Attribution puts the gateway and engine at 0.9–2.0% of a
 round trip and shows the engine getting *faster* per order as the rate rises, so **the constraint is
 the shared path every order crosses** and not matching. **Do not treat a per-order improvement as a
 throughput improvement**; prove it with a sweep. Eliminated by measurement: the archive write (RAM
-disk, twice), the ingress term length (16m moved latency, not the knee), the driver's sender (~2% busy
-on a pinned host) and huge pages (~3%). What binds is the engine's service thread stepping to 100%
-with its median cost flat, and what fills it is open (Design.md §2, "Measured at full fan-out").
+disk, twice), the ingress term length (16m moved latency, not the knee) and huge pages (~3%). **What
+binds is the media driver's UDP sender on the egress stream**, and the engine is back-pressured behind
+it. With egress on IPC one node carries 1M/s for 8 s at an 83 µs median, and knees at ~1.5M/s. By
+2.1M/s the engine thread itself is full at 0.43 µs a new order (Design.md §2; Measurements.md K1–K5).
+IPC egress needs the gateway on the leader's media driver.
 
 ## Build and deployment
 

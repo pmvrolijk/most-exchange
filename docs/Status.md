@@ -4,13 +4,22 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2j),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-09-29, in the session that took the ceiling question to a 16-core cloud host with
-one core per agent thread (`deploy/cloud/`; Measurements.md L0–L4, A6–A10; Handover §2l). **The engine's
-service thread still binds there, with a core to itself**, and the driver's sender is ~2% busy — so
-the laptop's "the knee is the core count" (D1–D2) was incomplete: the engine's one-step collapse is its
-own, and cores only move where it lands. Native images passed e2e on real x86-64 for the first time,
-with the JVM's exact counts. Two instrument findings: the cluster host's duty counters disagree with
-the kernel, and an unpinned arm on an `isolcpus` host measures nothing.
+Last updated 2026-09-29, in the session that took the ceiling question to a 16-core cloud host
+(`deploy/cloud/`; Measurements.md L0–L4, A6–A10) and then found the answer in its own counters
+(E1–E14; Handover §2l). **The shard's knee is the media driver's UDP sender, not the engine.** Aeron
+sends one ≤1,408 B datagram per publication per duty cycle, and execution reports outgrow that. The
+egress publication fills, and the engine spins on it inside `onNewOrder`, where the duty cycle and
+the histograms count the spin as work. That is the one-step collapse on both machines. With egress on
+IPC, or in 8 KB datagrams, the laptop carries **650k/s aggregate at 26–35% engine duty and a 66–84 µs
+median**, where 1,408 B datagrams give a full window and 441 ms. **With IPC egress the next knee is
+~1.5M/s** (I1–I3, K1–K5). Design.md §2's **1M/s at full fan-out is carried for 8 s at an 83 µs median**
+on one node, and by 2.1M/s the engine thread itself is full. The Operator's Manual now names IPC
+egress as the highest-throughput setting, with the placement it needs (§4.8). **This reverses two things written
+earlier the same day** ("the engine thread binds", "the sender is ~2% busy", the latter measured at
+100k/s, not at the knee) and D1–D2's core-count reading. Native images passed e2e on real x86-64 for
+the first time, with the JVM's exact counts. Instrument findings: the cluster host's duty counters
+disagree with the kernel, `backpressureStalls` cannot see back-pressure, and an unpinned arm on an
+`isolcpus` host measures nothing.
 
 Before that (2026-09-27): a second gateway does not raise the ceiling (R8–R11, A5); every thread on the
 order path reports a duty cycle (Handover §2k). The participant-enforcement work (Handover §2j) is
@@ -38,7 +47,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
-| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session |
+| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal |
 
 ```sh
 ./gradlew clean build                        # 542 tests (control's need Docker)
@@ -71,7 +80,8 @@ that authors reference data and drives the market over REST, and a console that 
   measured path — the pipeline that runs the assertion is live since pipeline 34.
 - **Latency is attributed, and the ceiling is found.** The exchange's own code is **0.9–2.0%** of a
   client round trip; the rest is consensus, the archive write and the wire, and the shard's throughput
-  ceiling is the media driver's threading mode — `--driver-threading DEDICATED` is worth 1.6x (§2i).
+  ceiling is the media driver: first its threading mode (`--driver-threading DEDICATED` is worth 1.6x,
+  §2i), then its UDP sender's datagram rate on egress (Measurements.md E1–E14).
   Design.md §2's 0.5 µs/order estimate holds at 0.38–0.50 µs (§2c, A1–A4).
 - **Gateways are stateless and disposable.** `origQty` lives in the engine, several gateways can
   serve one shard, and the participant registry is authored by the control plane and re-read while
@@ -113,12 +123,18 @@ falls to 0.9%. The ceiling is the shared path every order crosses whichever book
 Aeron counters named it: **the media driver's single shared thread**. Storage and ingress buffering were
 eliminated on the way. What binds once the driver has its own threads was answered for the laptop by
 the duty-cycle counters: **its core count** — no stage is full at ~550k/s, the shard simply has more
-busy threads than performance cores (D1–D2). **A host with a core per thread then corrected that**
-(L0–L4, A6–A10): on 16 pinned cores the engine's service thread still goes from ~50% to 100% busy in
-one rate step with its median cost flat, and the driver's sender is ~2% of a core. The knee there is
-~275–300k/s, half the laptop's, because a 2.0 GHz Zen 3 core costs ~3x an M4 Pro P-core per order —
-so **the engine thread's single-core speed is what a throughput target rests on**, and what fills it
-past the step is the open question.
+busy threads than performance cores (D1–D2). ~~**A host with a core per thread then corrected that**
+… **the engine thread's single-core speed is what a throughput target rests on**~~ — **both readings
+are reversed (E1–E14).** On the laptop and on a 16-core pinned host alike, the engine's one-step
+collapse is the engine spinning on a full egress publication, because the driver's UDP sender can't
+send execution reports fast enough: one ≤MTU datagram per publication per duty cycle, ~142 MB/s on a
+2.0 GHz Zen 3 and ~250–310 MB/s on the M4 Pro. Egress over IPC, or in 8 KB datagrams, removes it, and
+the laptop then carries 650k/s aggregate with the engine at a third of its core. ~~**Where the shard
+knees without that limit is unmeasured**~~ **Measured (I1–I3, K1–K5):** with IPC egress the laptop
+carries **1M/s for 8 s (p50 83 µs, p90 177 µs)** and 1.2M/s (98 µs, 278 µs). It knees at ~1.5M/s held,
+and by 2.1M/s the engine thread is full at 0.43 µs a new order. Design.md §2's target is met on one
+node with IPC egress. With UDP egress it isn't (~0.5M/s the same day), and multi-node it's unmeasured:
+log replication goes over UDP through the same sender.
 
 ---
 
@@ -208,12 +224,23 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     duty-cycle counters (D1–D2): no stage is full — the consensus module stays under 20% — and the
     knee is where the shard's busy threads outnumber the 10 performance cores. The answer on a host
     with a core per spinning thread is **paused until a dedicated 16-core machine exists** (§3 item 3).
-    **Measured 2026-09-29** (L0–L4): the engine thread binds there too; see §3 item 3.
-13a. **What fills the engine thread past the step.** Median `newOrder` stays at 1.3–1.4 µs while duty
-    goes 49% → 100% between 200k and 300k/s; every stage shows multi-ms maximum stalls (A8–A10). The
-    service container's untimed Aeron work (log polling, egress publication) is the first suspect.
+    **Measured 2026-09-29** (L0–L4, E1–E14): the same egress limit on both machines; see 13a.
+13a. ~~**What fills the engine thread past the step.**~~ **Answered (E1–E14):** it spins on a full egress
+    publication behind the driver's UDP sender. The per-order rise is in `admit` and `match`, the two
+    stages that publish execution reports, and the mean × rate accounts for the whole duty cycle, so
+    no untimed work is involved. Of the "multi-ms stalls", 8 of 1.6M orders were over 1 ms at 200k/s,
+    most likely first-use costs. The knee without the UDP egress limit is measured: ~1.5M/s with IPC
+    egress, the engine thread full by 2.1M/s (K1–K5). **Still open under it:**
+    - which egress configuration production runs. It's a decision: IPC egress needs the gateway on the
+      leader's media driver, which the manual's separate gateway tier doesn't have, and a real NIC
+      changes loopback's MTU trade;
+    - log replication over UDP in a multi-node cluster, which should meet the same datagram limit;
+    - the 22–72 ms p99 tails in unsaturated runs;
+    - an engine counter that can see back-pressure (Design.md §8).
 13b. **The cluster host's duty counters disagree with the kernel** — sender 92–97% by `duty-ns`, ~2% by
-    `/proc` (Design.md §8). D1's "sender ~98%" is suspect until it is explained.
+    `/proc` at 100k/s (Design.md §8). In E1–E14 the sender reads 95–98% in every arm, including one
+    carrying only ingress, so the counter is insensitive for that thread. D1's "sender ~98%" is
+    suspect until it is explained.
 14. **Auction SMP pass limit** — currently 64, still a guess.
 15. **Net resting depth** — confirms the 1M order pool and the capacity high-water mark.
 16. **`SecurityDefinition` distribution to market data** — it learns reference prices only
@@ -228,9 +255,9 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ## 3. To do next
 
-**Next session: the other open items.** The throughput work has its answer for now (item 3); its two
-follow-ups (open issues 13a, 13b) are laptop-answerable and can wait behind the correctness items. In
-the order I would take them, cheapest-and-most-dangerous first:
+**Next session: the other open items**, then the throughput follow-ups. The ceiling is named (item 3,
+open issue 13a). What remains is the next knee and a production decision. That work isn't dangerous,
+and the correctness items are. In the order I would take them, cheapest-and-most-dangerous first:
 
 1. **Fingerprint enforcement at boot** (item 9, open issue 11) — a node-versus-node geometry mismatch
    still diverges silently on the first order, and `auctionMaxPasses` is in no fingerprint. Cheap, and
@@ -294,12 +321,21 @@ The full list, in the order it was written:
    **Resumed 2026-09-29 on a cloud host:** [`deploy/cloud/`](../deploy/cloud/README.md) provisions a
    Linode `g7-dedicated-64-32` by cloud-init (SMT siblings offlined, 16 physical cores, the agents'
    cores isolated) and both scripts take `PIN=/etc/most-cpus.env` for one core per agent thread.
-   **Answered** (Measurements.md L0–L4, A6–A10; Handover §2l): the knee there is ~275–300k/s, the
-   engine's service thread is the one that binds with a core to itself, the driver's sender is ~2%
-   busy, and huge pages and storage move nothing. **Still open:** what fills the engine thread past
-   the step (13a), and the duty-counter disagreement (13b). A rerun is `deploy/cloud/README.md`, about
-   an hour at ~$1/h; a host with faster cores is the next machine worth renting, and an unpinned arm
-   needs a boot without `isolcpus`.
+   **Answered** (Measurements.md L0–L4, A6–A10, E1–E14; Handover §2l): the knee there is ~275–300k/s.
+   ~~The engine's service thread is the one that binds~~ **Reversed the same day:** the driver's UDP
+   sender binds, one datagram per publication per duty cycle, and the engine is back-pressured behind
+   it. The E-series on the laptop confirmed it. Egress on IPC or in 8 KB datagrams moves past the old
+   knee, and 650k/s runs at 26–35% engine duty. Huge pages and storage move nothing. ~~(a) a sweep with
+   `EGRESS_CHANNEL=aeron:ipc` to find the next knee~~ **done on the laptop** (I1–I3, K1–K5: ~1.5M/s, the
+   engine full by 2.1M/s, 1M/s held at an 83 µs median). **Next, in order:**
+   (a) the production egress decision, which changes where the gateway runs relative to the node, so
+   it goes through `decision-fork`;
+   (b) a multi-node check of log replication over UDP, with the log channel's MTU as the lever;
+   (c) a back-pressure counter in the engine (Design.md §8);
+   (d) the p99 tails;
+   (e) recordable pinned sweeps on the Linode (the plan's "Phase B", ~$1–2), with a second generator,
+   to separate engine, gateway and harness above 1.5M/s. A cloud rerun is `deploy/cloud/README.md`, and an unpinned arm needs a boot without
+   `isolcpus`.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
    *Updated again 2026-09-27* with idle strategies (§3.4, §4.4–4.8) and the duty cycle (§5.8).
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
@@ -371,7 +407,9 @@ The full list, in the order it was written:
   the window is steady state and not a draining queue.
 * `run-sweep.sh` also takes `INGRESS_TERM`, `DRIVER_THREADING`, `ARCHIVE_THREADING`, and `GATEWAYS` /
   `LOADERS` (several gateways, several generators; read the script header for the control arm's
-  confound). `run-attribution.sh` takes `DRIVER_THREADING` too. **Set
+  confound). `run-attribution.sh` takes `DRIVER_THREADING` too. Both take **`EGRESS_CHANNEL`** (the
+  gateway's cluster egress channel: `aeron:ipc`, or a UDP URI with `|mtu=8192`) and **`PIN`** (one core
+  per agent thread, `deploy/cloud/`). **Set
   `DRIVER_THREADING=DEDICATED` for any benchmark**; leave `ARCHIVE_THREADING` alone (Design.md §7).
 * `e2e/run-sweep.sh` finds the knee, validates every rate before believing it, and prints a row
   block to paste into [`Measurements.md`](Measurements.md). **`SECURITIES=n` drives n securities

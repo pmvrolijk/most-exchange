@@ -248,7 +248,7 @@ gateway.client.outbound.streamId=21
 | `gateway.aeronDir` | driver default | This gateway's own media driver |
 | `gateway.ingressChannel` | `aeron:udp` | Cluster ingress |
 | `gateway.ingressEndpoints` | none | Every member's ingress endpoint, so the client can find the leader |
-| `gateway.egressChannel` | `aeron:udp?endpoint=localhost:9020` | Cluster egress. The host must be one the cluster can **send to** — the name of the machine whose media driver this gateway uses — never `0.0.0.0` |
+| `gateway.egressChannel` | `aeron:udp?endpoint=localhost:9020` | Cluster egress. The host must be one the cluster can **send to** — the name of the machine whose media driver this gateway uses — never `0.0.0.0`. **`aeron:ipc`** when `gateway.aeronDir` is the *leader's own* media driver: the highest-throughput setting (4.8, "The egress channel") |
 | `gateway.client.inbound.channel` | `aeron:ipc` | Where adapters **publish orders**. Must be unique per gateway |
 | `gateway.client.inbound.streamId` | `20` | |
 | `gateway.client.outbound.channel` | `aeron:ipc` | Where the gateway **publishes execution reports** |
@@ -348,19 +348,22 @@ otherwise.
 | `--members STRING` | single-node default | Aeron member string (3.6) |
 | `--participants FILE` | none | The participant registry (4.3). With it, every cluster session must authenticate — anonymous ones are refused — and a snapshot request through consensus is granted only to an `operator=true` identity. Without it, anyone connects and anyone may snapshot |
 | `--participants-reload-ms N` | `5000` | Registry poll interval; `0` disables |
-| `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's throughput ceiling** — see below |
+| `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's first throughput ceiling**; the gateway's egress channel is the second (see below) |
 | `--archive-threading MODE` | `SHARED` | Archive threads: `SHARED` or `DEDICATED`. Leave it alone unless the cores are isolated |
 | `--ingress-term-length LEN` | `64k` | Cluster ingress term length, e.g. `16m`. Buys latency headroom at the edge, not capacity |
 | `--duty` | off | Publish a duty-cycle counter for every thread this process runs — the driver's (per threading mode), the archive's and the consensus module's (5.8). Measures around Aeron's idle strategies without changing them |
 | `--fresh` | off | **Delete the archive and cluster directories on start** |
 | `--keep` | on | Persist them. Contradicts `--fresh` |
 
-### Driver threading is the throughput ceiling
+### What caps a shard's throughput
 
-`--driver-threading` is the single setting with the largest measured effect on what a shard can carry.
-`SHARED` puts the media driver's conductor, sender and receiver on **one** thread; at ten securities
-that thread moves ~190 MB/s of loopback traffic and is what caps the shard. Measured on a 14-core
-development machine, ten securities, aggregate rate across all of them:
+Two settings decide what a shard can carry, and they bind in order: the media driver's threading
+mode, then the gateway's cluster egress channel. Everything below was measured on one node, with ten
+securities, and gives the aggregate rate across all of them.
+
+**Driver threading.** `SHARED` puts the media driver's conductor, sender and receiver on **one**
+thread. At ten securities that thread moves ~190 MB/s of loopback traffic and is what caps the shard
+first. Measured on a 14-core development machine:
 
 | `--driver-threading` | Sustained | p50 at 350,000/s |
 | --- | --- | --- |
@@ -376,6 +379,41 @@ five JVMs, and it needs the isolated cores of 3.4 to be worth having. So:
 - **Performance measurement and production** — `--driver-threading DEDICATED`, with the core
   allocation of 3.4 in place.
 
+**The egress channel.** With dedicated driver threads, the next cap is the stream that carries
+execution reports back to the gateway. Each order produces about 2.2 of them, ~350 bytes of egress
+against ~128 bytes of ingress. Over UDP, Aeron's sender puts out **at most one datagram of the
+channel's MTU (1,408 bytes by default) per publication per pass**. So egress is limited by datagrams
+per second, not by bytes. When it overflows, the engine's egress publication fills and the engine
+waits on it, and waiting reads as 100% busy (5.8). Measured on the same machine, same day:
+
+| `gateway.egressChannel` | Sustained | p50 at 650,000/s |
+| --- | --- | --- |
+| `aeron:udp?endpoint=host:0` (1,408 B datagrams, the default shape) | ~500,000 orders/s | 441 ms (a queue) |
+| `aeron:udp?endpoint=host:0\|mtu=8192` (8 KB datagrams) | at least 650,000/s; higher not measured | 82 µs |
+| **`aeron:ipc`** | **~1,500,000 orders/s**; 1,000,000/s held at an 83 µs median | 66–72 µs |
+
+**`aeron:ipc` is the highest-throughput setting there is**, and above ~1,500,000/s it's the engine's
+own thread that fills (5.7). It has one requirement: **the gateway must use the leader's media
+driver**, with `gateway.aeronDir` pointing at that node's driver directory. IPC does not cross from one
+media driver to another. The development stack and the e2e scripts already run their gateway on the
+shard's driver. So:
+
+- **A single-node shard** (development, performance measurement): `gateway.egressChannel=aeron:ipc`.
+  It always holds, because the one node always leads. The scripts take it as
+  `EGRESS_CHANNEL=aeron:ipc`.
+- **A multi-node cluster**: IPC egress holds only while the gateway's node leads. After a failover the
+  new leader cannot reach it, and that gateway's reports stop. The separate gateway tier of 3.2 uses
+  UDP egress. There, fewer and larger datagrams (`|mtu=8192`) are the lever that removed the same step
+  on loopback. On a real network an MTU above the link's needs jumbo frames end to end on the trading
+  VLAN, and that combination has not been measured.
+
+::: warning A 100% engine is not always a busy one
+The engine retries a full publication inside its work, so behind a full egress publication it reads
+99.9% busy and its `admit` and `match` stages look dearer, while doing nothing useful. Before
+concluding that the engine is the limit, read the egress publication's headroom (5.8, "A publication
+at its limit").
+:::
+
 ::: warning Do not dedicate the archive's threads on their own
 `--archive-threading DEDICATED` behind a `SHARED` driver is measurably **worse than both shared** —
 28.4 ms against 6,410 µs at 350,000/s, and saturated where the default was not — because it takes a
@@ -387,7 +425,8 @@ improves p50 at the edge 2.9x and moves the sustainable rate **not at all**.
 ::: note What "sustained" means here
 The figures above are the rate at which acknowledgements keep up. Above it the shard still accepts
 everything — nothing is rejected and nothing is dropped — and the latency becomes a queue that never
-drains: at 1,000,000 orders/s offered, every order was still answered, at a median of 462 ms. A rate
+drains: at 1,000,000 orders/s offered with UDP egress, every order was still answered, at a median
+of 462 ms. A rate
 above the knee therefore reports an *offer* rate and not a throughput, which is why `e2e/run-sweep.sh`
 marks such a row `SATURATED` (5.7).
 :::
@@ -438,7 +477,6 @@ at all, because it would look protected. Passwords are stored as BCrypt hashes i
 | `CONTROL_L1_CHANNEL` / `_STREAM` | `aeron:udp?endpoint=239.10.1.1:40001` / `1` | Last trade |
 | `CONTROL_DEPTH_PUBLISH_MS` | `250` | How often a conflated book image is pushed to browsers |
 | `CONTROL_DEPTH_MAX_LEVELS` | `25` | Depth per side in that image |
-
 | `CONTROL_CLUSTER_OPERATORCHANNEL_<shardId>` / `…OPERATORSTREAM_<shardId>` | the shard's order-entry endpoint | Where operator commands go (below) |
 
 **Operator commands go through a gateway that must be an operator.** Session transitions, purges,

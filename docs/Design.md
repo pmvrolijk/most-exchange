@@ -390,7 +390,10 @@ measured within one configuration.
 `DEDICATED` driver in genuine saturation comes back clean (C1 in Measurements.md): every stage — ingress,
 log, `commit-pos`, `rec-pos`, archive bytes, egress, both IPC streams — scales *exactly* with the offered
 rate, the archive's write time halves, and every duty-cycle and error counter reads zero. Aeron reports
-queues, positions and stalls; a stage that is merely **full** breaches none of them.
+queues, positions and stalls; a stage that is merely **full** breaches none of them. **Except the one
+that mattered:** C1 read the counters' *rates*, which do scale with the offered rate. The egress
+publication's *headroom* (`pub-lmt − pub-pos`, stream 102) is at zero in saturation, with the driver's
+sender a full 8 MB window behind the engine (Measurements.md E1–E14).
 
 Per-process CPU cannot finish the job either, because `engine`, `gateway` and `market-data` all use
 `BusySpinIdleStrategy` and therefore read ~100% of a core whether working or idling — the same reading
@@ -398,13 +401,15 @@ appears under `SHARED` at a rate 1.7x lower (C2). The one real signal there conf
 from a second instrument: the cluster-host takes ~1.6 cores under `SHARED` and ~3.7 under `DEDICATED`.
 
 What *is* known: matching is **~23% of the engine's core** at 600k/s (0.38 µs × 600k), so the rest of
-that thread is the `ClusteredServiceContainer`'s Aeron work rather than matching. Measuring the three
+that thread is ~~the `ClusteredServiceContainer`'s Aeron work rather than matching~~ spinning on a full
+egress publication (below). Measuring the three
 busy-spinning loops needs their own in-process metrics or a run with a yielding idle strategy, not a
 counter. ~~And the gateway is the stage with the least headroom by construction … the cheapest
 throughput lever available.~~ **Refuted by measurement:** two gateways knee no higher than one
 (Measurements.md R8–R11), and the one gateway is ~19% busy at the knee by its own histograms (A5).
 
-**On the development machine, what binds at ~550k/s is the core count.** Every loop on the order path
+~~**On the development machine, what binds at ~550k/s is the core count.**~~ **Superseded; see "What
+binds is the media driver's UDP sender" below.** Every loop on the order path
 now reports its duty cycle (§7, "Duty cycle"). Across 250k–700k/s the consensus module stays under
 20%, the gateway ~34%, market-data ~13%, the archive ~30%; the engine's service thread goes from 20%
 to 100% in one 50k/s step, with its median `newOrder` cost unchanged and its p90 ~10x, and not from
@@ -415,8 +420,8 @@ that loses. ~~**Where a host with a core for every spinning thread knees is unme
 whether the driver's sender, the one loop that never idles, is then the limit.~~ **Measured
 (Measurements.md L0–L4, A6–A10):**
 
-**With a core for every agent, the engine's service thread is still what binds, and the step is its
-own.** On a 16-core host with each agent thread pinned to a core of its own and nothing competing,
+~~**With a core for every agent, the engine's service thread is still what binds, and the step is its
+own.**~~ **Reversed the same day; the paragraph is kept as written.** On a 16-core host with each agent thread pinned to a core of its own and nothing competing,
 the engine's duty cycle is 49% at 200k/s and 100% at 300k/s, with its median `newOrder` cost flat —
 the laptop's one-step collapse without the laptop's core starvation. Core count moves *where* the
 step lands, not whether it happens. The driver's sender is not the limit: it spends ~2% of a core
@@ -427,6 +432,34 @@ thread's single-core speed — not the number of cores — the figure a throughp
 Huge pages (~3% per order) and storage (none) do not move it. **What fills the engine thread past the
 step is open**; its stages show multi-millisecond maximum stalls at every rate, and the service
 container's untimed Aeron work — log polling and egress publication — is the first suspect.
+
+**What binds is the media driver's UDP sender, and the engine only looks full** (Measurements.md
+E1–E14, and the counters of A8–A10). Aeron's sender puts out at most one datagram of ≤ MTU (1,408 B by
+default) per network publication per duty cycle. Every order puts ~350 B of execution reports on the
+egress stream (~2.2 reports), against ~128 B of ingress. When egress outgrows the sender's datagram
+rate, the egress publication's 8 MB window fills and the engine spins in `session.tryClaim`. That
+happens inside `onNewOrder`, where the duty cycle and the stage histograms both count it as work, and
+it lands in `admit` (the NEW report) and `match` (fill reports), not in `settle`. The engine's mean
+cost × rate accounts for its whole duty cycle, so no untimed service-container work is involved.
+
+That is the one-step collapse seen on both machines: below the sender's rate nothing spins, and above
+it every report does. **The knee is the sender's datagram rate:** ~142 MB/s of loopback UDP on a
+2.0 GHz Zen 3 (~275–300k/s aggregate) and ~250–310 MB/s on the M4 Pro (~550k/s). On loopback the
+sending core also pays for the receive path. Moving egress off UDP, or sending it in 8 KB datagrams,
+removes the step. The laptop then carries **650k/s aggregate with the engine at 26–35% of its core and
+a 66–84 µs median**, against a full window and 441 ms with 1,408 B datagrams at the same rate. Huge
+pages (~3% per order) and storage (none) do not move the UDP knee.
+
+**With egress on IPC, this section's target is met on one node** (Measurements.md I1–I3, U1, K1–K5).
+**1M/s aggregate across ten securities**, 100k/s each, is carried for 8 s at an 83 µs median and a
+177 µs p90. 1.2M/s runs at 98 µs and 278 µs. The knee is ~1.5M/s held and ~1.8M/s in a burst, against
+~0.5M/s with UDP egress on the same machine the same day. By 2.1M/s the **engine's service thread is
+genuinely full**: 0.43 µs a new order × 2.1M/s, with the gateway at 93% and the generator past its own
+limit. So the per-order budget above is what finally binds once the transport stops binding first.
+
+Two limits on that statement. It's single-node: log replication to followers goes over UDP through
+the same sender and is expected to meet the same datagram-rate limit. And IPC egress requires the
+gateway to share the leader's media driver.
 
 **The archive write is not the ceiling.** That experiment has been run: with the consensus log and
 archive on a RAM disk and the media-driver buffers left on the SSD, the round trip moves 2.6% at the
@@ -2439,6 +2472,11 @@ sender that rarely finds nothing to do reads ~90% at a quarter of the knee, and 
 iteration as the rate rises rather than running out of time. So ~100% says "never idle", and only
 with the rate held against it says "full".
 
+**Busy includes spinning on back-pressure.** The engine's report and book-event publication retry
+`tryClaim` inside the work, so a loop behind a full publication reads 100% busy while doing nothing
+useful. An engine at 100% can mean a full egress publication rather than matching; read the
+publication's headroom before concluding either (Measurements.md E1–E14).
+
 **And for the cluster host's agents a reading is not yet trustworthy at all.** On a Linux host with
 each agent on its own core (Measurements.md L0–L4), the sender and receiver read 92–97% while the
 kernel charges them ~2% of a core, parked in `BackoffIdleStrategy` — so most of what the wrapper
@@ -2903,17 +2941,33 @@ It found three defects that unit tests could not:
   **Refuted** (R8–R11, A5). **The duty-cycle counters then answered it for the development machine
   (D1–D2): no stage is full; the knee is where the shard's busy threads outnumber the performance
   cores.** ~~What remains open is the answer on a host with a core per spinning thread — paused until a
-  dedicated 16-core machine is available.~~ **Measured on one (L0–L4, A6–A10): the engine's service
+  dedicated 16-core machine is available.~~ ~~**Measured on one (L0–L4, A6–A10): the engine's service
   thread still binds, with a core of its own**, stepping from ~50% to 100% busy across one rate step
   while its median cost holds, and the driver's sender is ~2% of a core. The knee is set by the
-  engine thread's single-core speed. **Open in its place: what fills that thread past the step** —
-  multi-millisecond stalls across all three `newOrder` stages, and the untimed service-container work
-  around them.
+  engine thread's single-core speed.~~ **Reversed the same day (E1–E14): the engine is back-pressured,
+  not binding.** What binds, on both machines, is the driver's UDP sender's datagram rate on the egress
+  stream (§2, "What binds is the media driver's UDP sender"). With egress on IPC or in 8 KB datagrams
+  the laptop carries 650k/s with the engine at 26–35%. **Open in its place:**
+  - ~~where the knee is once egress no longer limits it~~ **measured** (§2): ~1.5M/s single-node with
+    IPC egress, the engine thread full by 2.1M/s. §2's 1M/s is met on one node with IPC egress, not
+    with UDP egress, and not yet multi-node;
+  - log replication to followers over UDP, which should meet the same datagram-rate limit unless the
+    log channel's MTU is raised (unmeasured);
+  - which egress configuration production should run: IPC egress needs the gateway on the leader's
+    media driver, and on a real NIC the MTU trade differs from loopback's;
+  - the 22–72 ms p99 tails in unsaturated runs.
+* **The engine cannot report its own back-pressure.** `backpressureStalls` counts one stall per
+  1,000,000 *consecutive* failed `tryClaim`s, and it read 0 through every saturated run in E1–E14, with
+  the engine spinning the whole time. A write-only count of every failed claim, egress and book events
+  separately, would make back-pressure visible on every run. It is metrics under §1's rule: never
+  read by a branch, never snapshotted.
 * **The cluster host's duty-cycle readings disagree with the kernel.** On a Linux host with pinned
   agents, the driver's sender and receiver read 92–97% of a core under `most cluster --duty` while
   `/proc` charges them ~2%, parked in `BackoffIdleStrategy` (§7, "Duty cycle"; Measurements.md L0–L4).
   Either the wrapper counts off-CPU time as busy for these agents or the counter's rate is misread.
-  D1's "sender ~98%" rests on the same instrument and is suspect until this is explained.
+  D1's "sender ~98%" rests on the same instrument and is suspect until this is explained. In E1–E14
+  the sender reads 95–98% in every arm, including one carrying only 70 MB/s of ingress, so the reading
+  says nothing about how much work the sender is actually doing.
 * ~~**The control plane over-reported feed gaps.**~~ **Fixed.** `ClusterLink` counted a sequence only
   in the four book events it decodes while the engine numbers all seven, so every order event read as
   a gap and a busy book reported continuous loss — which hid real loss rather than revealing it. The

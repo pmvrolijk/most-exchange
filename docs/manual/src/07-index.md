@@ -14,6 +14,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Archive <span class="ref">3.3, 3.6, <b>4.8</b>, 5.6</span></li>
 <li>Auction, opening <span class="ref">1.6, <b>5.4</b></span></li>
 <li>Auction, uncollared <span class="ref">5.4</span></li>
+<li>Back-pressure, cluster egress <span class="ref">4.8, <b>5.8</b></span></li>
 <li>Back-pressure, cluster ingress <span class="ref"><b>5.4</b>, 5.8</span></li>
 <li>Busy-spin idle strategy <span class="ref"><b>3.4</b>, 4.4, 5.8</span></li>
 <li>Cancel-only participant <span class="ref"><b>4.3</b>, 6.7</span></li>
@@ -39,7 +40,8 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Discovery broadcast <span class="ref">1.2, 2.5, <b>4.7</b>, 5.8</span></li>
 <li>Duty cycle <span class="ref">3.4, 4.4, 4.8, <b>5.8</b></span></li>
 <li>Dynamic MDC <span class="ref">2.9, 3.7</span></li>
-<li>Egress, cluster <span class="ref">4.5, 5.4</span></li>
+<li>Egress, cluster <span class="ref">4.5, <b>4.8</b>, 5.4, 5.7, 5.8</span></li>
+<li>Egress over IPC <span class="ref">3.2, 4.5, <b>4.8</b>, 5.7</span></li>
 <li>Expiry, order <span class="ref"><b>5.1</b>, 5.3</span></li>
 <li>Feed sequence <span class="ref"><b>5.5</b>, 6.6</span></li>
 <li>Fingerprint, registry <span class="ref">2.4, 4.3</span></li>
@@ -59,6 +61,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Idle strategy <span class="ref">2.9, <b>3.4</b>, 4.4, 4.5, 4.6</span></li>
 <li>IGMP querier <span class="ref">3.7, 6.6</span></li>
 <li>Ingress, cluster <span class="ref">3.6, 4.5, 4.9</span></li>
+<li>IPC egress, see Egress over IPC</li>
 <li>ISIN validation <span class="ref">4.2, 6.2</span></li>
 <li>L1 / L2 / L3 <span class="ref">1.2, <b>4.6</b>, 5.5</span></li>
 <li>Ladder, price <span class="ref"><b>4.2</b>, 5.4</span></li>
@@ -103,6 +106,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 
 <ul>
 <li>Threading modes <span class="ref">3.4, <b>4.8</b>, 5.7</span></li>
+<li>Throughput ceiling <span class="ref"><b>4.8</b>, 5.7, 6.9</span></li>
 <li>Tick size <span class="ref">1.5, 4.2</span></li>
 <li>Topology, draft <span class="ref">4.10, 4.11</span></li>
 <li>Trading date <span class="ref">5.1, 5.3</span></li>
@@ -224,7 +228,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>gateway.credentialToken</code> / <code>TokenFile</code> <span class="ref">4.5</span></li>
 <li><code>gateway.ingressChannel</code> <span class="ref">3.6, 4.5</span></li>
 <li><code>gateway.ingressEndpoints</code> <span class="ref">3.6, 4.5</span></li>
-<li><code>gateway.egressChannel</code> <span class="ref">4.5</span></li>
+<li><code>gateway.egressChannel</code> <span class="ref">4.5, <b>4.8</b></span></li>
 <li><code>gateway.client.inbound.*</code> <span class="ref"><b>4.5</b>, 3.2</span></li>
 <li><code>gateway.client.outbound.*</code> <span class="ref"><b>4.5</b></span></li>
 <li><code>gateway.metrics</code>, <code>.file</code> <span class="ref">4.5</span></li>

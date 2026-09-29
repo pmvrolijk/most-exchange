@@ -38,15 +38,29 @@ harmless — each cycle is staged and replaces the routing table wholesale, so a
 replaces a good table.
 
 **`gateway` is not on these machines and is not active/standby.** A gateway holds no per-order state,
-so co-locating one with a cluster node buys nothing: an `AeronCluster` client lists every member and
-follows the leader whether it sits beside it or a rack away. It is its own tier, sized and restarted
-independently of the Raft group.
+so co-locating one with a cluster node buys nothing for correctness: an `AeronCluster` client lists
+every member and follows the leader whether it sits beside it or a rack away. It is its own tier,
+sized and restarted independently of the Raft group.
+
+**Throughput is the one thing co-location would buy.** A gateway that shares the *leader's* media
+driver can take its cluster egress over IPC. That is the highest-throughput setting there is, about
+three times the UDP ceiling on the same machine (4.8). But it holds only while that node leads, so it
+is a question of where gateways run, not a switch to flip. See "Gateway placement for IPC egress" below.
 
 ::: warning Gateways must have disjoint client endpoints
 `gateway.client.inbound.channel` is a single address. Two gateways subscribed to **one** inbound
 channel each receive every order and forward both — that is duplicate orders, not redundancy. Give
 each gateway its own client endpoints and partition adapters across them. Losing one costs its
 adapters a reconnect and nothing else; a peer reports correctly on orders it never saw.
+:::
+
+::: todo Gateway placement for IPC egress
+A gateway on the leader's media driver with `gateway.egressChannel=aeron:ipc` raises the single-node
+ceiling from ~500,000 to ~1,500,000 orders/s (4.8). But when leadership moves, the new leader can't
+reach an IPC channel on another machine, and that gateway's execution reports stop: they're counted
+as undeliverable. Nothing has been designed or tested that follows the leader, for instance a gateway
+per node, with adapters moving to whichever one sits beside the leader. Until something is, this
+topology runs UDP egress and plans against 5.7's UDP rows.
 :::
 
 ::: todo The directory advertises one gateway per shard
@@ -107,7 +121,7 @@ Cores 0–1 are housekeeping — kernel, IRQs, ssh, metrics agents. Cores 2–13
 | 5, 6 | Archive conductor, recorder (`ArchiveThreadingMode.DEDICATED`) |
 | 7 | Consensus module |
 | **8** | **Engine service container — the matching thread** |
-| 9, 10 | Gateway, and its Aeron client conductor |
+| 9, 10 | Gateway and its client conductor, **only if** a gateway is co-located on the node for IPC egress (3.2, 4.8); spare in the separate-tier topology |
 | 11, 12 | Market-data, and its client conductor |
 | 13 | Discovery |
 
@@ -130,7 +144,7 @@ most cluster --members "$MEMBERS" --host shard0-a \
 ```
 
 **`--driver-threading DEDICATED` is worth 1.6x of throughput** and 81x of median latency at the edge
-(4.8). `--archive-threading DEDICATED` earns its place only *with* it and only with the cores above
+(4.8). The next ceiling after it is the gateway's egress channel (4.8, "The egress channel"). `--archive-threading DEDICATED` earns its place only *with* it and only with the cores above
 isolated — on shared cores it is measurably worse than leaving it alone.
 
 Idle strategies are configuration. The engine, gateway and market-data each take one —

@@ -404,7 +404,9 @@ Read it in this order:
    scheduled send. Quoting only the first is coordinated omission and hides exactly the queueing that
    appears at the rate you are trying to find.
 
-Run the generator on a separate machine, never on a cluster node.
+Run the generator on a separate machine, never on a cluster node. Above ~1,500,000/s one `most load`
+process is at its own limit (its pacing lateness passes 1 ms), so a knee measured there is partly the
+generator's.
 
 ### What a shard actually carries
 
@@ -414,25 +416,33 @@ them** — `SECURITIES=10 RATES=1000000` is 100,000/s per security.
 
 Measured, single node, ten securities, development machine with the desktop closed:
 
-| `--driver-threading` | Sustained (aggregate) | Per security |
+| Driver threading and egress | Sustained (aggregate) | Per security |
 | --- | --- | --- |
-| `SHARED` (default) | ~350,000 orders/s | ~35,000/s |
-| `DEDICATED` | ~550,000 orders/s | ~55,000/s |
+| `SHARED` driver, UDP egress (the defaults) | ~350,000 orders/s | ~35,000/s |
+| `DEDICATED` driver, UDP egress | ~500,000–550,000 orders/s | ~50,000–55,000/s |
+| `DEDICATED` driver, **IPC egress** | **~1,500,000 orders/s**; 1,000,000/s held for 8 s at an 83 µs median, 177 µs p90 | ~150,000/s |
 
-The `DEDICATED` figure is where the development laptop ran out of performance cores, not a limit of
-any stage (5.8, "How full each thread is"). A host with a core for every spinning thread has not yet
-been measured; do not assume the knee moves with it by any particular amount.
+**The UDP rows are where the driver's sender runs out of datagrams for execution reports**, and the
+engine waits behind it (4.8, "The egress channel"). They are not where the development laptop ran
+out of cores, as this section once said. A 16-core host with every thread on its own core measured
+the same limit lower, at ~275,000–300,000/s, because its cores are slower. **The IPC row is where the
+engine's own thread fills**: fully busy by ~2,100,000/s at 0.43 µs a new order, with the gateway close
+behind at 93%, and the laptop's cores and its one generator running out at the same time.
 
-**Plan capacity against these numbers, not against the design target** of 100,000/s per security
-across ten. Two findings behind them are worth carrying into any capacity conversation:
+**Plan capacity against the row for the configuration you actually run**, not against the design
+target of 100,000/s per security across ten. The target is met only in the IPC row, which needs the
+gateway on the leader's media driver (4.8), and only on one node. A multi-node cluster replicates the
+log to followers over UDP through the same sender, and has not been measured. Two findings behind
+these numbers are worth carrying into any capacity conversation:
 
 - **The ceiling is aggregate, not per security.** Ten books sustain the same *total* rate one book
   does; fan-out costs 8% of the work of a single order and buys no throughput. A shard is one
   thread's worth of shared path — one ingress, one consensus module, one archive, one log — and
   adding securities divides it rather than multiplying it.
-- **Matching is not the constraint.** The engine's own whole-message p50 is 0.38–0.50 µs, about 23% of
-  its thread at the ceiling; the rest of that thread is the Aeron plumbing around it. On the
-  development machine the ceiling itself was the core count (5.8).
+- **With UDP egress, matching is not the constraint.** The engine's own whole-message p50 is
+  0.38–0.50 µs, about 23% of its thread at the UDP ceiling. The rest of that thread is spent waiting
+  on a full egress publication (5.8). With IPC egress it is the constraint: the engine is the first
+  thread to fill.
 
 ::: warning A rate above the knee is a queue, not a latency
 Past the sustainable rate the shard still accepts everything — no rejects, no drops, every order
@@ -537,7 +547,7 @@ most counters --aeron-dir … --all --match 'luster|archive' # including the sti
 `--interval-ms` is the mode that finds things. A counter's value is rarely interesting; its slope
 usually is, and the shape to look for is **a position counter that stops advancing while the one
 feeding it does not**. Reach for this before theorising about where time goes — it is what identified
-the driver threading mode as the shard's ceiling (4.8).
+the driver threading mode, and then the egress channel, as the shard's ceilings (4.8).
 
 ::: warning A clean counter sheet does not mean nothing is saturated
 Aeron reports queues, positions, duty-cycle breaches and errors. A stage that is simply **full**
@@ -545,6 +555,18 @@ breaches none of them, so "every counter scaled with the offered rate and nothin
 threshold" narrows an answer to *not a buffer, a window, a disk or a stall* and no further. Nor can
 `top` finish the job: the engine, gateway and market-data busy-spin and read ~100% of a core whether
 working or idling (3.4). The next instrument after the counters is the duty cycle, below.
+:::
+
+::: warning A publication at its limit
+A publication's `pub-lmt` minus its `pub-pos` is how far its writer may still go. At zero the writer
+waits, and a writer that retries inside its work, as the engine does, waits **busy**. The engine's
+execution reports to the gateway are cluster egress, stream `102`. If its headroom is at zero and the
+driver's `snd-pos` for the same stream is megabytes behind `pub-pos`, while the receiving side has
+caught up, then the driver's sender is the stage that's full and the engine only looks full. That is
+the UDP ceiling of 4.8. `snd-bpe` doesn't show this: it counts the sender meeting the *receiver's*
+window. Sample the positions with
+`most counters --aeron-dir … --match 'pub-pos|pub-lmt|snd-pos|sub-pos' --all --interval-ms 3000`, or with
+`e2e/run-attribution.sh`'s `COUNTERS_MATCH`.
 :::
 
 ::: note A counter that moves non-linearly names a place to look, not a cause
@@ -591,20 +613,23 @@ two clock reads per loop iteration and changes nothing about how a thread idles,
 
 Read it like this:
 
-- **A thread that climbs with the rate and reaches ~100% is full.** That is how the engine's service
-  thread looks past the development machine's knee: 20% at 500,000/s, 99.9% one step later.
-- **The driver's sender and receiver read high from the start and are not full.** They drain whatever
-  has accumulated on each pass, so ~90% at a quarter of the knee means *never idle*, not *at capacity*.
-  Judge them by whether the reading keeps rising with the rate, not by its value.
+- **A thread that reaches ~100% is either full or waiting busy.** The engine's publication retries
+  inside its work, so behind a full egress publication it reads 99.9% while doing nothing useful. The
+  step at the development machine's UDP knee is exactly that: 20% at 500,000/s, 99.9% one step later.
+  Read the egress headroom (above) before calling the engine full.
+- **Do not judge the driver's sender or receiver by their duty cycle.** They read 90–98% at every rate
+  measured, including runs where the kernel charges the sender ~2% of a core and runs where it
+  carries a quarter of the traffic. So the reading says nothing about them yet; that is an open issue.
+  Judge the sender by its positions instead: `snd-pos` against `pub-pos` (above).
 - **A process spinning at a low duty is wasting a core.** On a machine without a core per thread that
   core is taken from somebody who needed it; set that process to `backoff` (3.4).
 
-::: warning On a machine with fewer cores than busy threads, the knee is the core count
-On the development laptop (10 performance cores) the shard stops keeping up at ~550,000/s not because
-a stage is full — the consensus module is under 20%, the gateway ~34%, market data ~13% — but because
-its busy threads outnumber the cores, and the engine, whose cost is cache misses, loses its core first.
-Its duty jumps to 100% while its median cost per order stays put. Setting the gateway and market data
-to `backoff` moved that knee up a step. A knee measured on such a machine describes the machine.
+::: warning On a machine with fewer cores than busy threads, cores decide where things break
+The development laptop's ~550,000/s knee was first read as its core count: busy threads outnumbering
+its 10 performance cores. It is the egress limit of 4.8. Setting the gateway and market data to
+`backoff` moved it up a step, most plausibly by giving the driver's sender a core. The core count does
+bind higher up: with IPC egress, above ~1,500,000/s the shard's busy threads outnumber the laptop's
+performance cores, and a knee measured there describes the machine as much as the shard.
 :::
 
 ### Who asked

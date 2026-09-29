@@ -12,16 +12,26 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
   harness, not the shard.
 - **Check the reject counts.** A `maxOrders` too small for the rate, or a band outside the static
   collar or the ladder, silently invalidates a run.
-- **State the scope.** Everything to date is single-node. R1 is one security; R2–R11 and L0–L4 are ten.
+- **State the scope.** Everything to date is single-node. R1 is one security; R2–R11, L0–L4, E1–E14, I1–I3, U1
+  and K1–K5 are ten. **Say which egress channel** (see "What E1–E14 say"): UDP egress knees near 0.5M/s,
+  IPC egress near 1.5M/s.
+- **Before calling a thread full, find out what it is waiting on.** The engine's duty cycle and its
+  `newOrder` histograms both count spinning on a full egress publication as work. Read the egress
+  publication's headroom (`pub-lmt − pub-pos`, stream 102; ≤ 0 is back-pressured) and how far the
+  driver's sender is behind it. `snd-bpe` is the sender's *receiver-window* limit, not the engine's,
+  and D1 read the wrong one — see "What E1–E14 say".
 - **A counter cannot see a full thread, and `ps` cannot see a busy-spinning one.** Aeron reports
   queues, positions and duty-cycle breaches, so a stage that is merely full breaches none of them; and
   `engine`, `gateway` and `market-data` all busy-spin, so their ~100% CPU carries no information about
   utilisation. Read their own histograms instead — see "What C1–C2 say".
 - **Say how many cores the shard had, and what else was spinning.** On the 10P+4E laptop the knee is
   where busy threads outnumber performance cores (D1–D2), so a knee is a property of the machine's
-  core count before it is one of the design. Freeing two spinning cores moved it one rate step. On a
+  core count before it is one of the design. Freeing two spinning cores moved it one rate step. ~~On a
   host with a core for every agent (L0–L4) the engine thread still steps from half-busy to full across
-  one rate step, so the step is the engine's, and the core count only decides where it lands.
+  one rate step, so the step is the engine's, and the core count only decides where it lands.~~
+  **Reversed (E1–E14):** on both machines the step is the driver's UDP sender falling behind egress,
+  and the engine spinning on the full publication. Cores matter to that sender's speed, not to the
+  engine's.
 - **A duty-ns counter on an Aeron agent is not CPU.** On the cloud host the driver's sender read 92–97%
   of a core while the kernel charged it ~2%, parked in `BackoffIdleStrategy`. Check an Aeron agent's
   duty against `/proc/<pid>/task/<tid>/stat` before reading it as fullness — see "What L0–L4 say".
@@ -117,6 +127,23 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
 | L4f | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,998/s | 53.0 µs | 1.82 ms | 11.7 ms | 53.3 µs | 11.9 ms | 181.6 µs | 2 | 0 |
 | L4g | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 200k/s | 199,999/s | 55.3 µs | 163.8 µs | 2.36 ms | 55.5 µs | 2.36 ms | 173.4 µs | 2 | 0 |
 | L4h | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,998/s | 49.7 µs | 661.5 µs | 5.01 ms | 50.0 µs | 5.01 ms | 170.1 µs | 2 | 0 |
+| I1a | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 700k/s | 700,275/s | 53.2 µs | 84.7 µs | 283.4 µs | 53.3 µs | 285.7 µs | 16.1 µs | 0 | 0 |
+| I1b | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 800k/s | 799,992/s | 55.7 µs | 88.6 µs | 496.1 µs | 55.8 µs | 514.3 µs | 18.4 µs | 1 | 0 |
+| I1c | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 900k/s | 900,081/s | 58.8 µs | 94.1 µs | 332.3 µs | 58.9 µs | 333.3 µs | 17.1 µs | 1 | 0 |
+| I1d | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1M/s | 999,990/s | 62.7 µs | 99.1 µs | 263.7 µs | 62.8 µs | 265.7 µs | 26.2 µs | 2 | 0 |
+| I1e | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1.2M/s | 1,200,465/s | 68.3 µs | 120.1 µs | 479.7 µs | 68.5 µs | 554.0 µs | 267.3 µs | 3 | 0 |
+| U1a | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, UDP egress | 10 | 500k/s | 499,997/s | 178.9 µs | 2.23 ms | 15 ms | 179.1 µs | 15 ms | 29.6 µs | 2 | 0 |
+| U1b | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, UDP egress | 10 | 600k/s | 600,236/s | 228 ms ✗ | 359 ms | 391 ms | 228 ms ✗ | 391 ms | 17.0 µs | 0 | 0 |
+| U1c | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, UDP egress | 10 | 700k/s | 700,275/s | 381 ms ✗ | 411 ms | 413 ms | 381 ms ✗ | 413 ms | 19.0 µs | 1 | 0 |
+| I2a | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 600k/s | 600,236/s | 52.5 µs | 91.9 µs | 360.4 µs | 52.6 µs | 361.5 µs | 16.0 µs | 2 | 0 |
+| I2b | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 800k/s | 799,992/s | 55.9 µs | 93.8 µs | 803.3 µs | 56.0 µs | 803.3 µs | 18.5 µs | 1 | 0 |
+| I2c | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 900k/s | 900,082/s | 57.5 µs | 95.1 µs | 1.75 ms | 57.6 µs | 1.75 ms | 32.3 µs | 1 | 0 |
+| I2d | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1M/s | 999,989/s | 59.1 µs | 92.1 µs | 259.3 µs | 59.2 µs | 264.2 µs | 28.5 µs | 2 | 0 |
+| I2e | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1.2M/s | 1,200,464/s | 70.9 µs | 131.3 µs | 15 ms | 71.1 µs | 15 ms | 266.8 µs | 3 | 0 |
+| I3a | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1.2M/s | 1,200,461/s | 75.4 µs | 165.0 µs | 3.17 ms | 75.7 µs | 3.17 ms | 241.9 µs | 2 | 0 |
+| I3b | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1.5M/s | 1,501,474/s | 81.3 µs | 149.5 µs | 462.1 µs | 81.7 µs | 468.5 µs | 364.8 µs | 0 | 0 |
+| I3c | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 1.8M/s | 1,801,762/s | 114.4 µs | 742.9 µs | 9.68 ms | 114.9 µs | 9.68 ms | 229.2 µs | 1 | 0 |
+| I3d | 2026-09-29 | `2021b61`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11, IPC egress | 10 | 2.5M/s | 2,499,235/s | 51.5 ms ✗ | 68.3 ms | 78.7 ms | 51.5 ms ✗ | 78.7 ms | 964.1 µs | 2 | 0 |
 
 **R1 conditions.** Single node, Aeron IPC throughout, JVM start scripts from `./gradlew installDist`.
 One security (AAPL), `maxOrders=1000000`, `levelCount=32768`, `tickSize=0.01`. Band 99.90–100.10
@@ -538,7 +565,9 @@ first suspect was egress back-pressure — the engine's report publish spins on 
 `backpressureStalls` counts only one stall per **1,000,000** consecutive retries, so a zero there
 proves little. Every Aeron counter was sampled at 500k and 550k/s to test it, and it is refuted: the
 sender's flow-control events *fall*, 16/s → 1/s, and nothing else that measures back-pressure, loss or
-retransmission rises.
+retransmission rises. **Reversed (E1–E3):** those flow-control events (`snd-bpe`) are the sender
+meeting the *receiver's* window. The engine's limit is the egress publication's `pub-lmt`, and at
+550k/s the engine is sitting on it with the sender a full 8 MB window behind.
 
 **What is left is where the thread runs.** The machine is 10 performance cores plus 4 efficiency
 cores. At 550k/s the shard wants the driver's sender and receiver near full, the engine, gateway and
@@ -564,6 +593,10 @@ engine. D2a's pacing lateness (3.8 ms, which `run-sweep.sh` would mark `INVALID`
 generator was starved of CPU in the same run, which is the same symptom seen from outside the shard.
 D2d/D2f then saturate again, one step further up, the same way.
 
+**Superseded by E1–E14** (the paragraph is kept as it was written). What binds at ~550k/s is the
+driver's UDP sender, one ≤1,408 B datagram per publication per duty cycle, and the engine is
+back-pressured behind it. Freeing two cores (D2) most plausibly helped that sender.
+
 **What this settles.** On this laptop the knee is **where the shard's busy threads outnumber the
 performance cores**, and the engine is the thread that falls over first because its cost is
 cache-bound — not a stage of the design running out of capacity. Every knee in this file from R7 on
@@ -587,7 +620,7 @@ back-pressure counter sample 17:40–17:43, D2 17:43–17:48, 2026-09-27.
 
 ---
 
-## What L0–L4 say: a core for every thread, and the engine still steps
+## What L0–L4 say: a core for every thread — and the step turned out to be egress
 
 The question D1–D2 left: where does the shard knee when core count is not the limit, and is the
 driver's sender then what binds? Asked on a cloud host (`deploy/cloud/`) with **16 physical cores and
@@ -606,9 +639,17 @@ here against 0.38–0.58 µs on the M4 Pro (A6, A8–A10 against A1–A5). **Hug
 engine with `-XX:+UseTransparentHugePages` (its pool is an on-heap `LongArray`) was ~3% cheaper per
 order at 200k/s (1.3 vs 1.4 µs; duty 47.5% vs 49.0%, two interleaved repeats each) and saturated at
 300k/s exactly as the control did. **Storage is not it** either, again: L4a/L4b put the log and
-archive on the cloud disk and on `/dev/shm` and the RAM arm was no better.
+archive on the cloud disk and on `/dev/shm` and the RAM arm was no better. **Corrected the same day
+(see "What E1–E14 say"):** the knee is where the driver's sender stops keeping up with egress. That's
+142 MB/s of loopback UDP here, against ~250–310 MB/s on the laptop. The engine's per-order cost is also
+slower here, but it doesn't set the knee.
 
-**The thread that saturates is still the engine's**, with a core to itself. Its duty cycle is 26% at
+**Reversed (E1–E14; A10's own counters already showed it). The paragraph below is kept as written.**
+The engine's thread reads 100% because it spins on a full egress publication. Its *mean* `newOrder`
+(3.19 µs at 300k/s against 2.38 at 200k/s) × rate accounts for the whole duty cycle, so the rise is
+inside the handler, in the two stages that publish execution reports.
+
+~~**The thread that saturates is still the engine's**~~, with a core to itself. Its duty cycle is 26% at
 100k/s, 49% at 200k/s and **100% at 300k/s** (A6–A10, THP control) — not the ~73% the per-order cost
 predicts — while its median `newOrder` holds at 1.3–1.4 µs. That is D1's shape, the same one-step
 collapse, on a machine where nothing competes for the core. **So D1–D2's reading was incomplete**: core
@@ -618,7 +659,9 @@ stage histograms show multi-millisecond maxima in `admit`, `match` and `settle` 
 2.7–7.8 ms at every rate), which says stalls on the thread rather than dearer work; the service
 container's own Aeron work — polling the log, publishing egress — is untimed and is the first suspect.
 
-**The driver's sender is not the limit.** The kernel charges it **~2% of a core** at 100k/s (2 ticks in
+~~**The driver's sender is not the limit.**~~ **Reversed: at the knee it is.** The ~2% below is a
+100k/s figure, far below the knee, and it was generalised to the knee without being measured there.
+The kernel charges it **~2% of a core** at 100k/s (2 ticks in
 a second from `/proc/<pid>/task/<tid>/stat`), and five kernel-stack samples and a `jstack` all found it
 parked in `BackoffIdleStrategy` — Aeron's default, since `most cluster` sets no driver idle strategy.
 The conductor, archive and consensus module are the same: ~1,200 voluntary context switches a second
@@ -627,8 +670,8 @@ each, cores 97–99% idle by `mpstat`.
 **Which exposes an instrument problem.** Those same agents' `duty-ns` counters read **92–97% of a
 core** for the sender and receiver (A6–A10), against the kernel's ~2%. `DutyCycleIdleStrategy` is
 specified to exclude time inside the delegate. The engine's reading is at least consistent with its
-own histograms (26% at 100k/s against ~14% spent inside `newOrder`, the rest untimed service-container
-work), though for a busy-spinning thread nothing in the kernel can corroborate it; the cluster host's
+own histograms (26% at 100k/s against 25% from the *mean* `newOrder` × rate; the first version of
+this sentence used the median and read ~14%), though for a busy-spinning thread nothing in the kernel can corroborate it; the cluster host's
 agents park, so for them the kernel can, and it disagrees. It is **unexplained**, and it bears on D1: "the driver's sender reads ~98%
 throughout" was read as a batching loop that never idles, and may instead be this. Until it is
 resolved, a cluster-host duty reading is corroborated against kernel CPU time or not quoted.
@@ -666,6 +709,182 @@ static collar, `maxOrders=1000000` per security. Sweeps: metrics off, 300,000 or
 (pacing p99.9 1.0 ms). Attribution: metrics and stages on, 8 s of load per rate, A8–A10 with every
 Aeron counter sampled. L4a/b are each the second of two interleaved repeats (the first repeats'
 figures were not captured); L4c–h are in time order. 2026-09-29, 19:45–20:25 UTC.
+
+---
+
+## What E1–E14 say: the step is the driver's UDP sender, and the engine only looks full
+
+**The evidence was already in A8–A10.** Two things in the files L0–L4 produced reverse its reading.
+
+| | 200k/s (A8) | 300k/s (A10) |
+| --- | --- | --- |
+| `newOrder` mean / admit / match / settle | 2.38 / 0.68 / 1.00 / 0.55 µs | **3.19 / 1.12 / 1.40** / 0.54 µs |
+| mean × rate against duty cycle | 47.7% against 49.0% | 96% against 100% |
+| egress headroom, `pub-lmt − pub-pos` (stream 102) | 8.39 MB | **−128 B** |
+| driver's sender behind the engine | 160 B | **8.39 MB**, a full window |
+| gateway behind the sender | 160 B | 0 (`rcv-pos` = `rcv-hwm` = `sub-pos` = `snd-pos`) |
+| sender's receiver-window room / limit events | — | 118 KB / 23 per s |
+| engine's log subscription behind the log | 256 B | **17.5 MB** (the ~0.5 s client latency) |
+| short sends, loss-gap fills, NAKs per s | 0 | 0 |
+
+The engine's time is inside `onNewOrder` (mean × rate accounts for the duty cycle), and the rise at
+300k/s is in `admit` (the NEW report) and `match` (the fill reports), not in `settle`, whose only
+routine publication is `OrderAdded` to market-data over IPC. At the same moment the engine's egress
+publication is at its limit, with the driver's sender a full 8 MB window behind it. The receiving
+side has caught up with everything sent, and the sender has flow-control room, so the backlog sits in
+the sender. `session.tryClaim` (`MatchingEngineService.sendExecutionReport`) retries in a tight loop
+with no idle, so the spin is counted as work by the duty cycle and by the stage histograms alike.
+`backpressureStalls` counts one stall per million *consecutive* retries and read 0 throughout.
+
+**Why the sender.** In Aeron 1.53, `NetworkPublication.sendData` scans at most
+`min(senderLimit − senderPosition, mtuLength)`. So the sender puts out one datagram of at most
+1,408 B per publication per duty cycle, and on loopback the sending core also pays for the receive
+path. Execution reports are ~2.2 per order and ~350 B of egress per order, against ~128 B of ingress.
+Egress is what outgrows the sender.
+
+**E1–E14 test it on the laptop**, where D1 saw the same step at ~550k/s. They are
+`run-attribution.sh` runs, and the new `EGRESS_CHANNEL` knob sets the gateway's cluster egress channel:
+
+| # | egress | rate | newOrder / admit / match / settle (µs) | headroom | sender behind | engine duty | bytes sent | client p50 / p90 / p99 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| E1 | UDP, 1,408 B | 500k/s | 0.97 / 0.32 / 0.40 / 0.21 | 7.50 MB | 885 KB | 47.0% | 241 MB/s | 16.9 / 73.0 / 102 ms |
+| E2 | UDP, 1,408 B | 550k/s | 1.81 / 0.70 / 0.80 / 0.28 | 10 KB | 8.38 MB | 99.9% | 254 MB/s | 304 / 425 / 456 ms |
+| E3 | UDP, 1,408 B | 550k/s | 1.78 / 0.69 / 0.79 / 0.27 | −32 B | 8.38 MB | 99.9% | 257 MB/s | 215 / 279 / 284 ms |
+| E4 | **IPC** | 550k/s | **0.52** / 0.14 / 0.19 / 0.15 | 31.4 MB | — | **29.8%** | 70 MB/s | **66 µs** / 135 µs / 27 ms |
+| E5 | **UDP, 8 KB** | 550k/s | **0.45** / 0.11 / 0.15 / 0.15 | 8.39 MB | **0** | **26.3%** | 262 MB/s | **80 µs** / 144 µs / 65 ms |
+| E6 | UDP, 1,408 B | 650k/s | 1.53 / 0.57 / 0.67 / 0.26 | 832 B | 8.39 MB | 99.9% | 309 MB/s | 441 / 442 / 449 ms |
+| E7 | **IPC** | 650k/s | **0.51** / 0.15 / 0.19 / 0.14 | 30.3 MB | — | **35.2%** | 83 MB/s | **66 µs** / 135 µs / 24 ms |
+| E8 | **UDP, 8 KB** | 650k/s | **0.44** / 0.11 / 0.15 / 0.15 | 8.39 MB | **0** | **29.4%** | 310 MB/s | **83 µs** / 149 µs / 72 ms |
+| E9 | UDP, 1,408 B | 550k/s | 1.82 / 0.70 / 0.80 / 0.28 | 2.5 KB | 8.38 MB | 99.9% | 245 MB/s | 415 / 522 / 522 ms |
+| E10 | **IPC** | 550k/s | **0.55** / 0.16 / 0.21 / 0.15 | 32.2 MB | — | **31.6%** | 70 MB/s | **67 µs** / 155 µs / 22 ms |
+| E11 | **UDP, 8 KB** | 550k/s | **0.47** / 0.11 / 0.17 / 0.17 | 8.39 MB | **0** | **26.1%** | 262 MB/s | **84 µs** / 195 µs / 50 ms |
+| E12 | UDP, 1,408 B | 650k/s | 1.53 / 0.56 / 0.67 / 0.27 | 672 B | 8.37 MB | 99.9% | 310 MB/s | 441 / 443 / 449 ms |
+| E13 | **IPC** | 650k/s | **0.52** / 0.15 / 0.19 / 0.14 | 32.8 MB | — | **34.8%** | 83 MB/s | **72 µs** / 184 µs / 54 ms |
+| E14 | **UDP, 8 KB** | 650k/s | **0.45** / 0.11 / 0.15 / 0.16 | 8.39 MB | **0** | **30.5%** | 310 MB/s | **82 µs** / 144 µs / 39 ms |
+
+Means from each run's `engine-latency.hgrm` footer. Headroom and "sender behind" are stream 102's
+`pub-lmt − pub-pos` and `pub-pos − snd-pos`, sampled over the middle 40% of the load. "Bytes sent"
+is the driver-wide counter (egress plus ingress; ingress only under IPC egress). Client latency is
+`most load`'s response time, which equals its service time in every row. Duty is the engine service
+thread's `duty-ns`.
+
+**The prediction held in every run.** Every UDP run with 1,408 B datagrams at or above 550k/s (E2, E3,
+E6, E9, E12) sits on a full egress window, with the sender 8.4 MB behind and the engine at 99.9%. The
+cost jump is in `admit` and `match`. At 500k/s (E1) the sender is already 885 KB behind but the
+window isn't full. **Egress over IPC** (E4, E7, E10, E13) takes execution reports off the sender
+altogether. The engine then costs 0.51–0.55 µs a new order and runs at 30–35% of its core at 550k and
+**650k/s**, with a p50 of 66–72 µs. **8 KB datagrams over the same UDP** (E5, E8, E11, E14) move the
+same 262–310 MB/s with the sender caught up (0 behind) and the engine at 26–31%. So **the ceiling is
+datagrams per second, not bytes**.
+
+**What this re-reads.** D1's step at ~550k/s is this back-pressure. Its refutation read `snd-bpe`,
+which is the receiver-window limit, not the engine's. D2's "freeing two cores moved the knee" fits a
+sender short of CPU. R7's SHARED→DEDICATED gain is the send path getting a thread of its own. L0–L4's
+~275–300k/s is the same thing at 142 MB/s on a slower core. A saturated UDP run's latency is a
+standing queue: E6 and E12 read 441–449 ms at p50, p90 and p99 alike, every buffer from the log back
+to the gateway full. In such a run, `newOrder`'s mean is 1 s divided by the orders drained, which is
+why it reads *lower* at 650k/s than at 550k/s.
+
+**What it does not settle.**
+- ~~**Where the knee is with egress on IPC or 8 KB datagrams.** 650k/s was comfortable. The next ceiling
+  is unmeasured, and so is Design.md §2's 1M/s at full fan-out.~~ **Measured for IPC egress: see
+  "What I1–I3, U1 and K1–K5 say".** Not measured for 8 KB datagrams beyond 650k/s.
+- **The tails.** Every unsaturated arm has a p99 of 22–72 ms against a p50 near 70 µs. That's a
+  separate question, perhaps pauses in a JVM or the laptop's core count.
+- **The lever for production.** IPC egress needs the gateway on the cluster node's own media driver,
+  which holds only while that node leads. The MTU is a channel setting, but on a real NIC the receive
+  path is no longer charged to the sender's core as it is on loopback.
+- **CPU-bound or cadence-bound.** Whether the sender is short of CPU for its syscalls, or limited by
+  the one-datagram-per-cycle structure, would take a `/proc` read of the sender at the knee.
+- **The duty-cycle disagreement for the cluster host's agents** (Design.md §8). The sender reads 95–98%
+  in every arm here, E4's ingress-only 70 MB/s included, so that counter is insensitive to what the
+  sender actually does.
+- **A second-order effect, unproven:** the engine is cheapest with 8 KB UDP (0.44–0.47 µs), cheaper than
+  with IPC (0.51–0.55 µs). Under IPC the busy-spinning gateway reads the engine's publication tail
+  directly, so contended cache lines are a candidate explanation.
+
+**Conditions (E1–E14).** Apple M4 Pro, 14 cores (10P+4E), macOS 15.7.9, OpenJDK 21.0.11, commit
+`2021b61`+ (the `+` is the `EGRESS_CHANNEL` knob only). Single node, `DRIVER_THREADING=DEDICATED`,
+archive `SHARED`, ten securities, `run-attribution.sh` with metrics and stages on, `ORDERS` = rate ×
+8 (8 s of load), band 99.90–100.10, `maxOrders=1000000` per security. Counters sampled mid-load
+(`COUNTERS_MATCH='duty|pub-pos|pub-lmt|snd-pos|snd-lmt|sub-pos|rcv-pos|Bytes sent'`). `EGRESS_CHANNEL` is
+`aeron:udp?endpoint=localhost:0` (UDP, 1,408 B), `aeron:ipc`, or `aeron:udp?endpoint=localhost:0|mtu=8192`
+(lo0's MTU is 16384 and `net.inet.udp.maxdgram` 9216). Firefox was closed first and the Docker
+containers were idle (<0.3%). The load average of 3.8–7.1 is the runs' own residue, back to back.
+E1–E2 23:25–23:27, E3–E14 interleaved 23:27–23:36 (local time), 2026-09-29.
+
+---
+
+## What I1–I3, U1 and K1–K5 say: with egress on IPC the knee is ~1.5M/s, and at 2.1M/s the engine is full
+
+**The question.** E1–E14 showed that IPC egress removes the step at 550k and 650k/s. Where does the
+shard stop now? `run-sweep.sh` was run with `EGRESS_CHANNEL=aeron:ipc`, twice from 600k/s to 1.2M/s
+(I1, I2) and once from 1.2M/s to 2.5M/s (I3), with a same-day UDP-egress control sweep between them
+(U1). Each used 2,000,000 orders per rate rather than the default 300,000, because the E-series showed
+that a ~0.5 s burst can hide saturation that a longer run exposes. Then `run-attribution.sh` held
+single rates for 8 s at 1.0M and 1.2M/s and for 4 s at 1.5M, 1.8M and 2.1M/s (K1–K5), with every
+duty cycle and the stream positions sampled.
+
+**The sweeps.** The UDP control knees between 500k/s (U1a: p50 179 µs, p99 15.0 ms) and 600k/s (U1b,
+`SATURATED`). With IPC egress, every valid rate up to **1.8M/s aggregate** kept up. The p50 ran from
+53 µs at 700k/s to 115 µs at 1.8M/s, and **1M/s held a 59–63 µs p50 and a 259–266 µs p99** (I1d, I2d).
+The first IPC rate to saturate was 2.5M/s (I3d: p50 51.5 ms). One rate per sweep was `INVALID` on the
+generator's pacing and is not recorded: 600k/s in I1, 700k/s in I2, and 2.1M/s in I3 (pacing p99.9
+1.09 ms, p50 557 µs).
+
+**Held for seconds rather than a burst:**
+
+| # | rate | load | newOrder mean | engine / gateway / md duty | egress headroom | engine behind on log | client p50 / p90 / p99 | pacing p99.9 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| K1 | 1.0M/s | 8 s | 0.49 µs | 52% / 62% / 23% | 31.6 MB | 5 KB | **83 µs / 177 µs** / 44 ms | 133 µs |
+| K2 | 1.2M/s | 8 s | 0.48 µs | 60% / 70% / 27% | 30.9 MB | 2 KB | **98 µs / 278 µs** / 58 ms | 469 µs |
+| K3 | 1.5M/s | 4 s | 0.48 µs | 73% / 82% / 33% | 32.5 MB | 0 | 150 µs / 76 ms / 87 ms | 1.41 ms ✗ |
+| K4 | 1.8M/s | 4 s | 0.45 µs | 88% / 92% / 40% | 31.8 MB | 1 KB | 491 µs / 111 ms / 126 ms | 3.74 ms ✗ |
+| K5 | 2.1M/s | 4 s | 0.43 µs | **99.7%** / 93% / 48% | 32.7 MB | **20.9 MB** | 99.5 ms (saturated) | 2.27 ms ✗ |
+
+✗ = the generator's pacing broke the 1 ms limit that `run-sweep.sh` enforces. Those rows measured
+the harness as well as the shard. There were no rejects in any row, and 2–3 of 6–9.6M orders went
+unanswered in each. Ingress headroom was 8.39 MB at every sample. Duty and headroom were sampled over
+the middle 40% of the load; latency is the response time, which equals service time throughout.
+
+**What binds.** At 2.1M/s it's the **engine's service thread, and this time genuinely.** Egress and
+ingress both have megabytes of headroom, and the engine is 20.9 MB behind on its input log. Its mean
+cost of 0.43 µs a new order × 2.1M/s fills the core (stages on; four clock reads of ~37 ns are inside
+that figure). The gateway is right behind it at 93%. Between 1.5M and 2.1M/s three things overlap and
+this machine can't separate them:
+- the one `most load` process is past its own pacing limit;
+- the shard's busy threads outnumber the 10 performance cores again, the D1–D2 regime this time for
+  real;
+- the engine and gateway are approaching full.
+
+K3's p90 of 76 ms at 1.5M/s, against I3b's 150 µs in a 1.3 s burst, is the difference between a burst
+and a held rate. The gateway's `clusterBackpressure` (offers refused by the cluster ingress) is 61 at
+1.0M/s, 92k at 1.2M/s, 548k at 1.5M/s and 2.4M at 2.1M/s. That's ingress refusing in bursts, sampled
+headroom notwithstanding, and it grows with the rate.
+
+**So, on this laptop, single node, with egress on IPC:** 1.0M/s aggregate (Design.md §2's 100k/s per
+security at full fan-out) is carried for 8 s with a p50 of 83 µs and a p90 of 177 µs, and 1.2M/s with
+98 µs and 278 µs. The knee is ~1.5M/s held, ~1.8M/s in a burst. By 2.1M/s the engine thread itself is
+full. **With UDP egress the same machine knees at ~0.5M/s** (U1, E1–E3).
+
+**What it does not say.**
+- **This is not multi-node.** A 3-node cluster sends the log to each follower over UDP (~128 B per
+  order per follower) through the same driver sender. With 1,408 B datagrams, the datagram-rate limit
+  of E1–E14 should return there. That's a prediction, not a measurement.
+- **Where production's gateway is.** IPC egress needs the gateway on the leader's media driver, which
+  the production topology in the Operator's Manual (§3.2) doesn't have.
+- **The p99 tails** of 44–58 ms in K1–K2 are the same unexplained tails as E1–E14's.
+- **A host with a core per thread and a second generator** is what would separate the engine, the
+  gateway and the harness above 1.5M/s.
+
+**Conditions (I1–I3, U1, K1–K5).** As E1–E14: Apple M4 Pro, 14 cores (10P+4E), macOS 15.7.9, OpenJDK
+21.0.11, commit `2021b61`+ (the `+` is the `EGRESS_CHANNEL` knob and uncommitted documents; no source
+change). Single node, `DRIVER_THREADING=DEDICATED`, archive `SHARED`, ten securities, band
+99.90–100.10, `maxOrders=1000000` per security, one `most load` process through one gateway. The
+sweeps ran metrics off, 2,000,000 orders per rate, 200,000-order discard pass first. K1–K5 ran
+`run-attribution.sh`, metrics and stages on, `ORDERS` = rate × seconds. Firefox closed, the Docker
+containers idle. The load average of 1–6 is the runs' own residue, back to back. Sweeps 23:50–23:55,
+K3–K5 23:56–23:58, K1–K2 23:58–00:00 local time, 2026-09-29/30.
 
 ---
 

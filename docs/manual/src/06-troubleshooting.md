@@ -138,7 +138,7 @@ The scheduler will not do this for you, by design (5.2).
 | Reports stop arriving but orders are accepted | `droppedToClient` is climbing: the outbound subscriber is gone or too slow |
 | Orders are accepted but nothing matches | The phase is not `CONTINUOUS`. Booking without matching is correct in `PRE_OPEN` and `OPEN_AUCTION` |
 | A crossed book that never uncrosses | `CONTINUOUS` was reached from somewhere other than `OPEN_AUCTION`, so the uncross never ran |
-| Everything is slow, but nothing is rejected, dropped or unanswered | The shard is past its sustainable rate and you are measuring a backlog. Check the offered rate against 5.7, and check `--driver-threading` — on the default `SHARED` the ceiling is 1.6x lower than it needs to be (4.8) |
+| Everything is slow, but nothing is rejected, dropped or unanswered | The shard is past its sustainable rate and you are measuring a backlog. Check the offered rate against 5.7, and check `--driver-threading` — on the default `SHARED` the ceiling is 1.6x lower than it needs to be (4.8). Then check the egress publication's headroom: at zero, with the driver's sender behind, the UDP egress channel is the limit and the engine only looks full (4.8, 5.8) |
 | Latency degrades suddenly rather than gradually | Expected. The knee is abrupt: there is no gentle degradation to alert on before it becomes a stall, which is why the offered rate has to be watched rather than inferred from latency |
 
 ::: note An anonymous gateway can only reach a node without a registry
@@ -286,9 +286,10 @@ market-data: stopped. gaps=0 missed=0 foreignShard=0 droppedL1=0 droppedL2=0 dro
 | --- | --- | --- |
 | Order entry | No bulk cancel of one participant's resting orders, so revoking one relies on it withdrawing them from `cancelOnly` | 1.7, 6.7 |
 | Cluster host | Member id is hardcoded to 0; no `--member-id` | 3.6 |
-| Capacity | A shard sustains ~350,000 orders/s aggregate on the default threading and ~550,000 with `DEDICATED`, against a design target of 100,000/s per security across ten. What binds above that is measured not to be matching, storage or the ingress buffer, and is not yet identified | 4.8, 5.7 |
+| Capacity | With UDP egress a shard sustains ~350,000 orders/s aggregate on the default threading and ~500,000–550,000 with `DEDICATED`. The driver's UDP sender on egress sets that limit. With IPC egress it sustains ~1,500,000, and there the engine thread fills first. The design target of 100,000/s per security across ten is met only with IPC egress, only on one node, and IPC egress needs the gateway on the leader's media driver. Multi-node log replication over UDP is unmeasured | 4.8, 5.7 |
+| Gateway placement | Nothing keeps IPC egress working across a failover: a gateway that follows the leader is neither designed nor tested | 3.2, 4.8 |
 | Build | `engine.march` is x86-only | 3.10 |
-| Discovery | One order-entry channel per shard, so several gateways cannot be advertised individually. Also the cheapest way to raise the capacity ceiling above, since the gateway is one thread carrying every order in and every report out | 3.2, 5.7 |
+| Discovery | One order-entry channel per shard, so several gateways cannot be advertised individually. Not a capacity lever below ~2,000,000/s: a second gateway raised no ceiling, and the one gateway reaches 93% only at ~2,100,000/s with IPC egress | 3.2, 5.7 |
 | Market data | A feed is one channel; multicast and dynamic MDC cannot coexist | 3.7 |
 | All processes | No health or metrics endpoint; monitoring is log lines and shutdown counters | 5.8 |
 | Boot | Processes do not verify the release fingerprint they read against what was published | 4.11 |

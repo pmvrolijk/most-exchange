@@ -12,14 +12,19 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
   harness, not the shard.
 - **Check the reject counts.** A `maxOrders` too small for the rate, or a band outside the static
   collar or the ladder, silently invalidates a run.
-- **State the scope.** Everything to date is single-node. R1 is one security; R2–R11 are ten.
+- **State the scope.** Everything to date is single-node. R1 is one security; R2–R11 and L0–L4 are ten.
 - **A counter cannot see a full thread, and `ps` cannot see a busy-spinning one.** Aeron reports
   queues, positions and duty-cycle breaches, so a stage that is merely full breaches none of them; and
   `engine`, `gateway` and `market-data` all busy-spin, so their ~100% CPU carries no information about
   utilisation. Read their own histograms instead — see "What C1–C2 say".
 - **Say how many cores the shard had, and what else was spinning.** On the 10P+4E laptop the knee is
   where busy threads outnumber performance cores (D1–D2), so a knee is a property of the machine's
-  core count before it is one of the design. Freeing two spinning cores moved it one rate step.
+  core count before it is one of the design. Freeing two spinning cores moved it one rate step. On a
+  host with a core for every agent (L0–L4) the engine thread still steps from half-busy to full across
+  one rate step, so the step is the engine's, and the core count only decides where it lands.
+- **A duty-ns counter on an Aeron agent is not CPU.** On the cloud host the driver's sender read 92–97%
+  of a core while the kernel charged it ~2%, parked in `BackoffIdleStrategy`. Check an Aeron agent's
+  duty against `/proc/<pid>/task/<tid>/stat` before reading it as fullness — see "What L0–L4 say".
 - **Say which driver threading mode.** `SHARED` (the default) and `DEDICATED` differ by 1.6x in
   throughput and 81x in p50 at the edge. A figure without it is not comparable — see "What R7 says".
 - **Fill in the `idle` column honestly, and take a same-day baseline.** R2–R4's knee was 15% low
@@ -84,6 +89,34 @@ The `perf-claim` skill (`.claude/skills/perf-claim/`) is the procedure. In short
 | R11d | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 600k/s | 600,226/s | 26.9 ms | 43.5 ms | 49.0 ms | 26.9 ms | 49.0 ms | 24.7 µs | 1 | 0 |
 | R11e | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 650k/s | 650,175/s | 74.3 ms | 112 ms | 119 ms | 74.3 ms | 119 ms | 30.5 µs | 0 | 0 |
 | R11f | 2026-09-27 | `ba5c605`+ | Apple M4 Pro, macOS 15.7.9 | 14 (10P+4E) | **yes** | JVM 21.0.11 | 10 | 700k/s | 700,254/s | 106 ms | 139 ms | 146 ms | 106 ms | 146 ms | 16.5 µs | 0 | 0 |
+| L0a | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 300k/s | 300,014/s | 39.3 ms ✗ | 58 ms | 60.4 ms | 39.3 ms ✗ | 60.4 ms | 236.9 µs | 0 | 0 |
+| L0b | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 400k/s | 399,954/s | 202 ms ✗ | 243 ms | 248 ms | 202 ms ✗ | 248 ms | 348.4 µs | 1 | 0 |
+| L0c | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 500k/s | 499,961/s | 296 ms ✗ | 331 ms | 335 ms | 296 ms ✗ | 335 ms | 217.0 µs | 0 | 0 |
+| L1a | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 150k/s | 150,012/s | 46.3 µs | 158.6 µs | 1.69 ms | 46.5 µs | 1.7 ms | 125.9 µs | 0 | 0 |
+| L1b | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,993/s | 49.8 µs | 433.9 µs | 2.23 ms | 50.1 µs | 2.23 ms | 227.1 µs | 1 | 0 |
+| L1c | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 225k/s | 225,015/s | 55.9 µs | 1.36 ms | 2.91 ms | 56.1 µs | 2.91 ms | 203.6 µs | 0 | 0 |
+| L1d | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 250k/s | 249,990/s | 66.0 µs | 2.03 ms | 4.56 ms | 66.2 µs | 4.56 ms | 191.7 µs | 0 | 0 |
+| L1e | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 275k/s | 275,012/s | 98.3 µs | 2.5 ms | 6.06 ms | 100.5 µs | 6.06 ms | 197.1 µs | 0 | 0 |
+| L1f | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 300k/s | 300,012/s | 3.39 ms | 10.8 ms | 14.6 ms | 3.39 ms | 14.6 ms | 199.4 µs | 0 | 0 |
+| L2a | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 150k/s | 150,012/s | 46.8 µs | 177.7 µs | 1.8 ms | 47.0 µs | 1.8 ms | 165.6 µs | 0 | 0 |
+| L2b | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,993/s | 75.8 µs | 17.9 ms | 30.2 ms | 76.6 µs | 30.2 ms | 192.3 µs | 1 | 0 |
+| L2c | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 225k/s | 225,015/s | 59.2 µs | 1.57 ms | 3.3 ms | 59.5 µs | 3.32 ms | 207.0 µs | 0 | 0 |
+| L2d | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 250k/s | 249,989/s | 76.0 µs | 2.22 ms | 6.02 ms | 76.7 µs | 6.02 ms | 366.3 µs | 0 | 0 |
+| L2e | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 300k/s | 300,015/s | 1.61 ms | 4.27 ms | 6.48 ms | 1.61 ms | 6.48 ms | 204.3 µs | 0 | 0 |
+| L3a | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 150k/s | 150,012/s | 53.4 µs | 163.5 µs | 1.71 ms | 53.7 µs | 1.71 ms | 154.4 µs | 0 | 0 |
+| L3b | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 200k/s | 199,992/s | 64.2 µs | 473.6 µs | 2.21 ms | 64.5 µs | 2.21 ms | 190.2 µs | 1 | 0 |
+| L3c | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 225k/s | 225,014/s | 76.6 µs | 1.34 ms | 3.14 ms | 77.0 µs | 3.15 ms | 190.7 µs | 0 | 0 |
+| L3d | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 250k/s | 249,988/s | 210.9 µs | 6.23 ms | 22 ms | 220.7 µs | 22 ms | 196.5 µs | 0 | 0 |
+| L3e | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 275k/s | 275,016/s | 110.4 µs | 2.14 ms | 5.19 ms | 111.6 µs | 5.19 ms | 175.6 µs | 0 | 0 |
+| L3f | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 300k/s | 300,015/s | 8.98 ms | 19.3 ms | 24.2 ms | 8.98 ms | 24.2 ms | 189.2 µs | 0 | 0 |
+| L4a | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12, log on disk | 10 | 200k/s | 199,998/s | 59.1 µs | 3.67 ms | 15.4 ms | 59.6 µs | 15.4 ms | 171.1 µs | 2 | 0 |
+| L4b | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12, log on `/dev/shm` | 10 | 200k/s | 199,999/s | 52.3 µs | 10.1 ms | 21.6 ms | 52.6 µs | 21.6 ms | 183.0 µs | 2 | 0 |
+| L4c | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,998/s | 47.6 µs | 202.4 µs | 2.44 ms | 47.9 µs | 2.44 ms | 172.7 µs | 2 | 0 |
+| L4d | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,999/s | 47.4 µs | 151.6 µs | 2.53 ms | 47.6 µs | 2.53 ms | 148.6 µs | 2 | 0 |
+| L4e | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 200k/s | 199,998/s | 58.9 µs | 291.6 µs | 2.72 ms | 59.3 µs | 2.72 ms | 186.4 µs | 2 | 0 |
+| L4f | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,998/s | 53.0 µs | 1.82 ms | 11.7 ms | 53.3 µs | 11.9 ms | 181.6 µs | 2 | 0 |
+| L4g | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | native (GraalVM CE 21.0.2) | 10 | 200k/s | 199,999/s | 55.3 µs | 163.8 µs | 2.36 ms | 55.5 µs | 2.36 ms | 173.4 µs | 2 | 0 |
+| L4h | 2026-09-29 | `cf6e302`+ | AMD EPYC 7713 VM (Linode g7-dedicated-64-32), Linux 6.8 | 16 (SMT off, pinned) | **yes** | JVM 21.0.12 | 10 | 200k/s | 199,998/s | 49.7 µs | 661.5 µs | 5.01 ms | 50.0 µs | 5.01 ms | 170.1 µs | 2 | 0 |
 
 **R1 conditions.** Single node, Aeron IPC throughout, JVM start scripts from `./gradlew installDist`.
 One security (AAPL), `maxOrders=1000000`, `levelCount=32768`, `tickSize=0.01`. Band 99.90–100.10
@@ -554,6 +587,88 @@ back-pressure counter sample 17:40–17:43, D2 17:43–17:48, 2026-09-27.
 
 ---
 
+## What L0–L4 say: a core for every thread, and the engine still steps
+
+The question D1–D2 left: where does the shard knee when core count is not the limit, and is the
+driver's sender then what binds? Asked on a cloud host (`deploy/cloud/`) with **16 physical cores and
+one per agent thread**: a Linode `g7-dedicated-64-32` (32 vCPU of an AMD EPYC 7713), SMT siblings
+offlined, the agents' cores isolated (`isolcpus`, `nohz_full`, `rcu_nocbs`, `idle=poll`), and
+`PIN=/etc/most-cpus.env` moving each named agent thread — driver conductor, sender, receiver, archive,
+consensus module, the engine's `matching-engine` service thread, gateway, market-data — to a core of
+its own, the load generators on four more. The hypervisor shows a flat topology; the SMT pairing was
+recovered by measurement (`bench.sh probe`: all 496 vCPU pairs, 16 disjoint pairs at 0.80–0.82 of
+solo throughput and every other pair at ~1.0) and one CPU of each pair kept.
+
+**The knee is ~275–300k/s aggregate** — p50 under ~100 µs through 275k/s in both JVM repeats (L1, L2)
+and in the native one (L3), 1.6–9 ms at 300k/s. That is **half the laptop's**, and the reason is the
+core, not the design: the guest reports 2.0 GHz, and a whole new order costs the engine 1.2–1.4 µs
+here against 0.38–0.58 µs on the M4 Pro (A6, A8–A10 against A1–A5). **Huge pages are not it**: the
+engine with `-XX:+UseTransparentHugePages` (its pool is an on-heap `LongArray`) was ~3% cheaper per
+order at 200k/s (1.3 vs 1.4 µs; duty 47.5% vs 49.0%, two interleaved repeats each) and saturated at
+300k/s exactly as the control did. **Storage is not it** either, again: L4a/L4b put the log and
+archive on the cloud disk and on `/dev/shm` and the RAM arm was no better.
+
+**The thread that saturates is still the engine's**, with a core to itself. Its duty cycle is 26% at
+100k/s, 49% at 200k/s and **100% at 300k/s** (A6–A10, THP control) — not the ~73% the per-order cost
+predicts — while its median `newOrder` holds at 1.3–1.4 µs. That is D1's shape, the same one-step
+collapse, on a machine where nothing competes for the core. **So D1–D2's reading was incomplete**: core
+starvation on the laptop moved *where* the step happens (freeing two cores moved it one rate step),
+but the step itself is a property of the engine thread. What fills it past the step is open. The
+stage histograms show multi-millisecond maxima in `admit`, `match` and `settle` alike (A8–A10, max
+2.7–7.8 ms at every rate), which says stalls on the thread rather than dearer work; the service
+container's own Aeron work — polling the log, publishing egress — is untimed and is the first suspect.
+
+**The driver's sender is not the limit.** The kernel charges it **~2% of a core** at 100k/s (2 ticks in
+a second from `/proc/<pid>/task/<tid>/stat`), and five kernel-stack samples and a `jstack` all found it
+parked in `BackoffIdleStrategy` — Aeron's default, since `most cluster` sets no driver idle strategy.
+The conductor, archive and consensus module are the same: ~1,200 voluntary context switches a second
+each, cores 97–99% idle by `mpstat`.
+
+**Which exposes an instrument problem.** Those same agents' `duty-ns` counters read **92–97% of a
+core** for the sender and receiver (A6–A10), against the kernel's ~2%. `DutyCycleIdleStrategy` is
+specified to exclude time inside the delegate. The engine's reading is at least consistent with its
+own histograms (26% at 100k/s against ~14% spent inside `newOrder`, the rest untimed service-container
+work), though for a busy-spinning thread nothing in the kernel can corroborate it; the cluster host's
+agents park, so for them the kernel can, and it disagrees. It is **unexplained**, and it bears on D1: "the driver's sender reads ~98%
+throughout" was read as a batching loop that never idles, and may instead be this. Until it is
+resolved, a cluster-host duty reading is corroborated against kernel CPU time or not quoted.
+
+**Sustained is not the same as a burst.** The sweep's 300,000-order rates last ~1 s. At 200k/s for
+8 s (L4, 1.6M orders) the median holds at 47–60 µs but p99 ranges **2.4–22 ms across eight
+identical-condition runs**, and the metrics-on attribution at 200k/s (A8) reached a 146 ms p90. This
+host's run-to-run spread in the tail is larger than any tail difference measured on it: native
+against JVM (L4e/L4g against L4c/L4d/L4f/L4h) is 55–59 µs against 47–53 µs at p50 and inside the
+spread at p99, so **native changes the median by a few µs and the knee not at all**. L3 also
+confirms the native build end to end on x86-64: `run-e2e.sh` with all four native services produced
+the JVM run's counts exactly — 10,944 reports, 5,142 trades, 802 cancels, 16,368 traded, 2,315
+filled on arrival, 0 rejected, 0 unanswered — and each image carries the three
+`jdk.internal.misc.Unsafe` references.
+
+**What does not count.** Two unpinned sweeps were run and are not recorded: on a host booted with
+`isolcpus`, an unpinned process may only run on the six non-isolated CPUs, so ~12 spinning threads
+shared six cores and every row was `INVALID` on pacing. The comparison they were meant to make —
+pinned against the scheduler's own placement on the same cores — needs a boot without `isolcpus`.
+L0 is the first pinned sweep and is kept because it is valid: it saturated from 300k/s (p50 39 ms)
+where L1/L2 read 1.6–3.4 ms, the widest run-to-run difference in the series.
+
+**Conditions (L0–L4, A6–A10).** Linode `g7-dedicated-64-32`, `nl-ams`, Ubuntu 24.04, kernel
+6.8.0-134-generic, AMD EPYC 7713 reported at 2.0 GHz, 16 of 32 vCPUs online (one per SMT pair), 64 GB,
+local disk (`/dev/sda`, ext4) under the log and archive unless stated; `tuned` `latency-performance`,
+THP `madvise`, no huge pages reserved; `/etc/most-cpus.env`: housekeeping 0,1; driver conductor 3,
+sender 5, receiver 6, archive 7, consensus module 8, engine service 9, gateway 10, market-data 11;
+loaders 13–16 (not isolated). Nothing else ran on the box (load average 2–6 is the runs' own
+residue). OpenJDK 21.0.12 (JVM) and GraalVM CE 21.0.2 `-march=x86-64-v3` (native: engine, gateway,
+market-data, discovery; the cluster host and `most load` stayed JVM). Commit `cf6e302`+: the `+` is
+`e2e/pin.sh`'s thread-name fixes and the sweep's `cores` column, none on the measured path. Ten
+securities, `DRIVER_THREADING=DEDICATED`, archive `SHARED`, band 99.90–100.10 inside a 5000 bps
+static collar, `maxOrders=1000000` per security. Sweeps: metrics off, 300,000 orders per rate
+(1,600,000 for L4), 200,000-order discard pass first; the L2 275k/s row is omitted as `INVALID`
+(pacing p99.9 1.0 ms). Attribution: metrics and stages on, 8 s of load per rate, A8–A10 with every
+Aeron counter sampled. L4a/b are each the second of two interleaved repeats (the first repeats'
+figures were not captured); L4c–h are in time order. 2026-09-29, 19:45–20:25 UTC.
+
+---
+
 ## Attribution runs
 
 `e2e/run-attribution.sh` turns the in-process instrumentation on and subtracts: whatever the client
@@ -569,6 +684,11 @@ the wire. These three runs answer the question runs R2–R4 opened — the ceili
 | A3 | 2026-09-25 | `b537590`+ | 10 | 250k/s | 25k/s | 61.2 µs | 0.08 µs | 0.38 µs | 0.08 µs | 0.5 µs (**0.9%**) | 60.7 µs (99.1%) |
 | A3′ | 2026-09-25 | `b537590`+ | 10 | 250k/s | 25k/s | 60.8 µs | 0.08 µs | 0.38 µs | 0.08 µs | 0.5 µs (**0.9%**) | 60.3 µs (99.1%) |
 | A5 | 2026-09-27 | `ba5c605`+ | 10 | 500k/s | 50k/s | 319 µs | 0.13 µs | 0.38 µs | 0.08 µs | 0.6 µs (**0.2%**) | 318.4 µs (99.8%) |
+| A6 | 2026-09-29 | `cf6e302`+ | 10 | 100k/s | 10k/s | 42.1 µs | 0.2 µs | 1.4 µs | 0.3 µs | 1.9 µs (**4.5%**) | 40.2 µs (95.5%) |
+| A7 | 2026-09-29 | `cf6e302`+ | 10 | 300k/s | 30k/s | 536 ms ✗ | 0.2 µs | 1.3 µs | 0.2 µs | 1.8 µs | a draining queue |
+| A8 | 2026-09-29 | `cf6e302`+ | 10 | 200k/s | 20k/s | 54.6 µs | 0.2 µs | 1.4 µs | 0.3 µs | 1.9 µs (**3.5%**) | 52.7 µs (96.5%) |
+| A9 | 2026-09-29 | `cf6e302`+ | 10 | 250k/s | 25k/s | 90.9 µs | 0.2 µs | 1.2 µs | 0.3 µs | 1.7 µs (**1.9%**) | 89.2 µs (98.1%) |
+| A10 | 2026-09-29 | `cf6e302`+ | 10 | 300k/s | 30k/s | 503 ms ✗ | 0.2 µs | 1.4 µs | 0.2 µs | 1.8 µs | a draining queue |
 
 Engine stage split, same runs (`newOrder` p50, and its three stages):
 
@@ -577,6 +697,12 @@ Engine stage split, same runs (`newOrder` p50, and its three stages):
 | A1 | 0.46 µs | 0.13 µs | 0.04 µs | 0.17 µs | 56.4 µs | 1.32 ms | 16.1 ms |
 | A2 | 0.50 µs | 0.13 µs | 0.04 µs | 0.17 µs | 56.9 µs | 277 µs | 3.02 ms |
 | A3 | 0.38 µs | 0.08 µs | 0.04 µs | 0.17 µs | 348 µs | 35.1 ms | 46.0 ms |
+| A8 | 1.40 µs | 0.56 µs | 0.11 µs | 0.42 µs | 146 ms | 163 ms | 166 ms |
+| A9 | 1.23 µs | 0.54 µs | 0.09 µs | 0.34 µs | 189 ms | 223 ms | 227 ms |
+| A10 | 1.35 µs | 0.60 µs | 0.09 µs | 0.35 µs | 546 ms ✗ | 555 ms | 558 ms |
+
+A6–A10 are on the cloud host of L0–L4 and are comparable only with each other: a 2.0 GHz Zen 3 core
+costs ~3x an M4 Pro P-core per order, so their engine columns cannot be set against A1–A5's.
 
 **A1–A3 conditions.** Single node, Aeron IPC, JVM start scripts, `engine.metrics=true`,
 `engine.metrics.stages=true`, `gateway.metrics=true`. 2,000,000 orders per run, 1,000 warmup, band
@@ -643,6 +769,7 @@ paste in here. R1 above was produced by the harness that became that script.
 `SECURITIES=n` drives n securities (max 10) and the rates stay the aggregate, so a one-book sweep
 and a fan-out sweep are the same script and the same row format.
 
-Not yet recorded here, and worth a row when they happen: a native-binary sweep on x86-64, a
-`most counters` sample against a DEDICATED driver at its own knee, a multi-node cluster, and an
-Epsilon soak measured in hours.
+Not yet recorded here, and worth a row when they happen: a multi-node cluster, an Epsilon soak
+measured in hours, an unpinned sweep on a many-core host booted *without* `isolcpus` (the only
+unpinned arm that means anything — see "What L0–L4 say"), and a host whose cores are as fast as the
+laptop's. A native-binary sweep on x86-64 is L3.

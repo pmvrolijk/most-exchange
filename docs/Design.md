@@ -411,8 +411,22 @@ to 100% in one 50k/s step, with its median `newOrder` cost unchanged and its p90
 egress back-pressure (D1). Setting the gateway and market-data to `backoff`, freeing the two cores
 they spin while mostly idle, moved the knee up one step without touching the engine (D2). The shard's
 busy threads outnumber the laptop's 10 performance cores, and the engine — cache-bound — is the one
-that loses. **Where a host with a core for every spinning thread knees is unmeasured**, and so is
-whether the driver's sender, the one loop that never idles, is then the limit.
+that loses. ~~**Where a host with a core for every spinning thread knees is unmeasured**, and so is
+whether the driver's sender, the one loop that never idles, is then the limit.~~ **Measured
+(Measurements.md L0–L4, A6–A10):**
+
+**With a core for every agent, the engine's service thread is still what binds, and the step is its
+own.** On a 16-core host with each agent thread pinned to a core of its own and nothing competing,
+the engine's duty cycle is 49% at 200k/s and 100% at 300k/s, with its median `newOrder` cost flat —
+the laptop's one-step collapse without the laptop's core starvation. Core count moves *where* the
+step lands, not whether it happens. The driver's sender is not the limit: it spends ~2% of a core
+parked in `BackoffIdleStrategy`, as do the conductor, archive and consensus module. The knee there is
+~275–300k/s aggregate, lower than the laptop's because that host's cores are slower (a whole new order
+costs 1.2–1.4 µs on a 2.0 GHz Zen 3 against 0.38–0.58 µs on the M4 Pro), which makes the engine
+thread's single-core speed — not the number of cores — the figure a throughput target rests on.
+Huge pages (~3% per order) and storage (none) do not move it. **What fills the engine thread past the
+step is open**; its stages show multi-millisecond maximum stalls at every rate, and the service
+container's untimed Aeron work — log polling and egress publication — is the first suspect.
 
 **The archive write is not the ceiling.** That experiment has been run: with the consensus log and
 archive on a RAM disk and the media-driver buffers left on the SSD, the round trip moves 2.6% at the
@@ -2425,6 +2439,14 @@ sender that rarely finds nothing to do reads ~90% at a quarter of the knee, and 
 iteration as the rate rises rather than running out of time. So ~100% says "never idle", and only
 with the rate held against it says "full".
 
+**And for the cluster host's agents a reading is not yet trustworthy at all.** On a Linux host with
+each agent on its own core (Measurements.md L0–L4), the sender and receiver read 92–97% while the
+kernel charges them ~2% of a core, parked in `BackoffIdleStrategy` — so most of what the wrapper
+counted as busy was spent off the CPU, which this clause says cannot happen. Unexplained (§8). Until
+it is, corroborate a cluster-host reading against `/proc/<pid>/task/<tid>/stat` before quoting it; a
+busy-spinning loop cannot be corroborated that way, and the engine's, gateway's and market-data's
+readings rest on their histograms instead.
+
 **The idle strategy itself is configuration**, per process:
 `engine.idleStrategy`, `gateway.idleStrategy`, `md.idleStrategy`, each one of `busyspin` (the
 default), `backoff` (Agrona's default back-off), `yielding`, or `sleeping` / `sleeping:<µs>` (1 µs
@@ -2880,8 +2902,18 @@ It found three defects that unit tests could not:
   node. ~~The gateway is the stage with the least headroom … the cheapest lever available.~~
   **Refuted** (R8–R11, A5). **The duty-cycle counters then answered it for the development machine
   (D1–D2): no stage is full; the knee is where the shard's busy threads outnumber the performance
-  cores.** What remains open is the answer on a host with a core per spinning thread — paused until a
-  dedicated 16-core machine is available.
+  cores.** ~~What remains open is the answer on a host with a core per spinning thread — paused until a
+  dedicated 16-core machine is available.~~ **Measured on one (L0–L4, A6–A10): the engine's service
+  thread still binds, with a core of its own**, stepping from ~50% to 100% busy across one rate step
+  while its median cost holds, and the driver's sender is ~2% of a core. The knee is set by the
+  engine thread's single-core speed. **Open in its place: what fills that thread past the step** —
+  multi-millisecond stalls across all three `newOrder` stages, and the untimed service-container work
+  around them.
+* **The cluster host's duty-cycle readings disagree with the kernel.** On a Linux host with pinned
+  agents, the driver's sender and receiver read 92–97% of a core under `most cluster --duty` while
+  `/proc` charges them ~2%, parked in `BackoffIdleStrategy` (§7, "Duty cycle"; Measurements.md L0–L4).
+  Either the wrapper counts off-CPU time as busy for these agents or the counter's rate is misread.
+  D1's "sender ~98%" rests on the same instrument and is suspect until this is explained.
 * ~~**The control plane over-reported feed gaps.**~~ **Fixed.** `ClusterLink` counted a sequence only
   in the four book events it decodes while the engine numbers all seven, so every order event read as
   a gap and a busy book reported continuous loss — which hid real loss rather than revealing it. The

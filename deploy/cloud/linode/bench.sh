@@ -112,25 +112,39 @@ EOF
   return 0
 }
 
-# Two spinning loops share a core's execution units only if they are SMT siblings: pin one to CPU 0
-# and one to each other CPU in turn, and a sibling shows as a clear drop against running alone.
+# Two spinning loops share a core's execution units only if they are SMT siblings: run every pair of
+# CPUs together and a sibling pair shows as a clear drop against each running alone (~0.8 on Zen 3,
+# ~1.0 otherwise). Only a perfect matching -- every CPU in exactly one pair -- is printed as a core list.
 cmd_probe() {
   load_state
-  remote 'python3 - <<"EOF"
-import os, time, multiprocessing as mp
+  # The script goes over stdin: quoting it inside an ssh argument is where the first version broke.
+  # Every CPU the kernel has, not sched_getaffinity(0) -- isolcpus takes the isolated ones out of the
+  # default mask, and they are the ones that matter.
+  remote python3 - <<'PY'
+import os, time, itertools, multiprocessing as mp
 def spin(cpu, secs, out):
     os.sched_setaffinity(0, {cpu}); n = 0; end = time.perf_counter() + secs
     while time.perf_counter() < end: n += 1
-    out.put(n)
-def run(cpus, secs=0.6):
+    out.put((cpu, n))
+def run(cpus, secs=0.3):
     q = mp.Queue(); ps = [mp.Process(target=spin, args=(c, secs, q)) for c in cpus]
-    [p.start() for p in ps]; [p.join() for p in ps]; return [q.get() for _ in ps]
-cpus = sorted(os.sched_getaffinity(0)); alone = run([0])[0]
-print(f"cpu0 alone: {alone:,} iterations")
-for c in cpus[1:]:
-    r = min(run([0, c])) / alone
-    print(f"cpu0 + cpu{c:<3} {r:5.2f}  {'<-- sibling?' if r < 0.8 else ''}")
-EOF'
+    [p.start() for p in ps]; [p.join() for p in ps]; return dict(q.get() for _ in ps)
+cpus = sorted(int(d[3:]) for d in os.listdir("/sys/devices/system/cpu") if d[3:].isdigit()
+              and (d == "cpu0" or open(f"/sys/devices/system/cpu/{d}/online").read(1) == "1"))
+alone = {c: run([c])[c] for c in cpus}
+print(f"{len(cpus)} CPUs; alone {min(alone.values()):,}-{max(alone.values()):,} iterations", flush=True)
+pairs = []
+for a, b in itertools.combinations(cpus, 2):
+    r = run([a, b]); x = min(r[a] / alone[a], r[b] / alone[b])
+    if x < 0.9: pairs.append((a, b, x)); print(f"  cpu{a} + cpu{b}: {x:.2f}  <- siblings", flush=True)
+seen = [c for p in pairs for c in p[:2]]
+if pairs and len(seen) == len(set(seen)) == len(cpus):
+    keep = sorted(min(a, b) for a, b, _ in pairs)
+    print("a perfect matching: one CPU per core, for /etc/most-cores:")
+    print(" ".join(map(str, keep)))
+else:
+    print("no clean pairing -- do not write /etc/most-cores from this; see deploy/cloud/README.md")
+PY
 }
 
 cmd_sync() {

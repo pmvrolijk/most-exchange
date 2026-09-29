@@ -4,11 +4,17 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2j),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-09-27, in the session that tested whether a second gateway raises the shard's
-ceiling. It does not: the gateway is ~19% busy at the knee (Measurements.md R8–R11, A5). Every
-thread on the order path now reports a duty cycle, and on this laptop the knee turns out to be the
-core count, not a stage (D1–D2; Handover §2k). The participant-enforcement work (Handover §2j) is merged to
-`master` and green in CI (pipelines 35–37). The project is now AGPL-3.0-or-later (`LICENSE.md`).
+Last updated 2026-09-29, in the session that took the ceiling question to a 16-core cloud host with
+one core per agent thread (`deploy/cloud/`; Measurements.md L0–L4, A6–A10; Handover §2l). **The engine's
+service thread still binds there, with a core to itself**, and the driver's sender is ~2% busy — so
+the laptop's "the knee is the core count" (D1–D2) was incomplete: the engine's one-step collapse is its
+own, and cores only move where it lands. Native images passed e2e on real x86-64 for the first time,
+with the JVM's exact counts. Two instrument findings: the cluster host's duty counters disagree with
+the kernel, and an unpinned arm on an `isolcpus` host measures nothing.
+
+Before that (2026-09-27): a second gateway does not raise the ceiling (R8–R11, A5); every thread on the
+order path reports a duty cycle (Handover §2k). The participant-enforcement work (Handover §2j) is
+merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-or-later (`LICENSE.md`).
 
 ---
 
@@ -16,7 +22,7 @@ core count, not a stage (D1–D2; Handover §2k). The participant-enforcement wo
 
 | | |
 | --- | --- |
-| Branch | `master`, pushed. CI green through pipeline 37; **pipeline 38 (`029e37a`, this session's two commits) was still running at close** — check it first |
+| Branch | `cloud-deploy`, one commit ahead of `master` (`cf6e302`) plus this session's uncommitted write-up. CI: check pipeline 38 (`029e37a`) first, which was still running at the previous close |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
 | Kotlin | ~26,300 lines — 14,660 main across 69 files, 11,670 test across 58 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
@@ -56,8 +62,10 @@ that authors reference data and drives the market over REST, and a console that 
   the control plane, the scheduler's session-close) was refused by Aeron's default authorisation and
   reported as success. Fixed and proven by the recording log, in `run-restart.sh` and in the Docker
   stack, where a full shard restart printed `restored 1 resting orders ... from a snapshot` (§2j).
-- **Native images build and pass e2e.** All four core processes, plus a `linux/amd64` container
-  (§2a). Untested: a trade *through* native containers, which needs an x86-64 host.
+- **Native images build and pass e2e, on x86-64 too.** All four core processes, plus a `linux/amd64`
+  container (§2a). On a real x86-64 host (§2l) all four native services ran `run-e2e.sh` with the JVM
+  run's counts exactly, and a pinned sweep (L3) knees where the JVM does. Still untested: a trade
+  through the native *containers* (`CORE_TARGET=native docker compose up`).
 - **Zero allocation is proven**, by three measurements that are each mutation-validated (§2b).
   `--gc=epsilon` is still off for want of an hours-long soak, not for want of a
   measured path — the pipeline that runs the assertion is live since pipeline 34.
@@ -105,7 +113,12 @@ falls to 0.9%. The ceiling is the shared path every order crosses whichever book
 Aeron counters named it: **the media driver's single shared thread**. Storage and ingress buffering were
 eliminated on the way. What binds once the driver has its own threads was answered for the laptop by
 the duty-cycle counters: **its core count** — no stage is full at ~550k/s, the shard simply has more
-busy threads than performance cores (D1–D2). A host with a core per thread is unmeasured.
+busy threads than performance cores (D1–D2). **A host with a core per thread then corrected that**
+(L0–L4, A6–A10): on 16 pinned cores the engine's service thread still goes from ~50% to 100% busy in
+one rate step with its median cost flat, and the driver's sender is ~2% of a core. The knee there is
+~275–300k/s, half the laptop's, because a 2.0 GHz Zen 3 core costs ~3x an M4 Pro P-core per order —
+so **the engine thread's single-core speed is what a throughput target rests on**, and what fills it
+past the step is the open question.
 
 ---
 
@@ -195,6 +208,12 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     duty-cycle counters (D1–D2): no stage is full — the consensus module stays under 20% — and the
     knee is where the shard's busy threads outnumber the 10 performance cores. The answer on a host
     with a core per spinning thread is **paused until a dedicated 16-core machine exists** (§3 item 3).
+    **Measured 2026-09-29** (L0–L4): the engine thread binds there too; see §3 item 3.
+13a. **What fills the engine thread past the step.** Median `newOrder` stays at 1.3–1.4 µs while duty
+    goes 49% → 100% between 200k and 300k/s; every stage shows multi-ms maximum stalls (A8–A10). The
+    service container's untimed Aeron work (log polling, egress publication) is the first suspect.
+13b. **The cluster host's duty counters disagree with the kernel** — sender 92–97% by `duty-ns`, ~2% by
+    `/proc` (Design.md §8). D1's "sender ~98%" is suspect until it is explained.
 14. **Auction SMP pass limit** — currently 64, still a guess.
 15. **Net resting depth** — confirms the 1M order pool and the capacity high-water mark.
 16. **`SecurityDefinition` distribution to market data** — it learns reference prices only
@@ -209,8 +228,9 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ## 3. To do next
 
-**Next session: the other open items**, the throughput work being paused (item 3). In the order I
-would take them, cheapest-and-most-dangerous first:
+**Next session: the other open items.** The throughput work has its answer for now (item 3); its two
+follow-ups (open issues 13a, 13b) are laptop-answerable and can wait behind the correctness items. In
+the order I would take them, cheapest-and-most-dangerous first:
 
 1. **Fingerprint enforcement at boot** (item 9, open issue 11) — a node-versus-node geometry mismatch
    still diverges silently on the first order, and `auctionMaxPasses` is in no fingerprint. Cheap, and
@@ -274,7 +294,12 @@ The full list, in the order it was written:
    **Resumed 2026-09-29 on a cloud host:** [`deploy/cloud/`](../deploy/cloud/README.md) provisions a
    Linode `g7-dedicated-64-32` by cloud-init (SMT siblings offlined, 16 physical cores, the agents'
    cores isolated) and both scripts take `PIN=/etc/most-cpus.env` for one core per agent thread.
-   Tooling built; no run taken yet.
+   **Answered** (Measurements.md L0–L4, A6–A10; Handover §2l): the knee there is ~275–300k/s, the
+   engine's service thread is the one that binds with a core to itself, the driver's sender is ~2%
+   busy, and huge pages and storage move nothing. **Still open:** what fills the engine thread past
+   the step (13a), and the duty-counter disagreement (13b). A rerun is `deploy/cloud/README.md`, about
+   an hour at ~$1/h; a host with faster cores is the next machine worth renting, and an unpinned arm
+   needs a boot without `isolcpus`.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
    *Updated again 2026-09-27* with idle strategies (§3.4, §4.4–4.8) and the duty cycle (§5.8).
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New
@@ -295,7 +320,8 @@ The full list, in the order it was written:
    (Advertising several gateways moved up to item 2.)
 6. **Run the Docker stack on native containers, on an x86-64 host.** Both builds are done; a
    `x86-64-v3` binary cannot start under Apple Silicon's amd64 emulation. On a real host this is
-   `CORE_TARGET=native docker compose up` and a repeat of the §9 benchmark.
+   `CORE_TARGET=native docker compose up` and a repeat of the §9 benchmark. *The native binaries
+   themselves are now proven on x86-64 (§2l, L3); the containers are what remains.*
 7. **Run a long soak, then enable Epsilon.** Shaped for hours rather than seconds, to bound the
    Aeron client conductor's per-duty-cycle allocation — it shares this heap and would be invisible
    in a 20-second run. The runner is in place, so with the soak `engine.useEpsilonGc=true` is a

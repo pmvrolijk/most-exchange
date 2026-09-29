@@ -39,7 +39,7 @@ every thread in a multi-CPU isolated mask would pile onto its first CPU. Each ag
 exactly one isolated CPU, and the loaders, which start fresh at every rate, get CPUs the scheduler
 can spread them over.
 
-Pinning refuses to run if an order-path thread (`consensus-module`, `clustered-service`,
+Pinning refuses to run if an order-path thread (`consensus-module`, `matching-engine` (the engine's service container),
 `gateway-poller`, `market-data-poller`, the driver) can't be found by name. A run with an agent
 left unpinned would otherwise be labelled pinned. After an Aeron upgrade, check the names on the
 box first: `bench.sh ssh`, start the shard, and call `pin_threads --list <pid>...` after sourcing
@@ -53,9 +53,11 @@ so a busy SMT sibling repeats the laptop's confound. Take twice the vCPUs you wa
 ~$1.04/h, hourly).
 
 If `bench.sh check` reports `TOPOLOGY=flat-unverified`, the hypervisor hid the sibling pairing and
-nothing was offlined. Run `bench.sh probe`, which spins two loops and flags pairs that slow each
+nothing was offlined. **Linode's G7 does**: 32 cores, one thread each, as seen by the guest. Run `bench.sh probe`, which spins two loops and flags pairs that slow each
 other down. Write one CPU per core to `/etc/most-cores` on the box, then run
-`sudo most-cpus --grub && sudo reboot`. Until that's done, don't call a pinned run "one core per
+`sudo most-cpus --grub && sudo reboot`. On the L0–L4 host every vCPU fell in exactly one pair at
+0.80–0.82 (every other pair ~1.0), and the lower of each pair was kept. `bench.sh probe` tests every pair
+(496 on 32 vCPUs, ~5 min) and prints the core list only when the pairing is a clean perfect matching. Until that's done, don't call a pinned run "one core per
 thread".
 
 ## A run, start to finish
@@ -67,25 +69,39 @@ deploy/cloud/linode/bench.sh up        # ~5-10 min: create, cloud-init, reboot o
 deploy/cloud/linode/bench.sh check     # the topology, isolated CPUs and the map -- read it
 deploy/cloud/linode/bench.sh sync      # this working tree, .git included, then installDist on the box
 
-# unpinned: the laptop's R7 conditions with only the machine changed
-deploy/cloud/linode/bench.sh run 'SWEEP_DIR=build/sweep-unpinned-1 SECURITIES=10 DRIVER_THREADING=DEDICATED \
-  RATES="300000 400000 500000 550000 600000 700000 800000 1000000" ./e2e/run-sweep.sh'
-
-# pinned: one core per agent
+# pinned: one core per agent (bracket the knee; on the 2.0 GHz host of L0-L4 it was ~275-300k/s)
 deploy/cloud/linode/bench.sh run 'SWEEP_DIR=build/sweep-pinned-1 PIN=/etc/most-cpus.env SECURITIES=10 \
-  DRIVER_THREADING=DEDICATED RATES="300000 400000 500000 550000 600000 700000 800000 1000000" ./e2e/run-sweep.sh'
+  DRIVER_THREADING=DEDICATED RATES="150000 200000 225000 250000 275000 300000" ./e2e/run-sweep.sh'
 
-# which thread is full, at rates bracketing the pinned knee (D1's procedure)
-deploy/cloud/linode/bench.sh run 'for r in 500000 600000 700000 800000; do ATTRIBUTION_DIR=build/attribution-$r \
+# sustained: the sweep's rates last ~1 s; this is 8 s at one rate
+deploy/cloud/linode/bench.sh run 'SWEEP_DIR=build/sweep-sustained PIN=/etc/most-cpus.env SECURITIES=10 \
+  DRIVER_THREADING=DEDICATED RATES="200000" ORDERS=1600000 ./e2e/run-sweep.sh'
+
+# which thread is full, at rates bracketing the knee (D1's procedure)
+deploy/cloud/linode/bench.sh run 'for r in 200000 250000 300000; do ATTRIBUTION_DIR=build/attribution-$r \
   PIN=/etc/most-cpus.env SECURITIES=10 DRIVER_THREADING=DEDICATED RATE=$r ORDERS=$((r * 8)) \
   ./e2e/run-attribution.sh || break; done'
+
+# native services (the cluster host and most load stay JVM): GraalVM CE 21 in ~/graalvm, then
+#   JAVA_HOME=~/graalvm GRAALVM_HOME=~/graalvm ./gradlew -Pengine.march=x86-64-v3 \
+#     -Porg.gradle.java.installations.paths=$HOME/graalvm \
+#     :engine:nativeCompile :gateway:nativeCompile :market-data:nativeCompile :discovery:nativeCompile
+# and pass ENGINE=engine/build/native/nativeCompile/matching-engine GATEWAY=.../order-gateway
+# MARKETDATA=.../market-data DISCOVERY=.../discovery to run-e2e.sh (counts must match the JVM's) and
+# run-sweep.sh.
 
 deploy/cloud/linode/bench.sh fetch     # build/sweep*, build/attribution* and ~/runs into build/cloud/<date>/
 deploy/cloud/linode/bench.sh down      # delete the Linode and firewall; billing stops
 ```
 
-Run each arm twice. A knee that moves more than one rate step between repeats is noise, and gets
-recorded as noise. `run` goes inside tmux, so a dropped connection doesn't stop it: `bench.sh tail`
+Run each arm twice, interleaved. A knee that moves more than one rate step between repeats is noise,
+and gets recorded as noise. On the L0–L4 host the p99 of identical sustained runs spread 2.4–22 ms, so
+compare tails only across interleaved repeats.
+
+**Do not run an unpinned arm on this host.** Under `isolcpus` an unpinned process may run only on the
+six non-isolated CPUs, so the whole shard shares six cores and every rate is `INVALID`. Comparing
+pinned against the scheduler's own placement needs a boot without `isolcpus`: remove
+`/etc/default/grub.d/99-most.cfg`, `sudo update-grub`, reboot, and run without `PIN`. `run` goes inside tmux, so a dropped connection doesn't stop it: `bench.sh tail`
 reattaches. While a pinned run is going, `bench.sh ssh mpstat -P ALL 1` should show every isolated
 core either at 100% (a busy-spinning agent) or idle, and nothing else on them.
 

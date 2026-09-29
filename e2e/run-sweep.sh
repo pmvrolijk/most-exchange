@@ -413,7 +413,8 @@ if [ "$(uname)" = "Darwin" ]; then
   CORES=$(sysctl -n hw.ncpu)
 else
   MACHINE="$(grep -m1 'model name' /proc/cpuinfo 2>/dev/null | cut -d: -f2- | sed 's/^ *//'), $(uname -sr)"
-  CORES=$(nproc 2>/dev/null || echo '?')
+  # Online CPUs, not nproc: under isolcpus nproc counts only what this shell may be scheduled on.
+  CORES=$(getconf _NPROCESSORS_ONLN 2>/dev/null || echo '?')
 fi
 LOADAVG=$(uptime | sed -E 's/.*averages?: //')
 TOP_RATE=$(echo $RATES | tr ' ' '\n' | sort -n | tail -1)

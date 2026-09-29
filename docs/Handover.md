@@ -1068,6 +1068,67 @@ The Operator's Manual carries the settings (§3.4, §4.4–4.8) and how to read 
 **Still open**: the knee on a host with a core per spinning thread, and whether the driver's sender —
 which never idles, so its duty reading cannot say "full" — is then the limit.
 
+### 2l. A core for every thread, on a rented host — and the engine still steps
+
+Branch `cloud-deploy`: tooling in `cf6e302`, the write-up and four harness fixes uncommitted at close.
+Measurements.md L0–L4 and A6–A10 carry every figure; this is the narrative.
+
+**The problem.** D1–D2 put the laptop's knee at its core count and left the question that mattered:
+where does a shard knee when no thread shares a core, and is the driver's sender — the loop that never
+idles — then the limit? Status §3 item 3 was paused until a 16-core machine existed.
+
+**What was built** (`deploy/cloud/`, `e2e/pin.sh`). A cloud-init Ubuntu 24.04 host on Linode, created
+and torn down by `bench.sh` (`up`, `check`, `probe`, `sync`, `run` inside tmux, `tail`, `fetch`,
+`down`), firewalled to the caller's SSH. A boot-time `most-cpus` service offlines SMT siblings, writes
+a thread-per-core map to `/etc/most-cpus.env`, and on first boot writes `isolcpus`/`nohz_full`/
+`rcu_nocbs`/`idle=poll` for the agents' cores. Both measurement scripts gained **`PIN=`**: every process
+launches on the housekeeping cores, then each named agent thread is moved to a core of its own; the
+load generators get four *non*-isolated cores, because an isolated CPU is outside load balancing and a
+multi-CPU isolated mask would stack every thread on its first CPU. With `PIN` unset the scripts are
+unchanged, which a local sweep confirmed. Size was a decision: Linode's vCPUs are hardware threads, so
+`g7-dedicated-32-16` is most likely eight cores; `64-32` with siblings offlined is sixteen.
+
+**What the first boot said.** The hypervisor shows a flat topology — 32 cores, one thread each — so
+nothing could be offlined from the guest's own view. `bench.sh probe` spins two loops on every vCPU
+pair (496 of them) and found a clean perfect matching: 16 disjoint pairs at 0.80–0.82 of solo
+throughput, every other pair at ~1.0. One CPU per pair went into `/etc/most-cores` and a second boot
+applied it. A pairing the hypervisor hides can be measured; that probe is now part of `bench.sh`.
+
+**Four harness defects, each caught by the pinning guard refusing to run** rather than by a wrong
+number. `pin.sh` fails if an order-path thread cannot be found by name, precisely so that a run with an
+agent left unpinned cannot be labelled pinned, and it fired four times: the engine's service thread is
+`matching-engine` (`EngineMain` sets `serviceName`, and the agent thread takes it), not Aeron's default
+`clustered-service-*`; a **native image truncates a thread name to its *last* 15 characters** where
+HotSpot keeps the first (`ket-data-poller`); a native image's **main thread carries the image name**,
+so `matching-engine`'s main thread matched the service pattern and was pinned beside it — the main
+thread is now never pinned; and the sweep's `cores` column counted `nproc`, which under `isolcpus` is
+the six CPUs the shell may use, not the sixteen online. Also a design error, not caught by anything:
+**an unpinned arm on an `isolcpus` host is meaningless** — unpinned, the whole shard shares six
+cores — so both unpinned sweeps were `INVALID` and are not recorded.
+
+**The answer.** The knee is ~275–300k/s aggregate, half the laptop's, and the per-order cost says why:
+1.2–1.4 µs for a whole new order on a 2.0 GHz Zen 3 against 0.38–0.58 µs on the M4 Pro. The engine's
+service thread is the one that binds, with a core of its own: 26% at 100k/s, 49% at 200k/s, 100% at
+300k/s, median `newOrder` flat. That is D1's one-step collapse **without** core starvation, so D2's
+reading needs correcting — freeing cores moved where the step lands; it did not cause it. The driver's
+sender is not the limit: ~2% of a core by `/proc`, parked in `BackoffIdleStrategy`, as are the
+conductor, archive and consensus module. Huge pages for the engine's on-heap pool (THP, ~3% per order)
+and the log on `/dev/shm` instead of disk moved nothing. Native images knee in the same place; their
+median is a few µs higher and their tail inside a run-to-run spread (p99 2.4–22 ms at a sustained
+200k/s across eight runs) that is wider than any configuration difference on this host.
+
+**Two things this opened.** What fills the engine thread past the step is unexplained: every stage
+shows multi-millisecond maximum stalls at every rate, and the service container's Aeron work is
+untimed. And **the duty counters of the cluster host's agents disagree with the kernel** — the sender
+reads 92–97% of a core where `/proc` says ~2% — which contradicts Design.md §7's statement that time
+inside the wrapped strategy is never counted, and puts D1's "sender ~98%" in doubt.
+
+**What the check is.** `bench.sh check` shows the topology, the command line and the map before any
+run; `pin_threads` prints every thread it moved and refuses on a missing one; `run-e2e.sh` with native
+binaries matches the JVM's counts exactly (10,944 reports, 5,142 trades, 802 cancels, 0 rejected, 0
+unanswered). The attribution histograms are in `docs/baselines/linode-*`. The host ran about an hour
+and was deleted with its firewall (`bench.sh down`, verified empty by tag).
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.

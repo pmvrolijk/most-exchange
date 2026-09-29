@@ -14,9 +14,14 @@
 # therefore gets exactly one isolated CPU, never a set. And the loaders, which are two threads each
 # and started once per rate, get CPUs that are *not* isolated, where the scheduler can spread them.
 #
-# Thread names are the ones the JVM gives the kernel -- a Java thread's name, cut to 15 characters
-# -- and the Aeron agent role names behind them. `pin_threads --list <pid>...` prints what a process
-# actually has, which is the first thing to run on a new Aeron version.
+# Thread names are the ones the runtime gives the kernel -- a Java thread's name cut to 15 characters
+# -- and the Aeron agent role names behind them. HotSpot keeps the *first* 15 characters and a
+# native image keeps the *last* 15 (market-data-poller is market-data-pol on the JVM and
+# ket-data-poller native), so both spellings are matched. The service container's thread takes the
+# container's serviceName, which EngineMain sets to matching-engine. A native image's main thread
+# carries the image name -- matching-engine again -- so a process's main thread (tid = pid) is never
+# pinned. `pin_threads --list <pid>...` prints what a process actually has, which is the first thing
+# to run on a new Aeron version or a new runtime.
 
 ON_HOUSE=""
 ON_LOAD=""
@@ -45,9 +50,9 @@ _pin_cpu_for() { # _pin_cpu_for <comm>
     archive-conduct*|"[archive-condu"*)  echo "$CPU_ARCHIVE" ;;
     archive-recorde*)                    echo "$CPU_ARCHIVE_RECORDER" ;;  # ArchiveThreadingMode.DEDICATED
     consensus-modul*)                    echo "$CPU_CONSENSUS" ;;
-    clustered-servi*)                    echo "$CPU_SERVICE" ;;
+    matching-engine|clustered-servi*)    echo "$CPU_SERVICE" ;;  # EngineMain's serviceName, or Aeron's default
     gateway-poller)                      _pin_next_gateway ;;
-    market-data-pol*)                    echo "$CPU_MARKETDATA" ;;
+    market-data-pol*|ket-data-poller)    echo "$CPU_MARKETDATA" ;;  # JVM, native
     *)                                   ;;
   esac
 }
@@ -73,6 +78,7 @@ pin_threads() {
         printf '   %7s %7s  %-16s %s\n' "$pid" "$tid" "$comm" "$(taskset -pc "$tid" 2>/dev/null | sed 's/.*: //')"
         continue
       fi
+      [ "$tid" = "$pid" ] && continue  # the main thread: blocked on the shutdown barrier, and named after the image
       cpu=$(_pin_cpu_for "$comm")
       [ -n "$cpu" ] || { case "$comm" in gateway-poller) echo "pin: no CPU left in CPU_GATEWAYS for another gateway" >&2; return 1 ;; esac; continue; }
       [ "$comm" = "gateway-poller" ] && _PIN_GW_USED=$((_PIN_GW_USED + 1))
@@ -85,9 +91,11 @@ pin_threads() {
   # The threads the order path cannot do without. A missing one means a renamed thread, and a run
   # with it unpinned would be labelled pinned -- so refuse rather than measure.
   local want
-  for want in consensus-modul clustered-servi gateway-poller market-data-pol; do
+  for want in consensus-modul gateway-poller; do
     case "$roles" in *" $want"*) ;; *) echo "pin: no thread named $want* found -- run pin_threads --list" >&2; return 1 ;; esac
   done
   case "$roles" in *" driver-conducto"*|*" [driver-conduct"*) ;; *) echo "pin: no media driver thread found" >&2; return 1 ;; esac
+  case "$roles" in *" market-data-pol"*|*" ket-data-poller"*) ;; *) echo "pin: no market-data poller thread found" >&2; return 1 ;; esac
+  case "$roles" in *" matching-engine"*|*" clustered-servi"*) ;; *) echo "pin: no service container thread (matching-engine / clustered-service*) found" >&2; return 1 ;; esac
   echo "   $applied threads pinned"
 }

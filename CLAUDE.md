@@ -29,6 +29,7 @@ Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gat
 ./e2e/run-attribution.sh                           # where a round trip goes, by stage
 SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and where it stops
 ./e2e/run-epsilon-soak.sh                          # steady-state allocation
+deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for the sweep (deploy/cloud/README.md)
 ```
 
 - **Run `e2e/run-e2e.sh` after changing anything on the wire.** It has caught five defects unit
@@ -284,10 +285,14 @@ here as well:
   --interval-ms 1000`; metrics on, `most cluster --duty` for the driver, archive and consensus module),
   never from a run switched to a yielding strategy — that moves the knee it measures. A batching loop
   (the driver's sender and receiver) reads near 100% long before it is full. → R§13, Design.md §7
-- **On the laptop the knee is the core count.** Past ~550k/s the shard's busy threads outnumber the
-  10 performance cores and the engine — cache-bound — is the thread that falls over (D1–D2); freeing
-  two spinning cores moved the knee. A knee measured there says nothing about a stage until it is
-  reproduced with a core for every spinning thread.
+- **The engine's service thread is what binds, with or without a core of its own.** It steps from
+  ~50% to 100% busy across one rate step while its median cost holds — on the laptop (D1) and on a
+  16-core host with every agent pinned (L0–L4). Core count only moves where the step lands, and the
+  knee scales with the engine thread's single-core speed, so a knee is quoted with the CPU it ran on.
+- **An unpinned run on an `isolcpus` host measures nothing** — unpinned, the whole shard shares the
+  few non-isolated cores. Pin (`PIN=`, `e2e/pin.sh`) or boot without `isolcpus`.
+- **Corroborate a cluster-host `duty-ns` reading against `/proc/<pid>/task/<tid>/stat`** before
+  quoting it. The driver's sender read 92–97% where the kernel charged ~2% (Design.md §8).
 - **Fill in `Measurements.md`'s `idle` column honestly, and never compare two configurations across
   two machine states.** A sweep taken with a desktop open read the knee 15% low and put that figure
   in four documents; the storage experiment that followed looked like an 82x win until an idle
@@ -332,8 +337,9 @@ it is the *same* aggregate one book reached. Attribution puts the gateway and en
 round trip and shows the engine getting *faster* per order as the rate rises, so **the constraint is
 the shared path every order crosses** and not matching. **Do not treat a per-order improvement as a
 throughput improvement**; prove it with a sweep. Eliminated by measurement: the archive write (RAM
-disk) and the ingress term length (16m moved latency, not the knee). What binds at ~550k/s is open
-(Design.md §2, "Measured at full fan-out").
+disk, twice), the ingress term length (16m moved latency, not the knee), the driver's sender (~2% busy
+on a pinned host) and huge pages (~3%). What binds is the engine's service thread stepping to 100%
+with its median cost flat, and what fills it is open (Design.md §2, "Measured at full fan-out").
 
 ## Build and deployment
 

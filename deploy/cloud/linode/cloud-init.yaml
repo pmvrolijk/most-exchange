@@ -1,0 +1,155 @@
+#cloud-config
+#
+# A benchmark host for one shard: a core for every spinning thread, SMT siblings offline, the
+# agents' cores isolated from the scheduler. Written for Status.md §3 item 3 -- where the shard
+# knees when core count is no longer the limit -- and kept so the run can be repeated.
+#
+# bench.sh substitutes @SSH_KEY@ and passes this as Linode Metadata user-data. First boot installs,
+# works out the core map, writes the kernel command line and reboots; every boot after that runs
+# most-cpus.service, which offlines the SMT siblings and writes /etc/most-cpus.env. That file is
+# what PIN= in e2e/run-sweep.sh and e2e/run-attribution.sh reads.
+#
+# Deliberately absent: 1G huge pages (ProdDeployment.md §3.2). No laptop measurement used them,
+# and this host exists to change one variable -- cores -- against those runs, not two.
+
+users:
+  - name: most
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: "ALL=(ALL) NOPASSWD:ALL"
+    lock_passwd: true
+    ssh_authorized_keys:
+      - "@SSH_KEY@"
+disable_root: true
+ssh_pwauth: false
+
+package_update: true
+packages:
+  - openjdk-21-jdk-headless   # build.gradle.kts: jvmToolchain(21)
+  - git
+  - rsync
+  - tmux
+  - jq
+  - sysstat                   # mpstat -P ALL: is anything else on an isolated core?
+  - hwloc                     # lstopo-no-graphics: the topology the guest was given
+  - numactl
+  - tuned
+  - python3                   # the SMT sibling probe in bench.sh
+
+write_files:
+  - path: /etc/sysctl.d/90-most.conf
+    content: |
+      # Aeron asks for 2 MB socket buffers (ProdDeployment.md §3.4); the kernel caps them here.
+      net.core.rmem_max = 8388608
+      net.core.wmem_max = 8388608
+      vm.swappiness = 1
+      # Nothing on this host should be migrated for balance's sake mid-run.
+      kernel.numa_balancing = 0
+
+  - path: /etc/systemd/system/most-cpus.service
+    content: |
+      [Unit]
+      Description=Offline SMT siblings and write the shard's core map (/etc/most-cpus.env)
+      After=sysinit.target
+      [Service]
+      Type=oneshot
+      RemainAfterExit=yes
+      ExecStart=/usr/local/sbin/most-cpus
+      [Install]
+      WantedBy=multi-user.target
+
+  - path: /usr/local/sbin/most-cpus
+    permissions: "0755"
+    content: |
+      #!/bin/bash
+      # most-cpus [--grub]
+      #
+      # One CPU per physical core, the rest offline, and a thread-per-core map in /etc/most-cpus.env.
+      # --grub also writes the isolcpus/nohz_full/rcu_nocbs command line for that map (reboot to apply).
+      #
+      # Which CPUs are "one per core" comes from the topology the guest is shown: the first CPU in each
+      # thread_siblings_list. If the hypervisor shows a flat topology (one thread per core), siblings
+      # cannot be told apart from here -- TOPOLOGY=flat-unverified, nothing is offlined, and
+      # `bench.sh probe` measures the pairing; write one CPU per core, space separated, to
+      # /etc/most-cores and rerun with --grub to use it.
+      set -euo pipefail
+      SYS=${MOST_CPUS_SYS:-/sys/devices/system/cpu}   # overridable only to test against a fake tree
+      ENV=${MOST_CPUS_ENV:-/etc/most-cpus.env}
+
+      online=()
+      for d in $(ls -d $SYS/cpu[0-9]* | sort -V); do
+        n=${d##*cpu}
+        if [ "$n" = 0 ] || [ "$(cat $d/online 2>/dev/null || echo 1)" = 1 ]; then online+=("$n"); fi
+      done
+
+      cores=()
+      if [ -s /etc/most-cores ]; then
+        read -r -a cores < /etc/most-cores
+        topo=override
+      else
+        for n in "${online[@]}"; do
+          first=$(cut -d, -f1 < $SYS/cpu$n/topology/thread_siblings_list | cut -d- -f1)
+          [ "$first" = "$n" ] && cores+=("$n")
+        done
+        if [ "${#cores[@]}" -lt "${#online[@]}" ]; then topo=smt; else topo=flat-unverified; fi
+      fi
+      [ "${#cores[@]}" -ge 16 ] || { echo "most-cpus: need 16 physical cores, found ${#cores[@]}" >&2; exit 1; }
+
+      # Offline every online CPU that is not the chosen one for its core. Under flat-unverified
+      # nothing is known about pairing, so nothing is offlined.
+      if [ "$topo" != flat-unverified ]; then
+        for n in "${online[@]}"; do
+          keep=0; for c in "${cores[@]}"; do [ "$c" = "$n" ] && keep=1; done
+          [ "$keep" = 1 ] || [ "$n" = 0 ] || echo 0 > $SYS/cpu$n/online
+        done
+      fi
+
+      c=("${cores[@]}")
+      # The map. 0-1 housekeeping, 2-10 and 15 one agent each (isolated), 11-14 the load generators
+      # (not isolated: two threads per loader, started per rate, and the scheduler must spread them).
+      HOUSEKEEPING="${c[0]},${c[1]}"
+      ISOLATED="${c[2]},${c[3]},${c[4]},${c[5]},${c[6]},${c[7]},${c[8]},${c[9]},${c[10]},${c[15]}"
+      LOADER_CPUS="${c[11]},${c[12]},${c[13]},${c[14]}"
+      cat > $ENV <<EOF
+      # Written by most-cpus at boot. Read by e2e/pin.sh (PIN=$ENV). Do not edit -- rerun most-cpus.
+      TOPOLOGY=$topo
+      CORES="${c[*]}"
+      HOUSEKEEPING=$HOUSEKEEPING
+      ISOLATED=$ISOLATED
+      LOADER_CPUS=$LOADER_CPUS
+      CPU_DRIVER_CONDUCTOR=${c[2]}
+      CPU_SENDER=${c[3]}
+      CPU_RECEIVER=${c[4]}
+      CPU_ARCHIVE=${c[5]}
+      CPU_CONSENSUS=${c[6]}
+      CPU_SERVICE=${c[7]}
+      CPU_GATEWAYS="${c[8]} ${c[15]}"
+      CPU_MARKETDATA=${c[9]}
+      CPU_ARCHIVE_RECORDER=${c[10]}
+      EOF
+
+      # Interrupts to housekeeping. irqbalance would move them back.
+      systemctl disable --now irqbalance 2>/dev/null || true
+      for f in /proc/irq/*/smp_affinity_list; do echo "$HOUSEKEEPING" > "$f" 2>/dev/null || true; done
+
+      if [ "${1:-}" = --grub ]; then
+        cat > /etc/default/grub.d/99-most.cfg <<EOF
+      GRUB_CMDLINE_LINUX_DEFAULT="\$GRUB_CMDLINE_LINUX_DEFAULT isolcpus=$ISOLATED nohz_full=$ISOLATED rcu_nocbs=$ISOLATED idle=poll processor.max_cstate=1"
+      EOF
+        update-grub
+      fi
+      echo "most-cpus: topology $topo, ${#cores[@]} cores, isolated $ISOLATED"
+
+runcmd:
+  - sysctl --system
+  - systemctl enable --now tuned
+  - tuned-adm profile latency-performance
+  - systemctl daemon-reload
+  - systemctl enable most-cpus.service
+  - /usr/local/sbin/most-cpus --grub
+  - mkdir -p /home/most/runs && chown most:most /home/most/runs
+
+power_state:
+  mode: reboot
+  message: "rebooting onto the isolcpus command line"
+  condition: true

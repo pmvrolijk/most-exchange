@@ -271,6 +271,10 @@ The full list, in the order it was written:
    **Paused (decided 2026-09-27) until a dedicated 16-core machine is available.** The instruments are
    ready for it: `run-attribution.sh` with `RATE`, `COUNTERS_MATCH` and the `*_IDLE` knobs, and the
    duty counters. Do not resume it on the laptop.
+   **Resumed 2026-09-29 on a cloud host:** [`deploy/cloud/`](../deploy/cloud/README.md) provisions a
+   Linode `g7-dedicated-64-32` by cloud-init (SMT siblings offlined, 16 physical cores, the agents'
+   cores isolated) and both scripts take `PIN=/etc/most-cpus.env` for one core per agent thread.
+   Tooling built; no run taken yet.
 4. ~~**Update the Operator's Manual for the threading configuration and the measured ceilings.**~~
    *Updated again 2026-09-27* with idle strategies (§3.4, §4.4–4.8) and the duty cycle (§5.8).
    **Done**, and [`OperatorManual.pdf`](OperatorManual.pdf) rebuilt from [`manual/`](manual/). New

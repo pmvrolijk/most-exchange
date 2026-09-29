@@ -43,6 +43,8 @@
 #   ARCHIVE_THREADING  archive threading: SHARED|DEDICATED                     (default: SHARED)
 #   GATEWAYS         gateways serving the shard, 1..5                         (default 1)
 #   LOADERS          `most load` processes, each at RATE/LOADERS    (default: GATEWAYS)
+#   PIN              a cpus.env (deploy/cloud/): one physical core per spinning thread (default: unset,
+#                    no pinning -- the scheduler places everything, as on every run before it existed)
 #
 # GATEWAYS and LOADERS exist to ask whether the gateway is what caps the shard (Status.md §3 item 2).
 # Loader j sends through gateway j % GATEWAYS, as participants 20+4j..23+4j, so every loader's
@@ -86,6 +88,9 @@ ENGINE="${ENGINE:-$ROOT/engine/build/install/engine/bin/engine}"
 GATEWAY="${GATEWAY:-$ROOT/gateway/build/install/gateway/bin/gateway}"
 MARKETDATA="${MARKETDATA:-$ROOT/market-data/build/install/market-data/bin/market-data}"
 DISCOVERY="${DISCOVERY:-$ROOT/discovery/build/install/discovery/bin/discovery}"
+
+# Defines ON_HOUSE / ON_LOAD / pin_threads; all three are no-ops when PIN is unset.
+. "$ROOT/e2e/pin.sh"
 
 rm -rf "$RUN"; mkdir -p "$LOGS"
 # Only what this run owns: CLUSTER_HOST may be a mount point that must not be removed.
@@ -241,7 +246,7 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
 
 # -------------------------------------------------------------------- processes
 echo "== starting cluster host"
-$MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" \
+$ON_HOUSE $MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" \
   ${INGRESS_TERM:+--ingress-term-length "$INGRESS_TERM"} \
   ${DRIVER_THREADING:+--driver-threading "$DRIVER_THREADING"} \
   ${ARCHIVE_THREADING:+--archive-threading "$ARCHIVE_THREADING"} \
@@ -250,7 +255,7 @@ PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 60 "cluster host" || fail "cluster host"
 
 echo "== starting engine"
-$ENGINE "$RUN/engine.properties" > "$LOGS/engine.log" 2>&1 &
+$ON_HOUSE $ENGINE "$RUN/engine.properties" > "$LOGS/engine.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/engine.log" "awaiting shutdown signal" 60 "engine" || fail "engine"
 FINGERPRINT=$(grep -o "fingerprint=[0-9a-f]*" "$LOGS/engine.log" | head -1)
@@ -258,21 +263,22 @@ echo "   $FINGERPRINT"
 
 for i in $(seq 0 $((GATEWAYS - 1))); do
   echo "== starting gateway gw-$i"
-  $GATEWAY "$RUN/gateway-$i.properties" > "$LOGS/gateway-$i.log" 2>&1 &
+  $ON_HOUSE $GATEWAY "$RUN/gateway-$i.properties" > "$LOGS/gateway-$i.log" 2>&1 &
   PIDS+=($!)
   wait_for "$LOGS/gateway-$i.log" "gateway: started" 60 "gateway gw-$i" || fail "gateway gw-$i"
   grep -q "identity=gw-$i" "$LOGS/gateway-$i.log" || fail "gw-$i connected without an identity"
 done
 
 echo "== starting market data"
-$MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data.log" 2>&1 &
+$ON_HOUSE $MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/market-data.log" "market-data: started" 45 "market data" || fail "market data"
 
 echo "== starting discovery"
-$DISCOVERY "$RUN/discovery.properties" > "$LOGS/discovery.log" 2>&1 &
+$ON_HOUSE $DISCOVERY "$RUN/discovery.properties" > "$LOGS/discovery.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/discovery.log" "discovery: started" 45 "discovery" || fail "discovery"
+pin_threads "${PIDS[@]}" || fail "pinning -- a run with an agent left unpinned is not the run PIN asked for"
 
 echo "== opening the market"
 # The band below must sit inside this static collar, or every order is PRICE_OUT_OF_BOUNDS and the
@@ -294,7 +300,7 @@ run_load() { # run_load <aggregate rate> <aggregate count> <clordid-base> <out-p
   local per_rate=$(($1 / LOADERS)) per_count=$(($2 / LOADERS)) j gw pids=() rc=0
   for j in $(seq 0 $((LOADERS - 1))); do
     gw=$((j % GATEWAYS))
-    $MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+    $ON_LOAD $MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
       --count "$per_count" --rate "$per_rate" --participant $((20 + 4 * j)) --participants 4 \
       --seed $((42 + j)) --clordid-base $(($3 + j * per_count)) --drain-ms 5000 --interval-ms 0 \
       --order-entry-stream $((20 + 2 * gw)) --report-stream $((21 + 2 * gw)) \
@@ -435,6 +441,7 @@ echo "              rates are the AGGREGATE across them ($((RATE_PER_SECURITY))/
 echo "              maxOrders=$MAX_ORDERS per security, band 99.90-100.10 inside a 5000bps static collar,"
 echo "              $ORDERS orders per rate, metrics off, $WARMUP_ORDERS-order discard pass first."
 echo "              load average at finish: $LOADAVG"
+echo "              pinning: $([ -n "${PIN:-}" ] && echo "one core per agent from $PIN (topology $TOPOLOGY), loaders on $LOADER_CPUS" || echo none)"
 echo "              log+archive on $(df -h "$CLUSTER_HOST" | tail -1 | awk '{print $1}') ($CLUSTER_HOST)"
 echo "              $(grep -m1 'ingress term length' "$LOGS/cluster.log" | sed 's/cluster: //')"
 [ "$DIRTY" -eq 0 ] || echo "              WARNING: $DIRTY uncommitted change(s) -- '$COMMIT' does not describe this build"

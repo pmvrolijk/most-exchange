@@ -28,6 +28,8 @@
 #   CLUSTER_HOST where the consensus log and archive live (default $RUN/cluster-host)
 #   DRIVER_THREADING media driver threading: SHARED|SHARED_NETWORK|DEDICATED (default: SHARED).
 #              Set DEDICATED to attribute near the ~550k/s knee; SHARED saturates at ~350k/s (R7).
+#   PIN        a cpus.env (deploy/cloud/): one physical core per spinning thread, the loader on its
+#              own non-isolated cores (default: unset, no pinning). See e2e/pin.sh.
 #
 # CLUSTER_HOST is separate from the Aeron directory on purpose. `--dir` places the archive and the
 # consensus log; `--aeron-dir` places the media driver's buffers, and it is left alone. Pointing
@@ -63,6 +65,9 @@ ENGINE="${ENGINE:-$ROOT/engine/build/install/engine/bin/engine}"
 GATEWAY="${GATEWAY:-$ROOT/gateway/build/install/gateway/bin/gateway}"
 MARKETDATA="${MARKETDATA:-$ROOT/market-data/build/install/market-data/bin/market-data}"
 DISCOVERY="${DISCOVERY:-$ROOT/discovery/build/install/discovery/bin/discovery}"
+
+# Defines ON_HOUSE / ON_LOAD / pin_threads; all three are no-ops when PIN is unset.
+. "$ROOT/e2e/pin.sh"
 
 rm -rf "$RUN"; mkdir -p "$LOGS"
 # Only what this run owns: CLUSTER_HOST may be a mount point that must not be removed.
@@ -193,26 +198,27 @@ CONN="--aeron-dir $AERON_DIR --discovery-channel aeron:ipc --discovery-stream 10
       --snapshot-channel aeron:ipc --snapshot-stream 34"
 
 echo "== starting the shard ($SECURITIES security(s), $ORDERS orders, ${RATE}/s aggregate, stages=$STAGES)"
-$MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" \
+$ON_HOUSE $MOST cluster --fresh --dir "$CLUSTER_HOST" --aeron-dir "$AERON_DIR" \
   ${DRIVER_THREADING:+--driver-threading "$DRIVER_THREADING"} --duty > "$LOGS/cluster.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/cluster.log" "awaiting shutdown signal" 45 "cluster host" || fail "cluster host"
 
-$ENGINE "$RUN/engine.properties" > "$LOGS/engine.log" 2>&1 &
+$ON_HOUSE $ENGINE "$RUN/engine.properties" > "$LOGS/engine.log" 2>&1 &
 ENGINE_PID=$!; PIDS+=($ENGINE_PID)
 wait_for "$LOGS/engine.log" "awaiting shutdown signal" 45 "engine" || fail "engine"
 
-$GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway.log" 2>&1 &
+$ON_HOUSE $GATEWAY "$RUN/gateway.properties" > "$LOGS/gateway.log" 2>&1 &
 GATEWAY_PID=$!; PIDS+=($GATEWAY_PID)
 wait_for "$LOGS/gateway.log" "gateway: started" 45 "gateway" || fail "gateway"
 
-$MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data.log" 2>&1 &
+$ON_HOUSE $MARKETDATA "$RUN/market-data.properties" > "$LOGS/market-data.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/market-data.log" "market-data: started" 30 "market data" || fail "market data"
 
-$DISCOVERY "$RUN/discovery.properties" > "$LOGS/discovery.log" 2>&1 &
+$ON_HOUSE $DISCOVERY "$RUN/discovery.properties" > "$LOGS/discovery.log" 2>&1 &
 PIDS+=($!)
 wait_for "$LOGS/discovery.log" "discovery: started" 30 "discovery" || fail "discovery"
+pin_threads "${PIDS[@]}" || fail "pinning -- a run with an agent left unpinned is not the run PIN asked for"
 
 for symbol in ${SYMBOLS//,/ }; do
   $MOST define --symbol "$symbol" --reference 100.00 --static-collar 5000 --dynamic-collar 2000 \
@@ -222,7 +228,7 @@ $MOST session --phase continuous --shard 0 $CONN > "$LOGS/session.log" 2>&1 || f
 sleep 1
 
 echo "== driving the load"
-$MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
+$ON_LOAD $MOST load --symbol "$SYMBOLS" --price-min 99.90 --price-max 100.10 --qty-min 1 --qty-max 10 \
   --count "$ORDERS" $PACING --warmup 1000 --participant 20 --participants 4 \
   --clordid-base 100000 --drain-ms 20000 --histogram-file "$RUN/client-latency.hgrm" \
   $CONN > "$RUN/load.out" 2>&1 &
@@ -233,7 +239,7 @@ LOAD_PID=$!
 # here and the cluster-host with --duty, so every loop on the order path has a counter.
 LOAD_MS=$((ORDERS * 1000 / RATE))
 sleep "$(awk -v ms="$LOAD_MS" 'BEGIN{printf "%.2f", ms * 0.3 / 1000}')"
-$MOST counters --aeron-dir "$AERON_DIR" --match "$COUNTERS_MATCH" --all --interval-ms $((LOAD_MS * 4 / 10 > 200 ? LOAD_MS * 4 / 10 : 200)) \
+$ON_HOUSE $MOST counters --aeron-dir "$AERON_DIR" --match "$COUNTERS_MATCH" --all --interval-ms $((LOAD_MS * 4 / 10 > 200 ? LOAD_MS * 4 / 10 : 200)) \
   > "$RUN/duty.out" 2>&1
 wait "$LOAD_PID" || fail "load"
 
@@ -294,5 +300,6 @@ echo "  scope:      $SECURITIES security(s) ($SYMBOLS), paced at ${RATE}/s"
 echo "  log+archive on $(df -h "$CLUSTER_HOST" | tail -1 | awk '{print $1}') at $CLUSTER_HOST"
 echo "  aeron dir   on $(df -h "$AERON_DIR" | tail -1 | awk '{print $1}') at $AERON_DIR"
 echo "              => ${RATE}/s aggregate, $((RATE / SECURITIES))/s/security"
+echo "  pinning:    $([ -n "${PIN:-}" ] && echo "one core per agent from $PIN (topology $TOPOLOGY), loader on $LOADER_CPUS" || echo none)"
 echo
 echo "PASS -- the round trip is attributed."

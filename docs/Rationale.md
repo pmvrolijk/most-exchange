@@ -252,7 +252,7 @@ mid-session or recover from a gap. Two rules carry it: the image and the `l2SeqN
 consistent only because no book event can land between reading the sequence and walking the ladders —
 moving it to a timer thread produces a torn image no consumer could detect; and installing an image
 over an already-synchronised book **rewinds** it, because increments past that sequence were applied
-directly and never buffered. Consumers use `DepthFeedAssembler` in `reference` — do not write a second
+directly and never buffered. Consumers use `DepthFeedAssembler` in `client` — do not write a second
 one. `market-data` walks only occupied levels via the occupancy bitset, and an empty book still sends
 a bracketed zero-level cycle, because "no liquidity" and "I cannot yet know" are different answers.
 
@@ -688,4 +688,56 @@ for a successful claim, so "the leader sent it" and "a follower mocked it" were 
 the engine checked for the mock first, every unit and allocation test silently stopped exercising the
 leader's copy into the claim. Both fakes now return a position, as Aeron does, and `FakeSession` can
 mock as a follower's session does, wrapping a scratch buffer.
+
+## 17. The adapter SDK: one implementation, here, under a licence adapters can link
+
+Decided with the user on 2026-10-03.
+
+**Why a module here, and not a library in the adapter repository.** The hard part of an adapter is
+not FIX. It is:
+- switching gateways;
+- the `reportSeq` ledger;
+- the resend fence;
+- the mass status that closes a truncation.
+
+Until this change, that lived in `most load` alone, and `run-failover.sh` was the only thing that
+proved it. A copy in another repository would be proved by nothing here, and the first wire change
+would fork the two. In `client`, `most status` and every adapter run one implementation. Its unit
+tests and the e2e runs that use it stay in the build that changes the wire.
+
+**Why `client` must not depend on `reference`.** `reference` is the exchange's own reference data:
+the participant registry, gateway authentication, operator commands and the security file format.
+An adapter has no business with any of them. It is also AGPL, so a dependency on it would bring the
+AGPL into every adapter. The direction is therefore one-way: `reference` builds on `client`.
+
+**Why Apache-2.0 for `sbe` and `client`.** Members and vendors build adapters, and linking an AGPL
+library would oblige them to publish their adapter under the AGPL. The schema has to carry the same
+licence as the SDK, because the SDK is useless without the codecs.
+
+**Why the exchange still runs on `aeron-all`.** The SDK should declare `aeron-client`, so that an
+adapter does not pull in the cluster, archive and driver. The obvious move was to switch the whole
+build to the modular jars, and it was tried. Every unit test and `run-e2e.sh` passed on them. But
+`PLACEMENT=colocated e2e/run-failover.sh` failed twice in a row: `most session` met `BACK_PRESSURED`
+on its first offer, after its publication had connected. The CLI made one offer and gave up, so the
+market stayed closed. The same tree on `aeron-all` passes. So does `HEAD`.
+
+The cause is not found. Until it is:
+- this build substitutes `aeron-client` with `aeron-all`, keeping the exchange on the jar every
+  measurement was taken with;
+- the published POM still declares `aeron-client`.
+
+Two things follow:
+- **Adapters will run on the modular jars.** `OrderEntrySession` returns back-pressure for the
+  caller to retry and never gives up on it, which is what Adapters.md §2 requires.
+- **The CLI's one-shot `offer` in `sendToShard` is a latent defect** of the kind §2 forbids. The
+  modular jars exposed it.
+
+**Why the tests run against a model of the exchange.** `OrderEntrySession` was written before its
+tests, the wrong order by the `spec-first-test` skill. The tests were then written against
+`ExchangeModel`, which implements Design.md §5's numbering, ring, resend and mass status and the
+gateway's refusals. It was written from the clauses and never from the session.
+
+Writing the expectations by hand found one wrong expectation before any code ran. It assumed a
+truncated resend recovers nothing, when the ring's newest report is still replayed. Ten deliberate
+mutations of the session were each caught by at least one test.
 

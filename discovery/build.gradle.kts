@@ -11,7 +11,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("com.engine.discovery.DiscoveryMainKt")
+    mainClass.set("nl.lamia.most.exchange.discovery.DiscoveryMainKt")
     applicationDefaultJvmArgs = listOf(
         "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
         "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
@@ -24,6 +24,6 @@ application {
 graalvmNative {
     binaries.named("main") {
         imageName.set("discovery")
-        mainClass.set("com.engine.discovery.DiscoveryMainKt")
+        mainClass.set("nl.lamia.most.exchange.discovery.DiscoveryMainKt")
     }
 }

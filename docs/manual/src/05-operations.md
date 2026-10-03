@@ -373,7 +373,7 @@ independently — so several shards can share one multicast group and a subscrib
 per shard.
 :::
 
-Consumers should use `DepthFeedAssembler` and `FeedSequenceTracker` from the `reference` module. The
+Consumers should use `DepthFeedAssembler` and `FeedSequenceTracker` from the `client` module. The
 operator CLI, the control plane's console and any FIX market data adapter all use the same two, so a
 book on one screen cannot disagree with a book on another.
 

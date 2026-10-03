@@ -20,8 +20,9 @@ there.
 
 | Module | Role |
 | --- | --- |
-| `sbe` | `message-schema.xml` and the SBE codecs generated from it. Shared by every process. |
-| `reference` | The shard's security list (identity + geometry), the shard registry, and the directory codec adapters embed. |
+| `sbe` | `message-schema.xml` and the SBE codecs generated from it. Shared by every process. Apache-2.0. |
+| `client` | The adapter SDK: the directory client, the depth feed assembler, the request encoders and the report ledger an adapter needs (docs/Adapters.md). Depends on `sbe` and the Aeron client only. Apache-2.0. |
+| `reference` | The shard's security list (identity + geometry), the shard registry, the participant registry, operator commands, and the directory encoder. Builds on `client`. |
 | `discovery` | Publishes the tradable universe — every security and the shard serving it — so adapters can route. |
 | `engine` | `MatchingEngineService` — the single-threaded deterministic state machine. Builds to a native binary. |
 | `market-data` | Consumes the Book Event Stream, derives L1 / L2 / L3 and publishes them as SBE over multicast. Separate process so feed fan-out never touches the matching thread. |
@@ -35,6 +36,7 @@ module and is deliberately outside the build, so `./gradlew build` needs no npm 
 
 Both boundaries speak **binary SBE, not FIX**. Protocol gateways that translate FIX or a proprietary
 session protocol sit upstream of `gateway` and downstream of `market-data`, outside this project.
+They live in their own repository and are built on `client` (docs/Adapters.md §0).
 
 ## Build
 
@@ -45,7 +47,7 @@ session protocol sit upstream of `gateway` and downstream of `market-data`, outs
 ./gradlew :sbe:generateSbeCodecs
 ```
 
-Codecs land in `sbe/build/generated/sbe/com/engine/sbe/` and are regenerated whenever
+Codecs land in `sbe/build/generated/sbe/nl/lamia/most/exchange/sbe/` and are regenerated whenever
 `message-schema.xml` changes. Never hand-write byte offsets (Design.md §5).
 
 Warnings are errors across all modules. The engine's zero-allocation profile depends on inline
@@ -331,3 +333,22 @@ construction throws `IllegalAccessError`.
 
     You should have received a copy of the GNU Affero General Public License
     along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+**Except two modules, which are Apache-2.0:** `sbe` (the wire schema and its generated codecs) and
+`client` (the adapter SDK). Adapters and other clients link them, and are not bound by the AGPL
+for doing so. Each module carries its own `LICENSE`. Everything else, including `reference`, is
+AGPL-3.0-or-later as above.
+
+    Copyright (C) 2026  P.M.Vrolijk
+
+    Licensed under the Apache License, Version 2.0 (the "License");
+    you may not use the files in sbe/ and client/ except in compliance
+    with the License. You may obtain a copy of the License at
+
+        http://www.apache.org/licenses/LICENSE-2.0
+
+    Unless required by applicable law or agreed to in writing, software
+    distributed under the License is distributed on an "AS IS" BASIS,
+    WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+    See the License for the specific language governing permissions and
+    limitations under the License.

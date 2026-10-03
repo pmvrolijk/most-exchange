@@ -11,7 +11,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("com.engine.core.EngineMainKt")
+    mainClass.set("nl.lamia.most.exchange.core.EngineMainKt")
     // Required by Agrona 2.x and the Aeron driver on JDK 17+; see README.md.
     applicationDefaultJvmArgs = listOf(
         "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
@@ -25,7 +25,7 @@ application {
 graalvmNative {
     binaries.named("main") {
         imageName.set("matching-engine")
-        mainClass.set("com.engine.core.EngineMainKt")
+        mainClass.set("nl.lamia.most.exchange.core.EngineMainKt")
 
         // Epsilon GC is staged, not the default (Design.md §7): ship on Serial GC, prove zero
         // steady-state allocation, add the CI allocation assertion, then enable this. The engine

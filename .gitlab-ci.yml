@@ -25,6 +25,7 @@ stages:
   - build
   - test
   - verify
+  - publish
   - measure
 
 workflow:
@@ -226,12 +227,27 @@ native:engine:
     - when: manual
       allow_failure: true
 
+# ---------------------------------------------------------------------------- publish
+
+publish:sdk:
+  stage: publish
+  # The adapter SDK -- `sbe` and `client`, Apache-2.0 (docs/Adapters.md §0) -- to this project's
+  # Maven package registry, with the job's own token. Manual: a publish is a release decision, and
+  # the version comes from `sdk.version` in gradle.properties. A `-SNAPSHOT` version may be
+  # republished; a release version may not, and the registry refuses a duplicate.
+  needs:
+    - build
+    - "test:core"
+  rules:
+    - if: $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH
+      when: manual
+    - if: $CI_COMMIT_TAG
+      when: manual
+  allow_failure: true
+  script:
+    - ./gradlew :sbe:publishSdkPublicationToGitlabRepository :client:publishSdkPublicationToGitlabRepository
+
 # ---------------------------------------------------------------------------- measure
-#
-# Neither of these gates anything. A shared CI runner is not idle, is not a known machine, and its
-# numbers must not be pasted into docs/Measurements.md as if they were -- the `idle` column would
-# be a lie and the `machine` column would be a runner tag. They exist so a sweep is one click away
-# when someone wants the shape, and so the scripts themselves keep working.
 
 measure:sweep:
   stage: measure

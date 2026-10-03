@@ -92,6 +92,24 @@ therefore means adding a protocol gateway, not changing this one. What such an a
 (connecting, failover, report sequence and resend, mass status, what it keeps) is
 [`Adapters.md`](Adapters.md).
 
+**Adapters are built on the `client` module** (decided 2026-10-03; Adapters.md §0). They live in a
+repository of their own. This project publishes `sbe` and `client`, under Apache-2.0 where
+everything else is AGPL, as the adapter SDK.
+
+`client` holds what every adapter needs and nothing exchange-internal:
+- the directory client;
+- the depth feed assembler;
+- the order, cancel, resend and status encoders;
+- the report ledger;
+- `OrderEntrySession`, which is Adapters.md §1–§4 in one single-threaded agent. `most status` runs
+  on it.
+
+It depends on the codecs and the Aeron client only. `reference` builds on it, never the reverse.
+
+FIX comes first, on Artio. One FIX session layer serves two backends:
+- **order entry**, SBE to the gateways through `OrderEntrySession`;
+- **market data**, the L1/L2 feeds through `DepthFeedAssembler`.
+
 Its responsibilities:
 
 * **Validate `securityId`** against the shard map, rejecting malformed or out-of-shard orders before
@@ -1080,7 +1098,7 @@ demultiplex them must already be there. Deriving the shard from `securityId` thr
 would work — securities are unique to one shard — but it puts a lookup on the hot path and fails for
 a security the subscriber has not yet seen in a directory broadcast.
 
-`FeedSequenceTracker` in the `reference` module implements the per-shard detection, and is what a
+`FeedSequenceTracker` in the `client` module implements the per-shard detection, and is what a
 subscriber embeds alongside `DirectoryClient`. It distinguishes a **gap** (a jump forward, counted
 with how many were missed) from a **replay** (a lower sequence, which Aeron's ordering guarantee
 means is a duplicate rather than loss), and treats the first message from a shard as establishing
@@ -1265,7 +1283,7 @@ apply an increment to, and the fix for both is an image plus everything publishe
 **The splice is `l2SeqNum`** — the incremental sequence the image was taken at, carried on both ends
 of the cycle. A subscriber buffers the increments that arrive while the image is in flight, installs
 the image, discards the buffered updates at or below that sequence, and replays the rest.
-`DepthFeedAssembler` in `reference` is the one implementation of that, shared by the operator CLI,
+`DepthFeedAssembler` in `client` is the one implementation of that, shared by the operator CLI,
 the control plane and anything else that rebuilds a book; a consumer that wrote its own would be a
 second implementation of a rule with no way to detect that it disagreed.
 
@@ -1301,7 +1319,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="7"
+                   package="nl.lamia.most.exchange.sbe" id="1" version="7"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1901,7 +1919,7 @@ Targets GraalVM Native Image. Zero heap allocation in steady state: primitive ar
 callbacks, reused scratch objects, and `tryClaim` in-place encoding.
 
 ```kotlin
-package com.engine.core
+package nl.lamia.most.exchange.core
 
 import io.aeron.ExclusivePublication
 import io.aeron.cluster.service.ClientSession
@@ -3399,7 +3417,9 @@ It found three defects that unit tests could not:
   - a participant whose *last* report was dropped learns of it only at its next report or its next
     request;
   - resending never-sequenced orders, which is the client's choice and which `most load` does not do;
-  - order-status queries generally.
+  - order-status queries generally;
+  - **trade capture** (FIX TradeCaptureReport) waits on the same drop copy. An adapter cannot build
+    it from execution reports, since those are exactly what a truncation loses.
 
   The ~13.6 s late answers of F1–F2 are most likely the same class F3–F4 recovered, sequenced orders
   whose reports were dropped, reaching the client by a route not established. With the resend, all

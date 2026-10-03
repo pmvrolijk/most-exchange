@@ -3,6 +3,8 @@
 
 dependencies {
     api(project(":sbe"))
+    // What an adapter sees is the exchange's own view too: one definition of each.
+    api(project(":client"))
     implementation(libs.aeron.all)
     implementation(libs.agrona)
     // Latency histograms for the hot-path instrumentation (Design.md §7). `implementation`, not

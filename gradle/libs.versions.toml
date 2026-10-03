@@ -13,6 +13,9 @@ graalvm-buildtools = "1.1.11"
 
 [libraries]
 aeron-all = { module = "io.aeron:aeron-all", version.ref = "aeron" }
+# The adapter SDK's Aeron dependency, as its published POM declares it. Inside this build it is
+# substituted with aeron-all (root build.gradle.kts), so every process runs on one copy of Aeron.
+aeron-client = { module = "io.aeron:aeron-client", version.ref = "aeron" }
 agrona = { module = "org.agrona:agrona", version.ref = "agrona" }
 sbe-tool = { module = "uk.co.real-logic:sbe-tool", version.ref = "sbe" }
 hdrhistogram = { module = "org.hdrhistogram:HdrHistogram", version.ref = "hdrhistogram" }

@@ -27,7 +27,7 @@ Inexplicable behaviour is an environment before it is a bug — this cost a long
 once and is the third row of `docs/LocalTesting.md`'s troubleshooting table.
 
 ```sh
-pgrep -f "com.engine|com.gateway|com.marketdata|com.discovery" || echo "clean"
+pgrep -f "nl.lamia.most.exchange" || echo "clean"
 git status --short && git log --oneline -3
 ```
 

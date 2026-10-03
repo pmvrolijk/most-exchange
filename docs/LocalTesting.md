@@ -639,7 +639,7 @@ Stop in reverse start order, with `SIGTERM` so each process prints its counters:
 
 ```sh
 for name in DiscoveryMainKt MarketDataMainKt GatewayMainKt EngineMainKt "ToolsMainKt cluster"; do
-  pid=$(pgrep -f "com.engine.*$name" | head -1)
+  pid=$(pgrep -f "nl.lamia.most.exchange.*$name" | head -1)
   [ -n "$pid" ] && kill -TERM "$pid" && sleep 1
 done
 ```
@@ -665,7 +665,7 @@ Worth reading rather than skipping:
 ### Verify everything actually stopped
 
 ```sh
-pgrep -f "com.engine" | wc -l    # must be 0
+pgrep -f "nl.lamia.most.exchange" | wc -l    # must be 0
 ```
 
 **Do not skip this.** If a process survives, the next run inherits its Aeron directory and cluster
@@ -673,7 +673,7 @@ state, and the symptoms are baffling: commands report success while nothing reac
 because they are talking to a half-dead stack. If anything remains:
 
 ```sh
-for p in $(pgrep -f "com.engine"); do kill -9 "$p"; done
+for p in $(pgrep -f "nl.lamia.most.exchange"); do kill -9 "$p"; done
 ```
 
 ### Clean up
@@ -789,13 +789,13 @@ arrived — a different problem from a quiet feed.
 | --- | --- |
 | `no Aeron media driver found` | The cluster host is not running, or `--aeron-dir` disagrees with it. |
 | `no directory received on ...` | Discovery is not running, or the discovery channel differs. It broadcasts on a cycle — allow one interval. |
-| Commands succeed but nothing reaches the engine | A process from an earlier run is still alive. Check `pgrep -f com.engine`. |
+| Commands succeed but nothing reaches the engine | A process from an earlier run is still alive. Check `pgrep -f nl.lamia.most.exchange`. |
 | `REJECTED ... MARKET_CLOSED` | The shard is not in a trading phase. Run `most session --phase continuous`. |
 | `REJECTED ... PRICE_OUT_OF_LADDER` | `levelCount` does not reach the price. At a 0.01 tick, level N is price N/100. |
 | `REJECTED ... PRICE_OUT_OF_BOUNDS` | Outside the static collar band, or `most define` was never run for that security. |
 | `REJECTED ... SELF_MATCH_PREVENTED` | Both sides used the same `--participant`. Use different ids. |
 | `active mark file detected` | A node was restarted too soon after the previous one. Aeron's archive and cluster mark files carry a liveness timestamp; wait about ten seconds. |
-| `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f com.engine`. |
+| `Active media driver detected` | The Aeron directory from a previous run is still there and still live. It is always recreated on start, so this means a driver is genuinely still running — check `pgrep -f nl.lamia.most.exchange`. |
 | `refused to restore its snapshot` | The security file changed in a way that would destroy state. The report names the security and what it holds. Restart on the previous file to restore it, or empty the book first. |
 | `most book` shows nothing after a restart | Market data restarted without the engine and missed its book image. Run `most image --shard 0`. |
 | A client sees `cum unknown` | The engine could not state an `origQty`. Only an order restored from a pre-v3 snapshot should do this; otherwise the engine and gateway are built from different schema versions. Check `untrackedReports` at gateway shutdown. |

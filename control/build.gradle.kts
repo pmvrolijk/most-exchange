@@ -36,7 +36,7 @@ dependencies {
 
 application {
     applicationName = "control"
-    mainClass.set("com.engine.control.ControlApplicationKt")
+    mainClass.set("nl.lamia.most.exchange.control.ControlApplicationKt")
     // Agrona 2.x reaches jdk.internal.misc.Unsafe for its buffer intrinsics and Aeron needs
     // sun.nio.ch; without these the first UnsafeBuffer throws IllegalAccessError.
     applicationDefaultJvmArgs = listOf(

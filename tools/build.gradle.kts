@@ -10,7 +10,7 @@ dependencies {
 
 application {
     applicationName = "most"
-    mainClass.set("com.engine.tools.ToolsMainKt")
+    mainClass.set("nl.lamia.most.exchange.tools.ToolsMainKt")
     applicationDefaultJvmArgs = listOf(
         "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
         "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",

@@ -11,7 +11,7 @@ dependencies {
 }
 
 application {
-    mainClass.set("com.engine.marketdata.MarketDataMainKt")
+    mainClass.set("nl.lamia.most.exchange.marketdata.MarketDataMainKt")
     applicationDefaultJvmArgs = listOf(
         "--add-opens", "java.base/jdk.internal.misc=ALL-UNNAMED",
         "--add-opens", "java.base/sun.nio.ch=ALL-UNNAMED",
@@ -24,6 +24,6 @@ application {
 graalvmNative {
     binaries.named("main") {
         imageName.set("market-data")
-        mainClass.set("com.engine.marketdata.MarketDataMainKt")
+        mainClass.set("nl.lamia.most.exchange.marketdata.MarketDataMainKt")
     }
 }

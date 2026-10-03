@@ -9,14 +9,14 @@ cited as → R§n. Do not change a rule without reading its section there.
 | **Where things stand, what to do next** | [`docs/Status.md`](docs/Status.md) — the session entry point |
 | **Normative behaviour** | [`docs/Design.md`](docs/Design.md) — authoritative. §8 is the open list |
 | **Why a rule exists** | [`docs/Rationale.md`](docs/Rationale.md) |
-| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2o |
+| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2p |
 | **What an order entry adapter must do** | [`docs/Adapters.md`](docs/Adapters.md) — connecting, failover, resend, status, state |
 
 `docs/Design.md` is the specification — read it before implementing anything, and update it in the
 same commit when the design changes.
 
-Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`,
-`control` — all implemented, 668 tests passing. See `docs/Status.md` §1 for what is real.
+Nine modules — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`,
+`tools`, `control` — all implemented, 681 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -79,13 +79,33 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 - **`cumQty` is stated by the engine, never subtracted by anyone.** A terminal report carries
   `leavesQty = 0` whether the order filled or was cancelled. **`origQty = 0` means unknown** and
   travels to the client as `Enrichment.UNKNOWN`. → R§3
-- **Encoders live in `reference`'s `OperatorCommands`**, shared by the CLI and the control plane. Do
-  not write a second encoding of a wire message.
+- **Encoders live in one place each**: operator commands in `reference`'s `OperatorCommands`
+  (the CLI and the control plane), orders and cancels in `client`'s `OrderRequests`, resend and
+  status requests in `client`'s `ParticipantRequests`. Do not write a second encoding of a wire
+  message.
 - **Both boundaries are binary SBE, not FIX.** FIX and proprietary session protocols live in
   separate gateways upstream of `gateway` and downstream of `market-data`, outside this project.
 - **Prices and quantities are fixed-point `int64` with 8 implied decimals.** Never introduce
   floating point into pricing or matching arithmetic.
 - The `wire-change` skill is the full checklist.
+
+## The adapter SDK
+
+- **Adapters live in their own repository and build on `client`** (Apache-2.0, with `sbe`).
+  Adapter-facing logic belongs in `client`, and that includes the directory client, the depth feed
+  assembler, the request encoders, the report ledger and `OrderEntrySession`. That way the CLI and
+  every adapter run the same code, and it stays tested here. A class an adapter needs is moved
+  there, never copied. → R§17
+- **`client` never depends on `reference`**, and nothing exchange-internal goes into it: not the
+  registry, gateway authentication or operator commands. `reference` builds on `client`. → R§17
+- **Inside this build, `aeron-client` is substituted with `aeron-all`** (root `build.gradle.kts`),
+  so each process has one copy of Aeron. The modular jars changed behaviour and nobody yet knows
+  why. Do not switch the exchange to them without finding out. → R§17
+- **`OrderEntrySession` is tested against `ExchangeModel`**, a model written from Design.md §5 and
+  never from the session. Each expectation cites its clause, and ten mutations of the session are
+  each caught by some test. When the spec changes, change the model first.
+- **Only `sbe` and `client` are published**, by the manual `publish:sdk` job, at `sdk.version`. A
+  publish is a release decision, and it waits for a go.
 
 ## Cluster lifecycle
 
@@ -154,7 +174,7 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   at or ahead of everything applied is allowed. `DepthFeedAssemblerTest` pins both directions. → R§6
 - **The L2 snapshot is taken on the poll thread.** Moving it to a timer thread produces a torn image
   no consumer could detect. An empty book still sends a bracketed zero-level cycle. → R§6
-- **Consumers use `DepthFeedAssembler` in `reference`** — do not write a second one.
+- **Consumers use `DepthFeedAssembler` in `client`** — do not write a second one.
 - **Do not change Aeron's multicast flow control.** `MaxMulticastFlowControl` is correct here; the
   `Min` variant would let the slowest subscriber throttle the publisher. Gap detection and snapshot
   re-synchronisation are subscriber responsibilities. → R§6
@@ -177,7 +197,7 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   the ring, never replayed. Its completion's `nextSeq` is where a client resumes its sequence; that
   is how a `TRUNCATED` resend is closed (Design.md §5, "Order mass status").
 - **Feed sequences are namespaced by shard**, each numbering from 1. `FeedSequenceTracker` in
-  `reference` distinguishes a gap from a replay.
+  `client` distinguishes a gap from a replay.
 
 ## The gateway
 

@@ -129,7 +129,7 @@ driver of its own the way `control-driver` does, and publishes its FIX listener 
 ```
 
 It learns which shard serves which symbol from the directory broadcast on `shard0:40000` rather than
-being configured with it — `DirectoryClient` in `reference` is what it embeds. It must talk to the
+being configured with it — `DirectoryClient` in `client` is what it embeds. It must talk to the
 **gateway's** endpoints and never to the cluster ingress: connecting to the cluster directly bypasses
 the `securityId` validation the gateway exists to perform, and the participant binding that decides
 where a maker's fills are delivered.

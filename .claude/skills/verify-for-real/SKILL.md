@@ -51,7 +51,7 @@ nothing reached the engine, caused by a teardown where `pkill` silently failed a
 directory was deleted out from under still-running processes.
 
 ```sh
-pgrep -f "com.engine|com.gateway|com.marketdata|com.discovery"   # must be empty first
+pgrep -f "nl.lamia.most.exchange"   # must be empty first
 df -h /aeron        # in the driver's container — a full tmpfs reads as a JVM InternalError
 ```
 

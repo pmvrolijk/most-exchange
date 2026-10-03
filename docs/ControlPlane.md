@@ -396,7 +396,7 @@ shard. The response says so every time, not only when it bites:
 ## 6a. Books: the depth feed, terminated here
 
 The console shows live order books, and the control plane is an ordinary L2 subscriber to get them.
-It uses `reference`'s `DepthFeedAssembler` — the same code the operator CLI uses, and the same code a
+It uses `client`'s `DepthFeedAssembler` — the same code the operator CLI uses, and the same code a
 FIX market data adapter would — so a book on the screen cannot disagree with a book anywhere else.
 Nothing about depth is re-derived in this module.
 

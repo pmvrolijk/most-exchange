@@ -40,6 +40,9 @@
 - [ ] Adapter framework — order entry adapters (FIX first) built to docs/Adapters.md: endpoints and
       failover, report sequence and resend fence, mass status at the open, persisted order and
       sequence state
+      — **started 2026-10-03**: adapters in their own repository on the `client` SDK (Apache-2.0),
+      whose `OrderEntrySession` implements all of the above; FIX on Artio is next
+      (docs/Adapters.md §0, docs/Handover.md §2p)
 - [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries
 - [ ] Persisted full TradeReports; each matched trade needs to be reliably persisted with deal and participant data. Either two sided or central counterparty.
 - [x] Admin frontend for backend control plane, Vue

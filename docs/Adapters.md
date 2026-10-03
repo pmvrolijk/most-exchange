@@ -1,15 +1,64 @@
 # Order entry adapters: requirements
 
 An **adapter** is the process between a client's own protocol (FIX, or a proprietary session protocol)
-and this exchange's order entry gateway (Design.md §1, "Order Entry Gateway"). It is **outside this
-project**. The gateway speaks binary SBE on both legs and knows nothing about FIX. This document is
-the contract an adapter must meet so that its clients never have an order whose fate they cannot
-learn. It is the starting point for the adapter framework (Status.md §3).
+and this exchange's order entry gateway (Design.md §1, "Order Entry Gateway"). It lives **in its own
+repository**, built on this project's adapter SDK (§0). The gateway speaks binary SBE on both legs
+and knows nothing about FIX. This document is the contract an adapter must meet so that its clients
+never have an order whose fate they cannot learn.
 
-`most load` (`tools/.../LoadCommand.kt`, `ReportLedger.kt`) and `most status` (`StatusCommand.kt`)
-already implement every rule below, and are the worked examples. The encoders an adapter needs live in
-`reference`: `ParticipantRequests` for the resend and status requests. **MUST** and **SHOULD** are
-used in their usual sense.
+**`OrderEntrySession` in `client` implements §1–§4.** An adapter built on it meets them by
+construction, and what is left to the adapter is §5's per-order mapping and a durable `SessionStore`.
+`most status` runs on the session. `most load` (`tools/.../LoadCommand.kt`) is a two-thread
+measurement harness implementing the same rules on `client`'s `ReportLedger` and
+`ParticipantRequests`. **MUST** and **SHOULD** are used in their usual sense.
+
+---
+
+## 0. The framework
+
+Decided 2026-10-03 (Status.md §3, item 13).
+
+**Two repositories.** Adapters live in their own repository. This one publishes the **adapter SDK**,
+two modules under **Apache-2.0** (the exchange itself is AGPL-3.0-or-later):
+
+| Artifact | What it holds |
+| --- | --- |
+| `nl.lamia.most.exchange:sbe` | The wire schema and its generated codecs. The jar's manifest names the schema id and version (`Most-Sbe-Schema-Version`) |
+| `nl.lamia.most.exchange:client` | `DirectoryClient` and `ShardRoute`: which shard serves a security, and its gateway's endpoints. `DepthFeedAssembler`, `DepthFeedDecoder`, `AggregatedBook`, `FeedSequenceTracker`: a trusted L2 book from the feeds. `OrderRequests` and `ParticipantRequests`: the order, cancel, resend and status encoders. `ReportLedger`: which reports arrived. `OrderEntrySession`, `GatewayLink`/`AeronGatewayLink` and `SessionStore`: §1–§4. `PriceCodec`: fixed-point prices |
+
+`client` depends on `sbe`, `aeron-client` and `agrona` only. Nothing exchange-internal goes into it:
+not the participant registry, gateway authentication or operator commands. `reference`, the
+exchange's own reference data, builds on it.
+
+**Depending on it.**
+- **Released:** from the GitLab package registry of `trading/most-exchange`. The manual
+  `publish:sdk` CI job publishes it, at `sdk.version` in `gradle.properties`.
+- **Developing both repositories at once:** a composite build in the adapter repository,
+  `includeBuild("../most-exchange")`. Gradle substitutes the project for the published coordinates,
+  with no publish.
+
+**FIX first, on Artio.** Artio is Real Logic's FIX engine. It is built on the same Aeron, SBE and
+Agrona as this project and is Apache-2.0, and it persists acceptor sessions in an Aeron archive. One
+FIX session layer (logon and authentication, session persistence, configuration) serves two
+backends:
+- **Order entry:** FIX `NewOrderSingle` and `OrderCancelRequest` map to SBE through
+  `OrderEntrySession`. Its `SendResult.BACK_PRESSURED` maps to Artio's `Action.ABORT`, so a FIX
+  message that cannot be forwarded is not consumed. Its `OrderFate.NEVER_SEQUENCED` and `AMBIGUOUS`
+  map to a reject and an "unknown" status respectively. **Never present an ambiguous order as
+  rejected.**
+- **Market data:** a `SecurityList` from `DirectoryClient`, and snapshots and incremental refreshes
+  of L1/L2 from `DepthFeedAssembler`.
+
+**What each adapter type waits on in the exchange** (§6):
+
+| Adapter | Status |
+| --- | --- |
+| FIX order entry | Buildable now. `OrderCancelReplaceRequest` (35=G) has no engine support: the adapter rejects it, or maps it to a cancel plus a new order and says so. Decided in the FIX repository |
+| FIX market data, by price (L1/L2) | Buildable now |
+| FIX market data, by order (L3 / MBO) | Waits on per-order L3 recovery (Status.md open issue 7) |
+| Trade capture (35=AE) | Waits on persisted trade reports, a drop copy |
+| Historical market data | Waits on the TimescaleDB store |
+| gRPC and binary | Same SDK, same session; not started |
 
 ---
 
@@ -108,12 +157,13 @@ anything that finished while it was down is learned only from trade records.
 
 ## 6. Not yet provided by the exchange
 
-These belong in the adapter framework's plan:
+These belong in the adapter framework's plan (§0 has what each adapter type waits on):
 - **No trade record (drop copy).** Fills of orders that finished inside a truncated window, or while
   an adapter with no persisted state was down, cannot be recovered from the exchange (Design.md §8;
   roadmap: persisted TradeReports).
 - **No order-status query by `clOrdId`.** The mass status covers open orders only.
 - **A participant's last report, if dropped, is noticed only at its next report or request.** An
   adapter SHOULD fence when a client order has gone unanswered for longer than a failover takes.
+  `OrderEntrySession` does, after `unansweredFenceNs` (10 s by default).
 - **The directory names one gateway per shard** (open issue 6). Co-located endpoints are
   configuration.

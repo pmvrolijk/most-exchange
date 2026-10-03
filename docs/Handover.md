@@ -1374,6 +1374,122 @@ the sequence.
 - A trade record for orders that finished in a truncated window.
 - Multi-machine.
 
+### 2p. The adapter SDK: a `client` module, and the package rename
+
+Commits after `aab4e01`, uncommitted at the end of the session. This takes Status.md §3 item 13 ahead
+of archive retention, which was listed next, at the user's choice.
+
+**The decision** (with the user, 2026-10-03):
+- Adapters live in a repository of their own.
+- This project publishes an adapter SDK, `sbe` plus a new `client` module, under Apache-2.0.
+- FIX comes first, on Artio. One FIX session layer serves an order entry backend and a market data
+  backend.
+- Before anything is published, every package moves from `com.engine` to `nl.lamia.most.exchange`.
+  Rationale.md §17 has the reasoning.
+
+**The rename.** `git mv` of every `kotlin/com/engine/<leaf>` to `kotlin/nl/lamia/most/exchange/<leaf>`
+(`discovery`'s empty test directory was dropped). Packages and imports were rewritten, and so were:
+- the schema's codec package;
+- the six main classes;
+- the `pgrep` patterns in two skills and in `LocalTesting.md`.
+
+No byte on the wire moved. The checks were 668 tests, `run-e2e.sh`, and a native engine image
+(GraalVM CE 21.0.2 via `GRAALVM_HOME`, with `jdk.internal.misc.Unsafe` present 3 times).
+
+**The module.** `client` depends on `sbe`, `aeron-client` and `agrona`, and `reference` builds on it
+with `api`.
+
+Moved into it, with their tests:
+- `PriceCodec` and `ParticipantRequests`, which now owns `ALL_SECURITIES`; `OperatorCommands`
+  refers to it;
+- `AggregatedBook`, `DepthFeedAssembler`, `DepthFeedDecoder` and `FeedSequenceTracker`;
+- the decode half of the directory: `DirectoryClient`, `RoutedSecurity` and `ShardRoute`;
+- `ReportLedger`, from `tools`. It now takes any set of participant ids.
+
+New in it:
+- `OrderRequests`, which `OrderCommand` now uses instead of its own encoding;
+- `GatewayEndpoint`, and `GatewayLink` with `AeronGatewayLink`;
+- `OrderEntrySession`.
+
+Publishing:
+- `maven-publish` on `sbe` and `client`, under group `nl.lamia.most.exchange`, at `sdk.version`;
+- sources jars, with `LICENSE` in `META-INF` and the schema id and version in the manifest;
+- a manual `publish:sdk` CI job that has never been run.
+
+`publishToMavenLocal` works, and a throwaway project depending only on the artifact compiles against
+`DirectoryClient` and `OrderEntrySession`.
+
+**`OrderEntrySession`** is Adapters.md §1–§4 as one single-threaded Agrona `Agent`:
+- **Connecting:** both legs, then a mass status per participant before it is ready. The status's
+  `nextSeq` is also where the sequence starts.
+- **Back-pressure:** returned to the caller, never dropped.
+- **Switching:** on `NOT_CONNECTED`, or on a `GATEWAY_UNAVAILABLE` from the gateway in use.
+- **The fence:** sent per participant after a switch, on a gap, and on a request unanswered for 10 s.
+  A completion settles only what was sent before it.
+- **`TRUNCATED`:** a mass status follows, open orders are stated, and the rest are `AMBIGUOUS`.
+- **A gateway's `GATEWAY_UNAVAILABLE`:** reported as `NEVER_SEQUENCED`, never as a report.
+- **Restart:** a `SessionStore` persists the first missing `reportSeq`.
+- **A standby's refusal:** answered after a 100 ms retry, so two standbys are not flooded in turn.
+
+**Tested the wrong way round, then checked.** The session was written before its tests. The tests
+were then written against `ExchangeModel` (in `client`'s tests), built from Design.md §5 and the
+gateway's refusals, with every expectation citing its clause. Writing one expectation by hand caught
+an error in it before any code ran: a truncated resend still replays the ring's newest report.
+
+Ten mutations were each caught by at least one of the 12 session tests:
+- no deduplication;
+- settling ignores position;
+- a gateway reject delivered as a report;
+- ambiguous reported as never sequenced;
+- no fence before the next order;
+- no resume from `nextSeq`;
+- no fence on a gap;
+- no fence on an unanswered request;
+- no switch on a reject;
+- no opening status.
+
+**The tools.**
+- `most status` runs on the session, with `massStatusOnStart=false` and an explicit status, so
+  `--symbol` still narrows it. `run-e2e.sh` step 6a prints the same lines.
+- `most send` and `most cancel` were left alone. A session without the opening status starts its
+  ledger at 1, so the participant's first live report reads as a gap and the fence replays its
+  retained history into the output.
+- `most load` keeps its own two-thread fence on `client`'s ledger and encoders. It is a measurement
+  harness, and the plan's shared `FenceTracker` was not built: the session settles per participant,
+  and the load generator settles per generation across two threads, so sharing would have changed one
+  of them.
+
+**The finding that reversed a step.** The build was first switched from `aeron-all` to the modular
+artifacts (`aeron-client` for `client`, `aeron-cluster` elsewhere). All unit tests and `run-e2e.sh`
+passed. `PLACEMENT=colocated run-failover.sh` failed twice: `most session` printed "gateway did not
+accept the command" and the maker was rejected `MARKET_CLOSED`.
+
+A temporary print gave the result as `-2`, which is `BACK_PRESSURED`, on the first offer after the
+publication connected.
+
+| Build | Result |
+| --- | --- |
+| `HEAD`, clean worktree | Passes |
+| This tree, with `aeron-all` restored | Passes |
+
+So the jars were the cause. The exchange went back to `aeron-all`, and a dependency substitution
+replaces `aeron-client` with `aeron-all` inside this build. The published POM still declares
+`aeron-client`. **Unexplained.**
+
+**Checks at the end:**
+- 681 tests;
+- `run-e2e.sh`, with load counts identical to the run before the change: 10,944 reports, 5,142
+  trades, 802 cancels, 0 unanswered;
+- `run-failover.sh` in both placements, 0 unknown (9,976 and 9,997 orders proven never sequenced);
+- the standalone consumer;
+- the native engine image.
+
+**Not done:**
+- `run-attribution.sh` was not run. The engine and gateway changed in imports only and run on the
+  same `aeron-all`, and `most load` changed only in where its ledger's class lives.
+- No native binary was run through e2e.
+- The Operator's Manual PDF was not rebuilt. One sentence in `05-operations.md` changed.
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.
@@ -1993,7 +2109,7 @@ nothing reached the engine. The cause was my own teardown. `pkill` silently fail
 Aeron directory out from under still-running processes, and every subsequent run talked to a
 half-dead stack.
 
-`LocalTesting.md` now insists on verifying `pgrep -f "com.engine"` returns zero *before* cleanup, and
+`LocalTesting.md` now insists on verifying `pgrep -f "nl.lamia.most.exchange"` returns zero *before* cleanup, and
 that symptom is the third row of its troubleshooting table. The general lesson: **when behaviour is
 inexplicable, verify the environment before debugging the code.**
 

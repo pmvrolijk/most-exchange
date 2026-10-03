@@ -338,7 +338,7 @@ receiver governs — and that is correct here. `MinMulticastFlowControl` would l
 subscriber throttle the publisher, reintroducing exactly the coupling that moving market data out of
 the engine was meant to remove. The trade-off is real and accepted: slow subscribers take
 unrecoverable gaps, and gap detection plus snapshot resynchronisation are subscriber
-responsibilities (`FeedSequenceTracker` and `DepthFeedAssembler` in `reference`).
+responsibilities (`FeedSequenceTracker` and `DepthFeedAssembler` in `client`).
 
 ---
 

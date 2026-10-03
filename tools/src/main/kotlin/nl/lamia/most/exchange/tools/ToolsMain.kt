@@ -1,0 +1,135 @@
+package nl.lamia.most.exchange.tools
+
+/**
+ * Operator CLI. Every subcommand starts by listening for a discovery broadcast, because the
+ * routing table is the only thing that maps a symbol to the shard and gateway serving it.
+ */
+private val USAGE = """
+    most -- matching engine operator tools
+
+    Usage:
+      most securities [--verbose]
+      most send   --symbol SYM --side buy|sell --price P --qty Q [options]
+      most cancel --symbol SYM --side buy|sell --order-id ID --orig-clordid ID [options]
+      most book   [--symbol SYM[,SYM...]] [--depth N] [--refresh MS]
+      most load   --symbol SYM[,SYM...] --price-min P --price-max P [options]
+      most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
+      most session --phase closed|pre-open|open-auction|continuous [--shard N]
+      most purge  [--trading-date YYYYMMDD] [--shard N]
+      most image  [--shard N]
+      most cancel-all --participant ID [--symbol SYM | --shard N]
+      most status --participant ID [--symbol SYM | --shard N]
+      most cluster [--dir DIR] [--fresh] [--member-id N --members SPEC] [--ipc-ingress]
+      most cluster snapshot [--ingress 0=HOST:PORT [--identity ID --secret-file F] | --dir DIR]
+      most cluster shutdown [--dir DIR]
+      most counters [--match REGEX] [--interval-ms N] [--samples N] [--all]
+
+    Commands:
+      securities  List the tradable universe and the shard serving each security.
+      send        Submit an order, routed to the gateway that owns the symbol.
+      cancel      Cancel a resting order.
+      book        Rebuild and print order books from the L2 depth feed.
+      load        Drive a shard at a fixed rate and measure round-trip latency and throughput.
+      define      Seed a security's reference price and collar widths.
+      session     Move a shard to a trading phase; the uncross runs on the way to continuous.
+      purge       Run the off-session expiry sweep.
+      image       Republish every book on the shard as a level image, for a market data
+                  process that restarted and has no book to rebuild from.
+      cancel-all  Cancel every resting order of one participant, on one security or on the
+                  whole shard. The operator side of revocation: publish the participant's
+                  move to cancelOnly first, then send this. --participant is required.
+      status      Every open order of one participant, as the engine holds it now, and where
+                  its report sequence stands: the reconciliation at the open, or after a
+                  resend answered TRUNCATED (Design.md §5). Sent through the participant's
+                  own gateway; answered, unlike cancel-all.
+      cluster     Run a cluster host: media driver, archive and consensus module. Alone it
+                  is a single-node cluster; for several, pass every node the same --members
+                  (id,ingress,consensus,log,catchup,archive|...) and each its own
+                  --member-id. --ipc-ingress lets a gateway on this node's media driver
+                  reach the leader over IPC (gateway.placement=colocated). It persists the
+                  archive and cluster directories unless --fresh is given, because those
+                  are the shard's only resumption point.
+                  `cluster snapshot` asks for a snapshot -- with --ingress through
+                  consensus, so every member takes one at the same log position and the
+                  request is answered; with --dir through the local control toggle.
+                  A node with a participant registry refuses a session with no
+                  credentials, so --ingress then needs --identity and --secret-file: an
+                  operator-only entry in that registry.
+                  `cluster shutdown` snapshots and then stops the node, which SIGTERM
+                  does not.
+      counters    Print the media driver's counters -- the driver's own, the archive's and
+                  every cluster component's -- read straight from the CnC file with no
+                  Aeron client, so it cannot perturb a shard under load. With
+                  --interval-ms it reports the rate of change, which is what identifies a
+                  saturating stage: a position counter that stops advancing while the one
+                  feeding it does not.
+
+    Load options (the shard must already be defined and CONTINUOUS):
+      --count N                Orders to send (default 1000000)
+      --delay-us N             Microseconds between orders (default 10); 0 sends unpaced
+      --rate N                 Orders per second, instead of --delay-us
+      --warmup N               Leading orders excluded from the histograms
+      --qty-min Q --qty-max Q  Quantity range (default 1..100)
+      --participants N         Participant ids from --participant upward (default 4)
+      --seed N                 Generator seed, so a run repeats exactly (default 42)
+      --drain-ms N             Keep collecting reports this long after the last send (default 2000)
+      --interval-ms N          Progress line cadence (default 1000; 0 is silent)
+      --histogram FILE         Write the latency distribution for plotting
+
+    Order options:
+      --clordid ID             Client order id (default: current millis)
+      --smp-id ID              Self-match prevention id (default: the participant id)
+      --smp STRATEGY           aggressor (default) or resting
+      --expire-date YYYYMMDD   0, the default, is good-til-cancelled
+      --follow SECONDS         How long to print execution reports for (default 3)
+
+    Connection options (defaults match the sample configs):
+      --aeron-dir DIR
+      --discovery-channel URI  --discovery-stream N
+      --l1-channel URI         --l1-stream N
+      --l2-channel URI         --l2-stream N
+      --participant ID         Participant id to trade as (default 1)
+      --order-entry-channel URI  --order-entry-stream N
+      --report-channel URI       --report-stream N
+                               A gateway other than the one the directory advertises: the
+                               participant's own, or one with operator=true for define,
+                               session, purge, image and cancel-all (Design.md §1).
+                               `most load` takes a comma-separated list of each, one per
+                               co-located gateway, and moves to the next on a
+                               GATEWAY_UNAVAILABLE reject (Design.md §7).
+      --timeout SECONDS        How long to wait for a directory (default 15)
+""".trimIndent()
+
+fun main(argv: Array<String>) {
+    val command = argv.firstOrNull()
+    if (command == null || command in setOf("--help", "-h", "help")) {
+        println(USAGE)
+        return
+    }
+
+    val args = Args(argv.drop(1).toTypedArray())
+    try {
+        when (command) {
+            "securities" -> runSecurities(args)
+            "send" -> runSend(args)
+            "cancel" -> runCancel(args)
+            "book" -> runBook(args)
+            "load" -> runLoad(args)
+            "define" -> runDefine(args)
+            "session" -> runSession(args)
+            "purge" -> runPurge(args)
+            "image" -> runImage(args)
+            "cancel-all" -> runCancelAll(args)
+            "status" -> runStatus(args)
+            "cluster" -> runCluster(args)
+            "counters" -> runCounters(args)
+            else -> {
+                System.err.println("most: unknown command '$command'")
+                println()
+                println(USAGE)
+            }
+        }
+    } catch (e: IllegalArgumentException) {
+        System.err.println("most: ${e.message}")
+    }
+}

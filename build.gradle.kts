@@ -89,6 +89,20 @@ subprojects {
         }
     }
 
+    // One copy of Aeron in every process: the SDK declares aeron-client, which is what its POM
+    // publishes, and everything else here runs on aeron-all. Resolved separately they put each class
+    // on the classpath twice. The modular jars were tried instead, on 2026-10-03, and changed
+    // behaviour: `most session` met BACK_PRESSURED on its first offer, every time, in
+    // `PLACEMENT=colocated e2e/run-failover.sh`, which passes on aeron-all. Not yet explained
+    // (docs/Status.md), so the exchange stays on the jar every measurement was taken with.
+    configurations.configureEach {
+        resolutionStrategy.dependencySubstitution {
+            substitute(module("io.aeron:aeron-client"))
+                .using(module("io.aeron:aeron-all:${rootProject.libs.versions.aeron.get()}"))
+                .because("one copy of Aeron per process; see the comment above")
+        }
+    }
+
     tasks.withType<Test>().configureEach {
         useJUnitPlatform()
         testLogging { events("passed", "skipped", "failed") }
@@ -103,5 +117,66 @@ subprojects {
         // to /dev/shm on Linux, which a Docker container caps at 64 MB -- less than one 16 MB-term
         // IPC log. The e2e scripts keep their Aeron directory under build/ for the same reason.
         systemProperty("aeron.dir", project.layout.buildDirectory.dir("aeron-test").get().asFile.absolutePath)
+    }
+}
+
+// The two Apache-2.0 modules an adapter links (docs/Adapters.md §0) are the only things this build
+// publishes. Everything else is the exchange, not a library, and keeps its unversioned jars.
+//
+// The repository is the GitLab project's package registry, reached only from CI with the job's own
+// token (the manual `publish:sdk` job). Locally, `publishToMavenLocal` -- or, better, a composite
+// build from the adapter repository (`includeBuild("../most-exchange")`), which needs no publish.
+val sdkSchema = Regex("""package="[^"]+"\s+id="(\d+)"\s+version="(\d+)"""")
+    .find(file("sbe/src/main/resources/message-schema.xml").readText())
+    ?: error("message-schema.xml: no schema id and version found")
+
+configure(listOf(project(":sbe"), project(":client"))) {
+    apply(plugin = "maven-publish")
+    group = "nl.lamia.most.exchange"
+    version = providers.gradleProperty("sdk.version").get()
+
+    extensions.configure<JavaPluginExtension> { withSourcesJar() }
+
+    // Which wire an SDK jar speaks, readable without unpacking a class. A client built against
+    // schema version N can read anything up to N (SBE's acting-version rule, Design.md §5).
+    tasks.withType<Jar>().configureEach {
+        from(project.file("LICENSE")) { into("META-INF") }
+        manifest.attributes(
+            "Implementation-Title" to "most-exchange ${project.name}",
+            "Implementation-Version" to project.version,
+            "Most-Sbe-Schema-Id" to sdkSchema.groupValues[1],
+            "Most-Sbe-Schema-Version" to sdkSchema.groupValues[2],
+        )
+    }
+
+    extensions.configure<PublishingExtension> {
+        publications.create<MavenPublication>("sdk") {
+            from(components["java"])
+            pom {
+                name.set("most-exchange ${project.name}")
+                url.set("https://gitlab.fritz.box/trading/most-exchange")
+                licenses {
+                    license {
+                        name.set("Apache-2.0")
+                        url.set("https://www.apache.org/licenses/LICENSE-2.0")
+                    }
+                }
+            }
+        }
+        repositories {
+            val api = providers.environmentVariable("CI_API_V4_URL").orNull
+            val projectId = providers.environmentVariable("CI_PROJECT_ID").orNull
+            if (api != null && projectId != null) {
+                maven {
+                    name = "gitlab"
+                    url = uri("$api/projects/$projectId/packages/maven")
+                    credentials(HttpHeaderCredentials::class) {
+                        name = "Job-Token"
+                        value = providers.environmentVariable("CI_JOB_TOKEN").orNull
+                    }
+                    authentication { create<HttpHeaderAuthentication>("header") }
+                }
+            }
+        }
     }
 }

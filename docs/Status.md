@@ -1,10 +1,29 @@
 # Status
 
 Where the project stands, what is open, and what to do next. **This is the session entry point** —
-read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
+read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2p),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03 (close). **[`Adapters.md`](Adapters.md)** now states what an order entry
+Last updated 2026-10-03 (late close). **The adapter framework has started** (Handover §2p;
+Adapters.md §0):
+- **Adapters live in their own repository**, built on an **adapter SDK** this project publishes:
+  `sbe` and a new **`client`** module, under Apache-2.0, where the exchange stays AGPL.
+- **FIX comes first, on Artio.** One session layer serves an order entry backend and a market data
+  backend.
+- **Every package is now `nl.lamia.most.exchange.*`**, renamed from `com.engine` before anything is
+  published.
+- **`client` holds what an adapter needs**: the directory client, the depth feed assembler, the
+  encoders, the report ledger and **`OrderEntrySession`**. The session is Adapters.md §1–§4 in one
+  agent. Its 12 tests run against a model of the exchange, and ten mutations of it are each caught.
+  `most status` runs on it.
+- **Checks:** `run-e2e.sh` with the same counts as before, `run-failover.sh` with **0 unknown** in
+  both placements, and a native engine image.
+- **One step was reversed.** Aeron's modular jars broke `run-failover.sh`, for a reason not yet found
+  (open issue 18), so the exchange stays on `aeron-all`.
+- **Not done:** nothing has been published, and `OrderEntrySession` itself has not been through a
+  real failover.
+
+Earlier the same day, **[`Adapters.md`](Adapters.md)** came to state what an order entry
 adapter must do: connect, switch gateways, track `reportSeq`, fence with a resend, reconcile with a mass
 status, and what it keeps. It is the brief for the adapter framework (§3).
 
@@ -76,11 +95,11 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 
 | | |
 | --- | --- |
-| Branch | `master` at `2eb790e`, with this session's work **uncommitted** on top (the user commits it). `docs/Future.md` also carried an uncommitted edit of the user's from before the session |
-| Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~28,200 lines — 15,450 main across 71 files, 12,740 test across 63 |
+| Branch | `master` at `aab4e01`, with this session's work **uncommitted** on top (the user commits it) |
+| Modules | 9 — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`. Packages `nl.lamia.most.exchange.*` |
+| Kotlin | ~31,700 lines — 17,280 main across 80 files, 14,380 test across 70 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 668, all passing |
+| Tests | 681, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -92,11 +111,12 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
-| Adapters | [`Adapters.md`](Adapters.md) — the contract an order entry adapter must meet; the brief for the adapter framework |
+| Adapters | [`Adapters.md`](Adapters.md) — §0 the framework (the SDK, Artio, what each adapter type waits on); §1–§6 the contract, which `client`'s `OrderEntrySession` implements |
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
-./gradlew clean build                        # 668 tests (control's need Docker)
+./gradlew clean build                        # 681 tests (control's need Docker)
+./gradlew :client:publishToMavenLocal        # the adapter SDK, for a local adapter build
 ./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
 ./e2e/run-restart.sh                         # does the shard come back with its book?
 ./e2e/run-cluster3.sh                        # three members: election, two failovers, a rejoin
@@ -329,13 +349,27 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     to a snapshot cycle behind after a burst. The knobs are the idle strategy, the fragment limit
     and the publish interval. A decision, not a defect.
 
+### Found 2026-10-03 (adapter SDK)
+
+18. **Aeron's modular jars change behaviour, and nobody knows why.** On `aeron-client` +
+    `aeron-cluster` instead of `aeron-all`, at the same 1.53.0, `PLACEMENT=colocated
+    run-failover.sh` failed twice. `most session`'s first offer after connecting returned
+    `BACK_PRESSURED`. `HEAD` and the same tree on `aeron-all` pass (Rationale §17). The exchange
+    stays on `aeron-all` by a dependency substitution. Adapters will run on `aeron-client`, which is
+    safe only because `OrderEntrySession` retries back-pressure. Find the cause before switching.
+19. **The CLI gives up on one back-pressured offer.** `sendToShard` (every operator command) and
+    `most send`/`cancel` offer once. On `BACK_PRESSURED` they print "gateway did not accept" and
+    **exit 0**, so a script carries on with the market closed. This breaks Adapters.md §2's rule. The
+    fix is a bounded retry and a non-zero exit.
+
 ---
 
 ## 3. To do next
 
-~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: archive
-retention (item 4 below)**. **In one of the sessions after it: the adapter framework** (item 13
-below), to [`Adapters.md`](Adapters.md). Then then the remaining correctness items, then the
+~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: the FIX adapter
+repository** (item 13 below). The user chose the adapter framework ahead of archive retention on
+2026-10-03, and its SDK is in place. **Creating the GitLab repository and publishing the SDK both
+wait for a go.** Archive retention (item 4) follows it. Then then the remaining correctness items, then the
 throughput follow-ups. Multi-node now runs on one machine, which makes retention checkable across
 members too (does a follower truncate when the leader snapshots?). The next multi-node step needs
 machines: three members across hosts, and a sweep with followers (item 3(b)). That is billed, so it
@@ -461,15 +495,27 @@ The full list, in the order it was written:
 11. **Tests for the `discovery` process** itself. Also outstanding.
 11a. ~~**Bulk cancel of one participant's resting orders**~~ **Done** (open issue 3; Design.md §4.8).
 11b. ~~**Refuse to publish into an existing release directory**~~ **Done** (open issue 6a).
-13. **Adapter framework** (decided 2026-10-03 to come in one of the next sessions). Order entry adapters,
-    FIX first, built to [`Adapters.md`](Adapters.md). The exchange side they need is in place: the report
-    sequence, resend fence and mass status (Design.md §5), and `ParticipantRequests`. `most load` is the
-    reference behaviour. To decide when it starts:
-    - where the framework lives (a module here, or its own repository);
-    - which FIX engine;
-    - how an adapter persists its order and sequence state (Adapters.md §5);
-    - whether the exchange gains a drop copy first, since it is the one gap an adapter cannot close
-      (Adapters.md §6).
+13. **Adapter framework.** **Started 2026-10-03** (Handover §2p; Adapters.md §0). The four questions:
+    - ~~where the framework lives~~ **its own repository, on the `client` SDK published from here**
+      (Apache-2.0);
+    - ~~which FIX engine~~ **Artio**;
+    - ~~how an adapter persists its state~~ **the sequence through `OrderEntrySession`'s
+      `SessionStore`, which the adapter makes durable; the per-order mapping is the adapter's own**;
+    - **a drop copy is still not built.** It now gates trade capture (35=AE) as well as the orders
+      that finished inside a truncated window.
+
+    **Next, in order:**
+    - (a) **the FIX adapter repository**, which needs a go to create on GitLab: an Artio acceptor, the
+      order entry backend on `OrderEntrySession`, and its own e2e against this repo's processes. That
+      e2e is the first test of `OrderEntrySession` through a real failover;
+    - (b) the market data backend: L1/L2 from `DepthFeedAssembler`, a `SecurityList` from the
+      directory;
+    - (c) **publishing the SDK**, which needs a go (`publish:sdk`, manual);
+    - (d) 35=G (cancel/replace), decided in the FIX repository.
+
+    MBO, trade capture and history each wait on the exchange (Adapters.md §0). Also open: open issues
+    18 and 19; `most send`/`cancel` are not on the session (Handover §2p); and the Operator's Manual
+    PDF needs rebuilding for one changed sentence in §5.
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.
 
@@ -516,7 +562,7 @@ The full list, in the order it was written:
 * `e2e/run-epsilon-soak.sh` measures steady-state allocation against a real cluster.
 
 **Writing a market data consumer** — a FIX adapter, a recorder, a screen? Everything needed is in
-`reference` and is already used by two independent consumers: `DepthFeedAssembler` (the snapshot and
+`client` and is already used by two independent consumers: `DepthFeedAssembler` (the snapshot and
 increment splice, and the recovery state machine), `DepthFeedDecoder` (which template ids matter and
 which fields carry the splice) and `AggregatedBook` (the price-keyed book itself). Subscribe to
 **all three** feeds — L2 for increments, the snapshot stream for the images that make them

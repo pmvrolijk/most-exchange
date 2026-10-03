@@ -170,6 +170,34 @@ resting-order counts are reconciled as a backstop. Do not assume a throw on this
 timestamp — so the operator who fixes the security file and restarts immediately is met with "active
 mark file detected" for the next ten seconds instead of a working node.
 
+**The leader announces its configuration in the log, and a node that disagrees refuses.** Printed
+fingerprints relied on an operator comparing them. Two nodes on different geometry, or on a different
+`auctionMaxPasses`, read an identical log and diverge on the first order that touches the
+difference. Consensus cannot see that, because the log they disagree about is the same. The
+snapshot check only catches it when a snapshot lies between them. The alternatives were weighed
+and refused. A check against the release manifest catches a corrupt file but not two nodes on
+different releases. A warning without a refusal lets the node go on diverging. And Aeron's own
+`appVersion` is a 32-bit field that Aeron also checks on snapshot load, so it would refuse even the
+geometry changes the restore deliberately allows (Design.md §7, "Enforced through the log").
+
+**A service message has to be offered on every node, from a log event.** Aeron numbers each node's
+service messages, appends only the leader's, and sweeps a follower's copy when the leader's commits
+under the same number. A message offered on one node alone puts that numbering out of step, and
+Aeron throws if one is offered from `onRoleChange`. The announcement is offered from
+`onNewLeadershipTermEvent`, which every node reads at the same log position, and each node offers
+its own values. What reaches the log is the leader's. Service messages arrive at `onSessionMessage`
+with a **null** session, so the parameter is nullable. A non-null Kotlin parameter would throw on
+the first one.
+
+**A refused node has to stop applying the log itself.** The throw that reports the mismatch is
+swallowed by the image like any other (above), and the log keeps arriving. So the service sets a
+flag, ignores everything after it, and refuses to snapshot.
+
+**A line printed before replay says nothing about surviving it.** `run-restart.sh` step 7 passed
+while its engine refused. It waited for "joined the shard", which `loadSnapshot` prints before the
+log tail is replayed, and the refusal came a moment later. The step now asserts on the shutdown
+line's `configurationAnnouncementsAgreed`, and step 8 covers the refusal itself.
+
 ---
 
 ## 6. Market data: the book image, the recovery feed, and the splice rules

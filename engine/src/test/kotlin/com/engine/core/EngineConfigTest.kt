@@ -8,6 +8,7 @@ import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertNotEquals
 import kotlin.test.assertTrue
 
 /**
@@ -139,6 +140,44 @@ class EngineConfigTest {
             spec,
         )
         assertEquals(spinning.fingerprint(), sleeping.fingerprint())
+    }
+
+    // Design.md §7, "Enforced through the log": the engine fingerprint covers every setting that
+    // can change what the engine computes from a given log -- today auctionMaxPasses alone -- and
+    // nothing node-local.
+
+    @Test
+    fun `the engine fingerprint changes with the auction pass limit`() {
+        val spec = shard(1, 2)
+        val eight = EngineConfig.from(Properties().apply { setProperty(EngineConfig.AUCTION_MAX_PASSES, "8") }, spec)
+        val nine = EngineConfig.from(Properties().apply { setProperty(EngineConfig.AUCTION_MAX_PASSES, "9") }, spec)
+        assertNotEquals(eight.engineFingerprintValue(), nine.engineFingerprintValue())
+        // A separate value: the shard fingerprint is published in releases and must not move.
+        assertEquals(eight.fingerprint(), nine.fingerprint())
+    }
+
+    @Test
+    fun `node-local settings are not part of the engine fingerprint`() {
+        val spec = shard(1, 2)
+        val plain = EngineConfig.from(Properties(), spec)
+        val tuned = EngineConfig.from(
+            Properties().apply {
+                setProperty(EngineConfig.IDLE_STRATEGY, "backoff")
+                setProperty(EngineConfig.METRICS_ENABLED, "true")
+                setProperty(EngineConfig.METRICS_STAGES, "true")
+                setProperty(EngineConfig.PARTICIPANT_REGISTRY_RELOAD_MS, "250")
+                setProperty(EngineConfig.BACKPRESSURE_ALERT_THRESHOLD, "17")
+                setProperty(EngineConfig.SERVICE_ID, "3")
+            },
+            spec,
+        )
+        assertEquals(plain.engineFingerprintValue(), tuned.engineFingerprintValue())
+    }
+
+    @Test
+    fun `the printed engine fingerprint is the announced value in hex`() {
+        val config = EngineConfig.from(Properties(), shard(1))
+        assertEquals(java.lang.Long.toHexString(config.engineFingerprintValue()), config.engineFingerprint())
     }
 
     @Test

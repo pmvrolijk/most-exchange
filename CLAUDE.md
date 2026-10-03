@@ -114,6 +114,17 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   assume a throw on this path is loud. → R§5
 - **A refused restore leaves through the `ShutdownSignalBarrier`, not `Runtime.halt`** — halting
   leaves a live mark file and blocks the operator's fixed restart for ten seconds. → R§5
+- **Every node compares the leader's configuration from the log and refuses on a difference.** The
+  leader's `ConfigurationAnnouncement` (shard fingerprint + engine fingerprint, at each term start)
+  is checked by every node; a mismatch stops applying, refuses to snapshot and exits non-zero. A
+  setting that can change what the engine computes from a log belongs in
+  `EngineConfig.engineFingerprintValue()`. **A geometry change needs a snapshot at the end of the
+  log** (`most cluster shutdown`). A log tail written under another file refuses on replay. → R§5
+- **A service message is offered on every node, from a log callback, never from `onRoleChange`**
+  (Aeron throws there), and it arrives at `onSessionMessage` with a **null** session. An
+  announcement on a client session is ignored. → R§5
+- **Assert on a node surviving replay, not on a line printed before it.** `loadSnapshot`'s lines
+  come before the log tail is replayed. → R§5
 
 ## Market data
 

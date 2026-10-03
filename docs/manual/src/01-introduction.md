@@ -85,7 +85,8 @@ host. They are deliberately not in the database and not in a release.
 A short hash over a shard's published geometry, printed by the engine, gateway, market-data and
 discovery processes at startup. Three nodes printing three different values is a divergence waiting
 to happen on the first order, and consensus cannot catch it — this is the one misconfiguration Raft
-will not save you from.
+will not save you from. The engine catches it instead. The leader writes its fingerprint into the log
+at each term start, and a node that disagrees refuses to go on.
 :::
 
 ::: term Release

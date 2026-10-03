@@ -61,6 +61,7 @@ fun main(args: Array<String>) {
         shardId = config.shard.shardId,
         books = books,
         shardFingerprint = config.shard.fingerprintValue(),
+        engineFingerprint = config.engineFingerprintValue(),
         bookEventChannel = config.bookEventChannel,
         bookEventStreamId = config.bookEventStreamId,
         levelCount = config.maxLevelCount(),
@@ -71,9 +72,11 @@ fun main(args: Array<String>) {
     )
 
     // Every node must boot with identical configuration or the books diverge on the first order.
-    // Print the fingerprint so an operator can compare nodes without diffing files.
+    // Printed so an operator can compare nodes without diffing files; the engine also compares them
+    // itself, against the leader's announcement in the log (Design.md §7).
     println(
         "matching-engine: shard=${config.shard.shardId} fingerprint=${config.fingerprint()} " +
+            "engineFingerprint=${config.engineFingerprint()} " +
             "securities=${config.shard.securities.map { it.symbol }} " +
             "serviceId=${config.serviceId} clusterDir=${config.clusterDir} " +
             "participantRegistry=${config.registryFingerprint()}" +
@@ -92,9 +95,10 @@ fun main(args: Array<String>) {
     }
 
     // Created before the container so the error handler below can release it. A refused snapshot
-    // restore has to leave through the same orderly shutdown as everything else -- see below.
+    // restore, or a configuration the leader's announcement disagrees with, has to leave through
+    // the same orderly shutdown as everything else -- see below.
     val barrier = ShutdownSignalBarrier()
-    val refused = java.util.concurrent.atomic.AtomicReference<SnapshotRestoreFailed>()
+    val refused = java.util.concurrent.atomic.AtomicReference<NodeRefusal>()
 
     val context = ClusteredServiceContainer.Context()
         .clusteredService(service)
@@ -108,20 +112,24 @@ fun main(args: Array<String>) {
         }
         .errorHandler { throwable ->
             val refusal = generateSequence(throwable) { it.cause }
-                .filterIsInstance<SnapshotRestoreFailed>()
+                .filterIsInstance<NodeRefusal>()
                 .firstOrNull()
             if (refusal != null) {
-                // A refused restore is a decision, not a crash: the report is the whole message
-                // and a stack trace only buries it. The service runs on the container's agent
-                // thread, so throwing there lands here rather than out of launch() -- and a node
-                // that cannot restore its state must not go on to join consensus without it.
+                // A refusal is a decision, not a crash: the report is the whole message and a stack
+                // trace only buries it. The service runs on the container's agent thread, so
+                // throwing there lands here rather than out of launch() -- and a node that cannot
+                // restore its state, or that disagrees with the leader's configuration, must not go
+                // on as a member of the cluster.
                 //
                 // Release the barrier rather than halting the JVM. Halting skips
                 // `ClusteredServiceContainer.close()`, which leaves this service's cluster mark
                 // file carrying a live timestamp -- so the operator who fixes the security file
                 // and restarts immediately is met with "active mark file detected" for the next
                 // ten seconds instead of a working node. The orderly path releases it.
-                refused.set(refusal)
+                //
+                // Only the first is kept: a node that refused its configuration also refuses to
+                // snapshot, and that second refusal is a consequence, not the news.
+                refused.compareAndSet(null, refusal)
                 barrier.signal()
                 return@errorHandler
             }
@@ -152,8 +160,9 @@ fun main(args: Array<String>) {
         registrySource.use { barrier.use {
             barrier.await()
             refused.get()?.let { refusal ->
-                // Nothing below applies: this engine restored nothing and processed nothing, so
-                // its counters and histograms would describe a node that never ran.
+                // Nothing below applies: this engine either restored nothing, or applied the log
+                // under a configuration it has since refused, so its counters and histograms would
+                // describe a node that should not have run.
                 System.err.println(refusal.message)
                 System.err.flush()
                 System.out.flush()
@@ -174,7 +183,8 @@ fun main(args: Array<String>) {
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +
                     "undeclaredParticipantMessages=${service.undeclaredParticipantMessages} " +
-                    "participantRoutes=${service.participantRoutes}" +
+                    "participantRoutes=${service.participantRoutes} " +
+                    "configurationAnnouncementsAgreed=${service.configurationAnnouncementsAgreed}" +
                     (registrySource?.let {
                         " registryReloads=${it.reloads} registryReloadFailures=${it.failures}"
                     } ?: "")

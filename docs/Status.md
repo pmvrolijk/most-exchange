@@ -31,7 +31,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 
 | | |
 | --- | --- |
-| Branch | `cloud-deploy`, one commit ahead of `master` (`cf6e302`) plus this session's uncommitted write-up. CI: check pipeline 38 (`029e37a`) first, which was still running at the previous close |
+| Branch | `master`, pushed at `3d6fb06`, with `cloud-deploy` merged (`cf6e302`, `2021b61`, `aaff566`, `3d6fb06`). **CI: pipeline 40 was still running at close** (`build` green, `test:core` running, the rest pending), so check it first. The two measure jobs stay manual |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
 | Kotlin | ~26,300 lines — 14,660 main across 69 files, 11,670 test across 58 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
@@ -202,12 +202,16 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 9. **A `SecurityDefinition` cannot be confirmed.** Nothing on any feed acknowledges one and a
    rejection only increments `rejectedDefinitions`. An ack message in the schema would close it.
 10. **`SecurityDefinition` conflates boot-time geometry with runtime reconfiguration.**
-11. **Fingerprints are printed, never compared.** A snapshot-versus-node mismatch is now loud; a
-    node-versus-node mismatch with no snapshot between them still diverges silently on the first
-    order. Adjacent: **`auctionMaxPasses` is in no fingerprint at all**, though it bounds the SMP
-    fixed point and so can change an uncross result. It cannot be folded into
-    `ShardSpec.fingerprint()` — that hash is stored by the control plane and published in releases —
-    and wants a separate engine-level one.
+11. ~~**Fingerprints are printed, never compared.**~~ **Enforced (2026-10-03).** At each term start the
+    leader writes a `ConfigurationAnnouncement` into the log, carrying the shard fingerprint and a new
+    **engine fingerprint** (`auctionMaxPasses`). Every node compares it with its own and refuses on any
+    difference (Design.md §7, "Enforced through the log"). Proven on a real node: `run-e2e.sh` reads it
+    back (`configurationAnnouncementsAgreed=1`), and `run-restart.sh` step 8 refuses a log tail
+    replayed under another file. **Still open:** a tail with no term start in it is not compared; a
+    term sequenced by a misconfigured leader cannot be replayed by a correct node, and recovering from
+    one has no procedure; and **no multi-node run has exercised it**, so a follower refusing a leader
+    is unit-tested only. Operational consequence: a geometry change now needs `most cluster shutdown`,
+    not SIGTERM.
 12. Smaller confirmations: collars in the auction (uncollared, deliberate); a closing auction and
     whether it resets `staticReference`; order modify/replace (unsupported, cancel/new only);
     reference price on a day with no trades.
@@ -259,9 +263,8 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 open issue 13a). What remains is the next knee and a production decision. That work isn't dangerous,
 and the correctness items are. In the order I would take them, cheapest-and-most-dangerous first:
 
-1. **Fingerprint enforcement at boot** (item 9, open issue 11) — a node-versus-node geometry mismatch
-   still diverges silently on the first order, and `auctionMaxPasses` is in no fingerprint. Cheap, and
-   it closes the one silent-divergence path left. Use `decision-fork`: it changes a boot path.
+1. ~~**Fingerprint enforcement at boot**~~ **Done 2026-10-03** (open issue 11). The leader announces
+   its configuration in the log, and a node that disagrees refuses.
 2. **Refuse to publish into an existing release directory** (item 11b, open issue 6a) — small, and
    makes a KDoc promise true.
 3. **Bulk cancel of one participant's resting orders** (item 11a, open issue 3) — the operator side of
@@ -366,7 +369,7 @@ The full list, in the order it was written:
    `ClusterCommand.kt` to need generalising. What is untested is specifically the multi-node part:
    whether a snapshot taken through consensus on one member restores on another, and whether a
    rejoining node catches up from the archive rather than from genesis.
-9. **Fingerprint enforcement at boot** (open issue 11) — cheap, and closes a silent-divergence path.
+9. ~~**Fingerprint enforcement at boot**~~ **Done** (open issue 11).
 10. **Reconcile `Design.md` §6 with the code**, or cut it. Outstanding for several sessions.
 11. **Tests for the `discovery` process** itself. Also outstanding.
 11a. **Bulk cancel of one participant's resting orders** — the operator side of revocation, which

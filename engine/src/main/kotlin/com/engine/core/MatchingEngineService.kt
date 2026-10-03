@@ -4,6 +4,8 @@ import com.engine.sbe.AuctionUncrossedEncoder
 import com.engine.sbe.BookImageBeginEncoder
 import com.engine.sbe.BookImageEndEncoder
 import com.engine.sbe.BookImageLevelEncoder
+import com.engine.sbe.ConfigurationAnnouncementDecoder
+import com.engine.sbe.ConfigurationAnnouncementEncoder
 import com.engine.sbe.ExecType
 import com.engine.sbe.ExecutionReportEncoder
 import com.engine.sbe.MessageHeaderDecoder
@@ -44,6 +46,7 @@ import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
 import org.agrona.collections.Long2LongHashMap
 import org.agrona.collections.Long2ObjectHashMap
+import java.util.concurrent.TimeUnit
 import com.engine.sbe.Phase as SbePhase
 import com.engine.sbe.RejectReason as SbeRejectReason
 import com.engine.sbe.Side as SbeSide
@@ -78,6 +81,12 @@ class MatchingEngineService(
      * taken from. Never recomputed here: the hash has exactly one implementation, in `reference`.
      */
     private val shardFingerprint: Long,
+    /**
+     * `EngineConfig.engineFingerprintValue()`: every engine setting that can change what this
+     * service computes from a given log. Announced beside [shardFingerprint] at the start of each
+     * leadership term and compared by every node (Design.md §7, "Enforced through the log").
+     */
+    private val engineFingerprint: Long,
     private val bookEventChannel: String,
     private val bookEventStreamId: Int,
     private val levelCount: Int = 65_536,
@@ -182,11 +191,26 @@ class MatchingEngineService(
     private val bookImageLevelEncoder = BookImageLevelEncoder()
     private val bookImageEndEncoder = BookImageEndEncoder()
     private val requestBookImageDecoder = RequestBookImageDecoder()
+    private val announcementEncoder = ConfigurationAnnouncementEncoder()
+    private val announcementDecoder = ConfigurationAnnouncementDecoder()
 
     private val snapshotStateEncoder = SnapshotEngineStateEncoder()
     private val snapshotBookEncoder = SnapshotBookEncoder()
     private val snapshotOrderEncoder = SnapshotOrderEncoder()
     private val snapshotEndEncoder = SnapshotEndEncoder()
+
+    /**
+     * Set once this node has read a `ConfigurationAnnouncement` it disagrees with. From then on it
+     * applies nothing: the throw that reports the mismatch is swallowed by the image it was polled
+     * from, which goes on delivering the log, and a node that has already said it is wrong must not
+     * go on computing (Design.md §7, "Enforced through the log").
+     */
+    var refused = false
+        private set
+
+    /** Announcements read that agreed with this node, live or in replay. */
+    var configurationAnnouncementsAgreed = 0L
+        private set
 
     // Counters. Not state: they never influence a decision, so they cannot diverge nodes.
     var undeliverableReports = 0L
@@ -292,7 +316,7 @@ class MatchingEngineService(
      * book event publication is muted, and publishes if it is ever made leader.
      */
     override fun doBackgroundWork(nowNs: Long): Int {
-        if (!bookImagePending || !isLeader) return 0
+        if (!bookImagePending || !isLeader || refused) return 0
         val publication = bookEventPub ?: return 0
         if (!publication.isConnected) return 0
         for (book in books) publishBookImage(book)
@@ -427,21 +451,72 @@ class MatchingEngineService(
 
     override fun onTimerEvent(correlationId: Long, timestamp: Long) = Unit
 
+    /**
+     * Announces this node's configuration into the log, at the start of every leadership term.
+     *
+     * Offered on **every** node, not only the leader. That is the contract Aeron's service messages
+     * are built on: the consensus module numbers each node's offers, appends only the leader's, and
+     * sweeps a follower's copy once the leader's is committed under the same number. One node
+     * offering alone would put that numbering out of step, and an offer from [onRoleChange] is
+     * refused outright. What reaches the log is therefore the leader's configuration, which every
+     * node then checks in [onConfigurationAnnouncement].
+     *
+     * Runs once per term, never on the order path.
+     */
+    override fun onNewLeadershipTermEvent(
+        leadershipTermId: Long,
+        logPosition: Long,
+        timestamp: Long,
+        termBaseLogPosition: Long,
+        leaderMemberId: Int,
+        logSessionId: Int,
+        timeUnit: TimeUnit,
+        appVersion: Int,
+    ) {
+        if (refused) return
+        val length = MessageHeaderEncoder.ENCODED_LENGTH + ConfigurationAnnouncementEncoder.BLOCK_LENGTH
+        val idle = cluster.idleStrategy()
+        idle.reset()
+        // BACK_PRESSURED and ADMIN_ACTION are transient; anything else Aeron throws on itself.
+        while (cluster.tryClaim(length, claim) <= 0) idle.idle()
+        // Cluster.tryClaim reserves the session header exactly as ClientSession.tryClaim does.
+        announcementEncoder
+            .wrapAndApplyHeader(
+                claim.buffer(), claim.offset() + AeronCluster.SESSION_HEADER_LENGTH, headerEncoder,
+            )
+            .shardFingerprint(shardFingerprint)
+            .engineFingerprint(engineFingerprint)
+            .shardId(shardId)
+        claim.commit()
+    }
+
     // -------------------------------------------------------------- ingress
 
     override fun onSessionMessage(
-        session: ClientSession,
+        // Null for a service message: Aeron finds no client session for its negative id.
+        session: ClientSession?,
         timestamp: Long,
         buffer: DirectBuffer,
         offset: Int,
         length: Int,
         header: Header,
     ) {
-        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
+        if (refused || length < MessageHeaderDecoder.ENCODED_LENGTH) return
         headerDecoder.wrap(buffer, offset)
         val body = offset + MessageHeaderDecoder.ENCODED_LENGTH
         val blockLength = headerDecoder.blockLength()
         val version = headerDecoder.version()
+
+        if (session == null) {
+            // Only a service message can carry the leader's configuration, and only one can arrive
+            // here. The converse holds too: an announcement on a client session falls through to
+            // the unknown-template case below, so a client cannot stop a node by forging one.
+            if (headerDecoder.templateId() == ConfigurationAnnouncementDecoder.TEMPLATE_ID) {
+                announcementDecoder.wrap(buffer, body, blockLength, version)
+                onConfigurationAnnouncement()
+            }
+            return
+        }
 
         // The clock is read only when metrics are on, and what it produces never re-enters the
         // state machine (see EngineMetrics). Nothing below this line branches on `started`.
@@ -810,6 +885,42 @@ class MatchingEngineService(
     }
 
     /**
+     * Compares the leader's configuration with this node's, and refuses on any difference
+     * (Design.md §7, "Enforced through the log").
+     *
+     * Every node runs this at the same log position, live or in replay. A node that agrees does
+     * nothing; one that disagrees stops applying the log and throws, which the host turns into an
+     * orderly exit. What it computed before this point was never visible: a follower's egress is
+     * mocked and its book events muted, and a recovering node replays as a follower. The leader
+     * never disagrees with an announcement it made itself, only with one from an earlier term
+     * replayed under a configuration that was changed without a snapshot at the end of the log.
+     */
+    private fun onConfigurationAnnouncement() {
+        val announcedShard = announcementDecoder.shardFingerprint()
+        val announcedEngine = announcementDecoder.engineFingerprint()
+        val announcedShardId = announcementDecoder.shardId()
+        if (announcedShard == shardFingerprint && announcedEngine == engineFingerprint &&
+            announcedShardId == shardId
+        ) {
+            configurationAnnouncementsAgreed++
+            return
+        }
+        refused = true
+        throw ConfigurationMismatch(
+            "matching-engine: refused to go on -- the log carries a configuration this node did not " +
+                "boot with (Design.md §7, \"Enforced through the log\").\n" +
+                "  announced: shard=$announcedShardId fingerprint=${hex(announcedShard)} " +
+                "engine=${hex(announcedEngine)}\n" +
+                "  this node: shard=$shardId fingerprint=${hex(shardFingerprint)} " +
+                "engine=${hex(engineFingerprint)}\n" +
+                "  Either this node's security file or engine.auction.maxPasses differs from the " +
+                "leader's, or the configuration was changed\n" +
+                "  without a snapshot at the end of the log. A geometry change is applied from " +
+                "`most cluster shutdown`, never from SIGTERM."
+        )
+    }
+
+    /**
      * Seeds or re-seeds both references and the collar widths (Design.md §4.4). Re-issuing this
      * is the operator's lever for reopening a security whose halt price sits outside the static
      * band (§4.6).
@@ -865,6 +976,9 @@ class MatchingEngineService(
     // ------------------------------------------------------------- snapshot
 
     override fun onTakeSnapshot(snapshotPublication: ExclusivePublication) {
+        // A node that has refused its configuration holds state computed under the wrong one.
+        // Writing it down would hand that state to the next restart, so the snapshot fails here.
+        if (refused) throw ConfigurationMismatch("matching-engine: refused to snapshot state it has refused")
         offerToSnapshot(
             snapshotPublication,
             MessageHeaderEncoder.ENCODED_LENGTH + SnapshotEngineStateEncoder.BLOCK_LENGTH,
@@ -1533,6 +1647,8 @@ class MatchingEngineService(
     }
 
     private companion object {
+        fun hex(value: Long): String = java.lang.Long.toHexString(value)
+
         const val NULL_SESSION = -1L
         const val SNAPSHOT_POLL_LIMIT = 64
 

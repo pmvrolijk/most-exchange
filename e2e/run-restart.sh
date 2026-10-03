@@ -739,6 +739,12 @@ wait_for "$LOGS/engine-drop.log" "awaiting shutdown signal" 45 "engine" || {
 wait_for "$LOGS/engine-drop.log" "security 2 left the shard; its book was empty" 30 "the drop report" \
   || fail "the drop was not reported"
 pass "an emptied security left the shard, with a line saying so"
+# A snapshot at the END of the log before the next geometry change, which is the procedure
+# (Design.md §7, "Enforced through the log"). Without it, step 7 replays this run's leadership term
+# -- and the configuration it announced -- under a different security file, and refuses. Step 8
+# shows exactly that.
+$MOST cluster snapshot --dir "$RUN/cluster-host" || fail "snapshot request"
+sleep 2
 kill "$ENGINE_PID" 2>/dev/null; wait "$ENGINE_PID" 2>/dev/null
 kill "$CLUSTER_PID" 2>/dev/null; wait "$CLUSTER_PID" 2>/dev/null; sleep 1
 
@@ -753,6 +759,36 @@ wait_for "$LOGS/engine-add.log" "awaiting shutdown signal" 45 "engine" || {
 wait_for "$LOGS/engine-add.log" "security 3 joined the shard; its book starts empty" 30 "the addition report" \
   || fail "the addition was not reported"
 pass "a new security joined the shard with an empty book"
+# The two lines above are printed before the log is replayed, so they say nothing about whether the
+# node survived it. The shutdown line does: a node that refused prints its refusal instead.
+sleep 3
+kill -0 "$ENGINE_PID" 2>/dev/null || { tail -20 "$LOGS/engine-add.log" >&2; fail "the engine died after restoring"; }
+kill "$ENGINE_PID" 2>/dev/null; wait "$ENGINE_PID" 2>/dev/null
+grep -q "configurationAnnouncementsAgreed=[1-9]" "$LOGS/engine-add.log" \
+  || { tail -20 "$LOGS/engine-add.log" >&2; fail "the engine never read the leader's configuration back from the log"; }
+pass "the node read its own configuration back from the log and agreed with it"
+# SIGTERM, deliberately: no snapshot, so this run's term start -- and its announcement -- stays in the
+# log tail that the next start replays.
+kill "$CLUSTER_PID" 2>/dev/null; wait "$CLUSTER_PID" 2>/dev/null; sleep 1
+
+# ------------------------------------------------------------------------- 8
+echo
+echo "== 8. change the security file after a SIGTERM, with no snapshot at the end of the log -- must refuse"
+# The snapshot is step 6's and agrees with this file, so the restore itself succeeds. What does not
+# agree is the log written since: step 7's term announced the file with GOOG in it. Replaying that
+# under another geometry is what diverges, and the engine refuses at the announcement.
+start_cluster replay
+write_engine_config "$RUN/securities-without-msft.properties"
+start_engine replay
+wait_for "$LOGS/engine-replay.log" "refused to go on" 45 "the configuration refusal" || {
+  tail -20 "$LOGS/engine-replay.log" >&2; fail "the engine replayed a log tail written under another configuration"; }
+grep -q "from a snapshot" "$LOGS/engine-replay.log" \
+  || { tail -20 "$LOGS/engine-replay.log" >&2; fail "the snapshot was not restored first"; }
+wait "$ENGINE_PID" 2>/dev/null
+REPLAY_STATUS=$?
+[ "$REPLAY_STATUS" -ne 0 ] || fail "the engine exited 0 after refusing the log"
+grep -A3 "refused to go on" "$LOGS/engine-replay.log"
+pass "restored the snapshot, refused the tail written under another file, and exited $REPLAY_STATUS"
 
 echo
 echo "PASS: state survives a restart, and a geometry change that would destroy it does not."

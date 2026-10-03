@@ -1,5 +1,6 @@
 package com.engine.core
 
+import com.engine.sbe.ConfigurationAnnouncementEncoder
 import com.engine.sbe.ExecutionReportDecoder
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
@@ -148,7 +149,26 @@ class FakeCluster(private val sessions: Map<Long, ClientSession>) : Cluster {
     override fun cancelTimer(correlationId: Long): Boolean = true
     override fun offer(b: DirectBuffer, offset: Int, length: Int): Long = 1
     override fun offer(vectors: Array<out DirectBufferVector>): Long = 1
-    override fun tryClaim(length: Int, bufferClaim: BufferClaim): Long = 1
+    private val serviceBuffer = UnsafeBuffer(ByteArray(64 * 1024))
+    private var servicePosition = 0
+
+    /** Where each service message's payload starts in [serviceMessageBuffer], in claim order. */
+    val serviceMessages = mutableListOf<Int>()
+    val serviceMessageBuffer: DirectBuffer get() = serviceBuffer
+
+    /**
+     * A service message, claimed the way Aeron claims one: `Cluster.tryClaim` reserves the cluster
+     * session header in front of the payload, exactly as `ClientSession.tryClaim` does. A fake that
+     * did not would pass an encoder writing over the header.
+     */
+    override fun tryClaim(length: Int, bufferClaim: BufferClaim): Long {
+        val framed = length + AeronCluster.SESSION_HEADER_LENGTH + DataHeaderFlyweight.HEADER_LENGTH
+        bufferClaim.wrap(serviceBuffer, servicePosition, framed)
+        serviceMessages += servicePosition + DataHeaderFlyweight.HEADER_LENGTH + AeronCluster.SESSION_HEADER_LENGTH
+        servicePosition += (framed + 31) and 31.inv()
+        return 1
+    }
+
     private val noopIdle = object : IdleStrategy {
         override fun idle(workCount: Int) = Unit
         override fun idle() = Unit
@@ -178,6 +198,8 @@ class Harness(
      * publishing a new security file does.
      */
     shardFingerprint: Long = FINGERPRINT,
+    /** A stand-in for `EngineConfig.engineFingerprintValue()`, for the same reason. */
+    engineFingerprint: Long = ENGINE_FINGERPRINT,
 ) {
     val session = FakeSession(SESSION_ID, principal = sessionPrincipal)
 
@@ -192,11 +214,12 @@ class Harness(
      * reads it live rather than copying, which is what makes `clientSessions()` reflect them.
      */
     private val liveSessions = linkedMapOf<Long, ClientSession>(SESSION_ID to session)
-    private val cluster = FakeCluster(liveSessions)
+    val cluster = FakeCluster(liveSessions)
     val service = MatchingEngineService(
         shardId = SHARD_ID,
         books = books,
         shardFingerprint = shardFingerprint,
+        engineFingerprint = engineFingerprint,
         bookEventChannel = "aeron:ipc",
         bookEventStreamId = 12,
         levelCount = levelCount,
@@ -271,6 +294,41 @@ class Harness(
     fun on(on: FakeSession): Harness {
         inbound = on
         return this
+    }
+
+    /**
+     * Starts a leadership term, as the consensus module's `NewLeadershipTermEvent` does on every
+     * node, and returns the payload offsets of whatever the service offered as service messages.
+     */
+    fun startTerm(): List<Int> {
+        val before = cluster.serviceMessages.size
+        service.onNewLeadershipTermEvent(1L, 0L, 0L, 0L, 0, 1, TimeUnit.MILLISECONDS, 0)
+        return cluster.serviceMessages.drop(before)
+    }
+
+    /**
+     * Delivers a service message the way Aeron does: through `onSessionMessage` with no client
+     * session, since none matches a service message's negative session id.
+     */
+    fun deliverServiceMessage(from: DirectBuffer, offset: Int, length: Int) {
+        service.onSessionMessage(null, 0L, from, offset, length, DUMMY_HEADER)
+        for (live in liveSessions.values) (live as FakeSession).drain()
+    }
+
+    /** Encodes an announcement and delivers it as a service message, or on [onClientSession]. */
+    fun announce(
+        shardFingerprint: Long,
+        engineFingerprint: Long,
+        shardId: Int = SHARD_ID,
+        onClientSession: FakeSession? = null,
+    ) {
+        ConfigurationAnnouncementEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .shardFingerprint(shardFingerprint)
+            .engineFingerprint(engineFingerprint)
+            .shardId(shardId)
+        val length = MessageHeaderEncoder.ENCODED_LENGTH + ConfigurationAnnouncementEncoder.BLOCK_LENGTH
+        if (onClientSession == null) deliverServiceMessage(buffer, 0, length)
+        else on(onClientSession).submit(length)
     }
 
     private fun submit(length: Int) {
@@ -367,12 +425,15 @@ class Harness(
         submit(MessageHeaderEncoder.ENCODED_LENGTH + SecurityDefinitionEncoder.BLOCK_LENGTH)
     }
 
-    private companion object {
+    companion object {
         const val SHARD_ID = 1
         const val SESSION_ID = 7L
 
         /** Stands in for one particular published security file. */
         const val FINGERPRINT = 0x1234_5678_9abc_def0L
+
+        /** Stands in for one particular `engine.auction.maxPasses`. */
+        const val ENGINE_FINGERPRINT = 0x0fed_cba9_8765_4321L
         val DUMMY_HEADER = io.aeron.logbuffer.Header(0, 0)
     }
 }

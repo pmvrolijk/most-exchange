@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="3"
+                   package="com.engine.sbe" id="1" version="4"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -126,6 +126,19 @@
        change to any book; see BookImageBegin. -->
   <sbe:message name="RequestBookImage" id="6" blockLength="8">
     <field name="requestTime" id="1" type="Timestamp"/>
+  </sbe:message>
+
+  <!-- The leader's configuration, offered by every node's engine at the start of each leadership
+       term as a Cluster service message, never on a client session. Aeron appends only the leader's
+       copy and sweeps the followers'. Every node compares it with its own and refuses to go on if
+       any value differs (Design.md §7, "Enforced through the log"). shardFingerprint is
+       ShardSpec.fingerprintValue() and engineFingerprint is EngineConfig.engineFingerprintValue(),
+       both as their 64-bit hashes; neither hash is implemented a second time. Added in version 4,
+       and no earlier log contains one. -->
+  <sbe:message name="ConfigurationAnnouncement" id="7" blockLength="24" sinceVersion="4">
+    <field name="shardFingerprint"  id="1" type="SeqNum"/>
+    <field name="engineFingerprint" id="2" type="SeqNum"/>
+    <field name="shardId"           id="3" type="ShardId"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">

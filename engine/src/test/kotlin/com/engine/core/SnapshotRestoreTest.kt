@@ -313,6 +313,20 @@ class SnapshotRestoreTest {
         assertEquals(0L, book.origQtyOf(node), "0 means unknown, not zero quantity")
     }
 
+    @Test
+    fun `a node that has refused its configuration writes no snapshot`() {
+        // Design.md §7, "Enforced through the log": a refused node holds state computed under a
+        // configuration the leader disagrees with, and a snapshot would hand it to the next restart.
+        val source = openHarness(arrayOf(serviceBook(1)))
+        source.newOrder(participantId = 1, clOrdId = 100, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+        assertFailsWith<ConfigurationMismatch> { source.announce(OTHER, Harness.ENGINE_FINGERPRINT) }
+
+        publish { pub ->
+            assertFailsWith<ConfigurationMismatch> { source.service.onTakeSnapshot(pub) }
+            assertEquals(0L, pub.position(), "nothing was written to the snapshot")
+        }
+    }
+
     // ------------------------------------------------------------------ support
 
     /** A harness with a book that accepts orders: defined, and trading. */

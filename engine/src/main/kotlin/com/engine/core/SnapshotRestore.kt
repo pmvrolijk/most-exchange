@@ -10,7 +10,7 @@ package com.engine.core
  * `ArrayIndexOutOfBoundsException` at the same log position on every node at once. Refusing to
  * start is the only outcome an operator can act on.
  */
-class SnapshotRestoreFailed(report: String) : RuntimeException(report)
+class SnapshotRestoreFailed(report: String) : NodeRefusal(report)
 
 /**
  * Collects everything the restore noticed, so an operator gets the whole picture at once rather

@@ -927,6 +927,7 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `4` | `PurgeExpiredOrders` | Inbound | Cluster ingress |
 | `5` | `SecurityDefinition` | Inbound | Cluster ingress |
 | `6` | `RequestBookImage` | Inbound | Cluster ingress |
+| `7` | `ConfigurationAnnouncement` | Service message, leader's copy | Cluster log |
 | `10` | `ExecutionReport` | Outbound, private | Cluster egress |
 | `20` | `OrderAdded` | Outbound, book event | IPC 12 |
 | `21` | `OrderReduced` | Outbound, book event | IPC 12 |
@@ -979,8 +980,9 @@ handler, reports it to the client error handler and advances the position regard
 booked into a ladder that had moved under it was *silently dropped* and the book came back quietly
 wrong. Every node boots the same geometry and loads the same snapshot, so the decision is identical
 everywhere and "no node starts" is the correct outcome rather than a split brain. What this does
-**not** close is two nodes booting *different* geometry with no snapshot between them — that is
-still §8's fingerprint enforcement, and still open.
+**not** close is two nodes booting *different* geometry with no snapshot between them. That is
+closed separately: the leader announces its configuration in the log and a node that disagrees
+refuses (§7, "Enforced through the log").
 
 **Nothing takes a snapshot unless something asks for one.** `most cluster snapshot` sends the admin
 request through consensus so every member snapshots at the same log position; `most cluster
@@ -1149,7 +1151,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="3"
+                   package="com.engine.sbe" id="1" version="4"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1275,6 +1277,19 @@ answers, and a consumer must not render the first when it means the second.
        change to any book; see BookImageBegin. -->
   <sbe:message name="RequestBookImage" id="6" blockLength="8">
     <field name="requestTime" id="1" type="Timestamp"/>
+  </sbe:message>
+
+  <!-- The leader's configuration, offered by every node's engine at the start of each leadership
+       term as a Cluster service message, never on a client session. Aeron appends only the leader's
+       copy and sweeps the followers'. Every node compares it with its own and refuses to go on if
+       any value differs (Design.md §7, "Enforced through the log"). shardFingerprint is
+       ShardSpec.fingerprintValue() and engineFingerprint is EngineConfig.engineFingerprintValue(),
+       both as their 64-bit hashes; neither hash is implemented a second time. Added in version 4,
+       and no earlier log contains one. -->
+  <sbe:message name="ConfigurationAnnouncement" id="7" blockLength="24" sinceVersion="4">
+    <field name="shardFingerprint"  id="1" type="SeqNum"/>
+    <field name="engineFingerprint" id="2" type="SeqNum"/>
+    <field name="shardId"           id="3" type="ShardId"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
@@ -2622,6 +2637,54 @@ spec at startup, so an operator compares one hex string instead of diffing files
 settings (`serviceId`, directories, channels) are excluded, since those legitimately differ, and so
 is `name`, which is display only.
 
+#### Enforced through the log
+
+Printing a fingerprint relies on someone comparing it. The engine compares it itself, through the
+one channel every node is guaranteed to read in the same order: the replicated log.
+
+**The leader announces its configuration at the start of every leadership term.** On each
+`onNewLeadershipTermEvent` every node's engine offers a `ConfigurationAnnouncement` service message
+(§5) carrying its `shardId`, `ShardSpec.fingerprintValue()` and an **engine fingerprint**. It is
+offered on every node, not only the leader, because that is the contract Aeron's service messages
+are built on. The consensus module numbers them, appends only the leader's, and sweeps each
+follower's copy when the leader's is committed under the same number. A service message offered by
+one node alone would put the nodes' numbering out of step, and Aeron refuses an offer from
+`onRoleChange` outright. What lands in the log is the leader's configuration.
+
+**Every node compares the announcement it reads with its own**, live or in replay. If all three
+values match, nothing happens. If any differs, the node **refuses**. It stops applying the log,
+prints both sets of values, leaves through the `ShutdownSignalBarrier` as a refused restore does
+(§5, "Restoring into changed geometry"), and exits non-zero. Whatever it computed before that point
+was never visible. A follower's egress is mocked and its book event publication muted, and a
+recovering node replays as a follower.
+
+The **engine fingerprint** covers every `EngineConfig` setting that can change what the engine
+computes from a given log. Today that is `auctionMaxPasses` alone, which bounds the SMP fixed point
+of an uncross (§4.5). It is a separate value because `ShardSpec.fingerprint()` is stored by the
+control plane and published in every release, and widening it would invalidate every recorded
+value. Node-local settings stay out of both, because they cannot change the log or the books:
+metrics, the idle strategy, the registry and its reload interval, and the back-pressure alert
+threshold, which only decides when a stall is counted.
+
+**Only a service message is honoured.** An announcement arriving on a client session is ignored,
+so a client cannot stop a node by forging one.
+
+Consequences, deliberate:
+
+* **A misconfigured follower stops instead of diverging.** That was the gap.
+* **A misconfigured leader stops the healthy followers.** The rule says the nodes disagree, not who
+  is right. In a three-node cluster the shard loses quorum and stops. That is loud, and it is never
+  a divergence. A term sequenced by a misconfigured leader cannot then be replayed by a correctly
+  configured node, and recovering from that is an operator decision, not a restart.
+* **A log tail written under one configuration and replayed under another refuses**, at the first
+  announcement in the tail. A geometry change is therefore applied from a snapshot at the **end** of
+  the log. `most cluster shutdown` takes one; SIGTERM does not. The restore reconciliation above
+  makes the snapshot safe to pour into the new geometry; it says nothing about a log replayed on
+  top of it. This catches a tail only when the tail contains a term start, and a tail with no
+  term start is still not compared.
+* **A rolling geometry change is impossible by construction.** Geometry changes for the whole
+  shard at once: shut down with a snapshot, change the file everywhere, start.
+
 Nothing has a default. A wrong tick size misprices every order silently, and ISINs are validated
 including their check digit: a transposed digit is the classic reference-data typo, and it is far
 cheaper to reject at boot than to discover in a published directory.
@@ -2866,12 +2929,18 @@ It found three defects that unit tests could not:
   which is the point, but nothing truncates it. Aeron 1.53's post-snapshot behaviour for the
   consensus module log and the archive segments needs establishing before a retention procedure or
   a volume size can be written down; this is deliberately not assumed here.
-* **`auctionMaxPasses` is in no fingerprint.** It bounds the SMP fixed point in `runUncross`, so two
-  nodes booted with different values can produce different uncross results from an identical log
-  while printing the same fingerprint — the exact class of silent divergence `fingerprint()` exists
-  to prevent. It cannot simply be folded into `ShardSpec.fingerprint()`: that hash is over shard
-  topology, is stored by the control plane, and appears in published releases, so changing it
-  invalidates every recorded value. It wants a separate engine-level fingerprint.
+* ~~**`auctionMaxPasses` is in no fingerprint.**~~ **Done.** It bounds the SMP fixed point in
+  `runUncross`, so two nodes booted with different values could produce different uncross results
+  from an identical log while printing the same fingerprint. It could not be folded into
+  `ShardSpec.fingerprint()`, which is stored by the control plane and published in releases, so it
+  is the **engine fingerprint**: a separate value, announced in the log beside the shard's and
+  compared by every node (§7, "Enforced through the log").
+* **Configuration enforcement: what the announcement does not cover.** A log tail replayed under a
+  different configuration is caught only if it contains a term start. A tail written since the last
+  snapshot with no election in it is still replayed without comparison. And a term sequenced by a
+  misconfigured leader cannot be replayed by a correctly configured node at all, so recovering from
+  one has no procedure yet. Nodes that are not running are not compared, and neither is the engine
+  binary's own version.
 * ~~**The gateway's `origQty` does not survive its own restart.**~~ **Done, and then closed a
   second time from the other end.** It was first solved with `OrderJournal`, a memory-mapped slot
   per live order in the gateway. `origQty` is now held by the **engine**, in the cold word beside

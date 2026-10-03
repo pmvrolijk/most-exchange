@@ -145,6 +145,7 @@ internal class Driver(
         shardId = 1,
         books = books,
         shardFingerprint = 0x1234_5678_9abc_def0L,
+        engineFingerprint = 0x0fed_cba9_8765_4321L,
         bookEventChannel = bookEventChannel,
         bookEventStreamId = bookEventStreamId,
         levelCount = Alloc.LEVELS,

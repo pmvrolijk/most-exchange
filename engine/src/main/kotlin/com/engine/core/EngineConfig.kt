@@ -91,6 +91,30 @@ data class EngineConfig(
     fun fingerprint(): String = shard.fingerprint()
 
     /**
+     * Every setting here that can change what the engine computes from a given log, as one 64-bit
+     * hash. The leader announces it beside [fingerprint] and a node that disagrees refuses to go on
+     * (Design.md §7, "Enforced through the log").
+     *
+     * Today that is [auctionMaxPasses] alone: it bounds the SMP fixed point of an uncross, so two
+     * nodes on different values print the same uncross from the same log only until one of them
+     * runs out of passes. A *separate* value rather than folded into [fingerprint], because
+     * `ShardSpec.fingerprint()` is recorded by the control plane and published in every release.
+     *
+     * A setting added to [EngineConfig] belongs in here unless it is node-local in the sense the
+     * metrics are: incapable of changing the log, the books or a snapshot. The idle strategy, the
+     * registry reload interval and [backpressureAlertThreshold] -- which only decides when a stall
+     * is *counted* -- are out for that reason.
+     */
+    fun engineFingerprintValue(): Long {
+        var hash = 1125899906842597L
+        for (c in "auctionMaxPasses=$auctionMaxPasses") hash = hash * 31 + c.code
+        return hash
+    }
+
+    /** [engineFingerprintValue] in hex, for printing beside [fingerprint]. */
+    fun engineFingerprint(): String = java.lang.Long.toHexString(engineFingerprintValue())
+
+    /**
      * The registry's own fingerprint, or `none`. Deliberately a *second* value beside
      * [fingerprint] rather than folded into it: `ShardSpec.fingerprint()` is recorded by the
      * control plane and published in every release, so widening what it covers would invalidate

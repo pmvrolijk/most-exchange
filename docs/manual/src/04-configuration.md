@@ -78,6 +78,13 @@ start** rather than lose state: a security removed while it holds resting orders
 `priceFloor`, `tickSize`, `levelCount` or `maxOrders`, an order that falls outside the new ladder, or
 resting-order counts that do not add up. A refusal is the system working. The two legitimate cases
 are quiet — an *empty* book leaving the shard, and a new security joining — and each is logged.
+
+**Apply a geometry change from `most cluster shutdown`, never after a SIGTERM.** At the start of
+every leadership term the leader writes its configuration into the log, and every engine checks it.
+The log written since the last snapshot was written under the old file, and an engine that replays
+it under a new one refuses with `matching-engine: refused to go on` and exits non-zero. `most cluster
+shutdown` takes a snapshot at the end of the log, so there is nothing left to replay. Change the file
+on every node at once; a rolling geometry change is refused by construction.
 :::
 
 Reference prices and collar widths are deliberately **not** in this file. They change during a
@@ -201,7 +208,7 @@ engine.bookEvent.streamId=12
 | `engine.serviceId` | `0` | The clustered service id |
 | `engine.bookEvent.channel` | `aeron:ipc` | Where book events are published. Keep it IPC: market-data is on this node |
 | `engine.bookEvent.streamId` | `12` | |
-| `engine.auction.maxPasses` | `64` | Safety valve on the uncross fixed-point loop, not part of the algorithm |
+| `engine.auction.maxPasses` | `64` | Safety valve on the uncross fixed-point loop, not part of the algorithm. Can change an uncross result, so it is the **engine fingerprint** and must be identical on every node |
 | `engine.backpressure.alertThreshold` | `1000000` | Consecutive back-pressured publications before alerting |
 | `engine.metrics` | `false` | Hot-path timing; two clock reads per message. Also publishes the service thread's duty cycle as the `duty-ns: engine service` counter (5.8) |
 | `engine.metrics.stages` | `false` | Adds the admit/match/settle partition of a new order; two more clock reads |

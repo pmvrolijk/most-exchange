@@ -364,7 +364,11 @@ kubectl -n most rollout status deploy/control
 ansible shard0 -a "journalctl -u most-engine -n 200 --no-pager" | grep -i fingerprint | sort -u
 ```
 
-One distinct value, or stop and fix it. Raft will not catch this.
+One distinct value for `fingerprint` and one for `engineFingerprint`, or stop and fix it. Raft will
+not catch this, but the engines now do. Each one checks the leader's announced configuration in the
+log, and a node that disagrees prints `matching-engine: refused to go on` with both sets of values
+and exits non-zero. With a misconfigured *leader*, the healthy followers are the ones that stop. So
+read the values here before the first order rather than learn them from a refusal.
 
 ### Establish the session baseline
 

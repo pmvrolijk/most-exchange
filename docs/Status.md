@@ -1,10 +1,22 @@
 # Status
 
 Where the project stands, what is open, and what to do next. **This is the session entry point** —
-read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2j),
+read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-09-29, in the session that took the ceiling question to a 16-core cloud host
+Last updated 2026-10-03, in the session that closed three integrity items (Handover §2m):
+- **Configuration enforced through the log.** The leader announces the shard and engine fingerprints
+  at each term start, and a node that disagrees refuses (Design.md §7).
+- **Releases.** A release is never written into an existing directory.
+- **Bulk cancel.** One participant's resting orders can be cancelled by an operator command, sent by
+  the CLI, REST or the SPA (Design.md §4.8).
+
+Verifying them found a restart check that passed while its engine refused (`run-restart.sh` step 7,
+fixed). It also reversed a CLAUDE.md rule: **stopping the engine container alone stops the whole
+cluster** on Aeron 1.53. It does not replay the log to a new engine, as the rule said (R§5).
+Operators: a geometry change now needs `most cluster shutdown`, not SIGTERM.
+
+Before that (2026-09-29): the session that took the ceiling question to a 16-core cloud host
 (`deploy/cloud/`; Measurements.md L0–L4, A6–A10) and then found the answer in its own counters
 (E1–E14; Handover §2l). **The shard's knee is the media driver's UDP sender, not the engine.** Aeron
 sends one ≤1,408 B datagram per publication per duty cycle, and execution reports outgrow that. The
@@ -31,11 +43,11 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 
 | | |
 | --- | --- |
-| Branch | `master`, pushed at `3d6fb06`, with `cloud-deploy` merged (`cf6e302`, `2021b61`, `aaff566`, `3d6fb06`). **CI: pipeline 40 was still running at close** (`build` green, `test:core` running, the rest pending), so check it first. The two measure jobs stay manual |
+| Branch | `master` has `integrity-checks` merged (`8f60884`, `0561fa0`). `bulk-cancel` is at `2bc01e2` (the bulk cancel, the SPA check, the manual), plus this session-close write-up; the user commits it and merges it to `master`. Check the pipelines for both merges first. The two measure jobs stay manual |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~26,300 lines — 14,660 main across 69 files, 11,670 test across 58 |
+| Kotlin | ~27,500 lines — 15,100 main across 70 files, 12,440 test across 60 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 566, all passing |
+| Tests | 606, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -47,7 +59,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
-| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal |
+| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
 ./gradlew clean build                        # 542 tests (control's need Docker)
@@ -264,9 +276,10 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ## 3. To do next
 
-**Next session: the other open items**, then the throughput follow-ups. The ceiling is named (item 3,
-open issue 13a). What remains is the next knee and a production decision. That work isn't dangerous,
-and the correctness items are. In the order I would take them, cheapest-and-most-dangerous first:
+**Next session: archive retention (item 4 below)**, then the remaining correctness items, then the
+throughput follow-ups. The ceiling is named (item 3, open issue 13a); what remains there is the next
+knee and a production decision. That work isn't dangerous, and the correctness items are. In the
+order I would take them, cheapest-and-most-dangerous first:
 
 1. ~~**Fingerprint enforcement at boot**~~ **Done 2026-10-03** (open issue 11). The leader announces
    its configuration in the log, and a node that disagrees refuses.
@@ -277,6 +290,12 @@ and the correctness items are. In the order I would take them, cheapest-and-most
    before writing a policy.
 5. **Tests for `discovery`** (item 11) and **Design.md §6 against the code** (item 10) — both
    outstanding for several sessions.
+6. **Unverified from this session.** Native binaries through `run-e2e.sh` with the announcement and the
+   bulk cancel. `run-attribution.sh` either side of the engine's extra per-message flag check (no
+   figure was taken). And whether a *SIGKILLed* engine also takes the consensus module down (R§5).
+   The source says it does, but nobody has tried it.
+7. **The SPA's Participants page** still says nothing raises `UNAUTHORIZED_PARTICIPANT` and that
+   `enabled` is not read. Both have been wrong since the enforcement work (Handover §2j).
 
 Also cheap and outstanding: regenerate the manual's §5.8 `/api/status` transcript and the screenshots
 from a running dev stack (item 4). Before the repository goes public: strip or annotate the embedded
@@ -432,6 +451,11 @@ be trusted. `tools/BookCommand.kt` and `control/DepthMonitor.kt` are the two wor
 they produce identical books level for level, which is the point of sharing the code.
 
 ### Things that will waste time if unknown
+
+0. **Never stop the engine container on its own.** The consensus module sees its Aeron client close
+   and terminates the cluster, gateway sessions included (R§5). On the dev stack, restart the shard's
+   processes together: `docker compose stop engine gateway market-data discovery cluster-host`, wait
+   for the mark files (~10 s), then `up -d` the same five.
 
 1. Any JVM running this needs `--add-opens java.base/jdk.internal.misc=ALL-UNNAMED` and
    `--add-opens java.base/sun.nio.ch=ALL-UNNAMED` (Agrona 2.x, Aeron driver). Already set on the

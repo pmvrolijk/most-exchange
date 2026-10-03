@@ -534,13 +534,16 @@ journalctl -u most-engine | grep 'restored'
 ```
 
 That last line is the check. The engine prints `restored N resting orders ... from a snapshot`
-specifically so that a real recovery is distinguishable from the consensus module replaying the log
-into a freshly started service container — which rebuilds the same books by a completely different
-route and takes as long as the session is old. `e2e/run-restart.sh` was originally written asserting
+specifically so that a real recovery is distinguishable from a node that found no snapshot and
+replayed its whole log, which rebuilds the same books by a completely different route and takes as
+long as the session is old. `e2e/run-restart.sh` was originally written asserting
 on the rendered book and passed for exactly that wrong reason.
 
-**Restarting only the service container is not a recovery.** If you stop `most-engine` and leave
-`most-cluster-host` running, you get the replay, not the snapshot.
+**Never restart only the service container.** If you stop `most-engine` and leave `most-cluster-host`
+running, the consensus module sees the engine's Aeron client close and terminates the cluster, which
+closes every gateway session with it. A `most-engine` started afterwards is told "expected
+termination" and exits. Restart a node's two units together, `most-cluster-host` first (Rationale §5,
+measured on Aeron 1.53).
 
 ### 9.3 Changing geometry
 

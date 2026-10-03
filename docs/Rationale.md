@@ -143,12 +143,28 @@ and the process exits at once.
 
 ## 5. Recovery, restore, and the ways it can fail quietly
 
-**Restarting only the service container is not a recovery.** The consensus module keeps running and
+~~**Restarting only the service container is not a recovery.** The consensus module keeps running and
 replays the log to the new service from the beginning, rebuilding the same books by a completely
-different route and taking as long as the session is old. `e2e/run-restart.sh` was written asserting
-on the rendered book and passed for exactly this wrong reason; the engine now prints
-`restored N resting orders ... from a snapshot` so the two are distinguishable, and the test asserts
-on that line rather than on depth.
+different route and taking as long as the session is old.~~ **Superseded 2026-10-03 (Aeron 1.53) by
+the next paragraph.** The consensus module does not keep running. What survives of this is the
+assertion it produced: `e2e/run-restart.sh` was written asserting on the rendered book and passed for
+a wrong reason, a replay rather than a restore. The engine now prints `restored N resting orders ...
+from a snapshot` so the two are distinguishable, and the test asserts on that line rather than on
+depth. That still matters, because a whole node restarted with no snapshot replays from genesis.
+
+**Stopping the service container stops the cluster.** The consensus module watches each service's
+Aeron client. When that client closes, as it does on an orderly SIGTERM of the engine, the
+module's `onUnavailableCounter` logs "Aeron client in service closed unexpectedly: serviceId=0" and
+moves to `CLOSED`. Its next slow tick then terminates the cluster through `unexpectedTermination`,
+which closes every client session, gateways included. A service container started afterwards is told
+"expected termination" and exits. It is not a timeout, so a quick restart does not escape it.
+Found on the dev stack with `docker compose stop engine`, taken only to read a shutdown counter. The
+consensus module's trace was `slowTickWork` → `unexpectedTermination("State.CLOSED == state")`, which
+matches the source. The recovery was to restart the node's processes together: the engine restored
+the last snapshot, replayed the log and resumed with the next order id. **Not established:** how the
+superseded observation above arose. It may have been an older Aeron, or a run that restarted the
+cluster host too. And whether a SIGKILLed service, whose client is only timed out by the driver
+(10 s by default), ends the same way. The source says it should, but nobody has tried it.
 
 **A geometry change is reapplied by restarting, so `loadSnapshot` is where it is made safe.** It
 reconciles the snapshot against the booted `ShardSpec` and **refuses to start** rather than lose

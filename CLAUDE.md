@@ -100,9 +100,12 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 
 ## Recovery and restore
 
-- **Restarting only the service container is not a recovery.** The consensus module replays the log
-  from the beginning. The engine prints `restored N resting orders ... from a snapshot` so the two
-  are distinguishable; assert on that line, not on depth. → R§5
+- **Never stop the service container alone.** The consensus module watches the engine's Aeron client
+  and terminates the whole cluster when it closes, gateway sessions included. Restart a node's two
+  processes together. → R§5
+- **A restart that replays is not a recovery.** The engine prints `restored N resting orders ... from a
+  snapshot`; assert on that line, not on depth. A node restarted with no snapshot replays from
+  genesis and renders the same book. → R§5
 - **A geometry change is reapplied by restarting, so `loadSnapshot` is where it is made safe.** It
   **refuses to start** rather than lose state: a security gone from the shard with resting orders, a
   changed `priceFloor`/`tickSize`/`levelCount`/`maxOrders`, an order outside the new ladder, or

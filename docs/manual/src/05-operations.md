@@ -375,13 +375,14 @@ journalctl -u most-engine | grep 'restored'
 ```
 
 That last line is the check. The engine prints `restored N resting orders ... from a snapshot`
-specifically so that a real recovery is distinguishable from the consensus module replaying the log
-into a freshly started service container.
+specifically so that a real recovery is distinguishable from a node that found no snapshot and
+replayed its whole log, which renders the same book by a different route.
 
-::: warning Restarting only the service container is not a recovery
-If you stop the engine and leave the cluster host running, the consensus module replays the log to
-the new service from the beginning. It rebuilds the same books by a completely different route and
-takes as long as the session is old — and it says nothing about whether the snapshot works.
+::: warning Never stop the engine on its own
+If you stop the engine and leave the cluster host running, the consensus module sees the engine's
+Aeron client close, logs `Aeron client in service closed unexpectedly`, and terminates the cluster,
+which closes every gateway's session with it. An engine started afterwards is told
+`expected termination` and exits. Restart a node's processes together, cluster host first.
 :::
 
 ## 5.7 Measuring

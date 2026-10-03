@@ -27,7 +27,12 @@
       gateways per participant with a primary, anonymous sessions refused, and snapshot requests
       granted to operators. The gateway re-reads the registry too, so nothing restarts (docs/Design.md
       §1 "Enforcement, at the gateway", docs/Handover.md §2j)
-- [ ] Bulk cancel of one participant's resting orders — the operator side of revocation
+- [x] Bulk cancel of one participant's resting orders — the operator side of revocation: one
+      operator command, from the CLI, REST and the Operations page (docs/Design.md §4.8,
+      docs/Handover.md §2m)
+- [x] Configuration enforced through the log — the leader announces the shard and engine
+      fingerprints at each term start and a node that disagrees refuses (docs/Design.md §7
+      "Enforced through the log", docs/Handover.md §2m)
 - [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries  
 - [ ] Admin frontend for backend control plane, Vue
 

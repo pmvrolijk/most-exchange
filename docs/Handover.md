@@ -9,7 +9,10 @@ Section numbers are stable and are cited from `CLAUDE.md`, `docs/Design.md` and 
 so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and their headings are kept
 below as pointers.
 
-**The chronology this file records**, most recent first: the session that fixed the control plane's
+**The chronology this file records**, most recent first: the session that closed three integrity
+items: configuration enforced through the log, releases that refuse an existing directory, and a
+bulk cancel for revocation. That session also found that stopping the engine alone stops the cluster
+(§2m). Before that, the session that fixed the control plane's
 feed-gap counting, drove ten securities at once for the first time and attributed the result —
 fan-out buys no throughput, Design.md §2's 1M/s/shard target is over-stated by about 2.9x, and the
 ceiling was the media driver's single shared thread — 1.6x of throughput behind one enum (§2i). Before that,
@@ -1164,6 +1167,63 @@ untested: follower replication goes over UDP through the same sender. The Operat
 §4.8, §5.7, §5.8, §6) was brought into line, and names IPC egress as the highest-throughput setting
 with the placement it requires: the gateway on the leader's media driver, which the separate gateway
 tier of its §3.2 does not have.
+
+### 2m. Three integrity checks, and a rule that was the wrong way round
+
+Branches `integrity-checks` (`8f60884`, `0561fa0`, merged) and `bulk-cancel` (`2bc01e2`, plus this
+write-up). Status
+§3 items 1–3, taken cheapest-and-most-dangerous first.
+
+**Configuration enforced through the log** (Design.md §7, "Enforced through the log"; R§5). Two
+nodes on different geometry or a different `auctionMaxPasses` diverged silently on the first order,
+because nothing compared the fingerprints they printed. Three options went through `decision-fork`:
+the leader announcing in the log, a check against the release manifest, and a warning without a
+refusal. The answer was the first.
+- **Aeron changed how it is built.** An offer from `onRoleChange` throws, and service messages are
+  numbered per node, with only the leader's appended. So *every* node offers a
+  `ConfigurationAnnouncement` (schema v4, id 7) from `onNewLeadershipTermEvent`, and Aeron keeps the
+  leader's copy.
+- **A node that disagrees refuses.** It stops applying the log (the throw is swallowed by the image,
+  so a flag does it), refuses to snapshot, and exits non-zero through the barrier.
+- **A null session.** Service messages arrive at `onSessionMessage` with a null session, so the
+  parameter became nullable. An announcement on a client session is ignored.
+- **Aeron's own `appVersion` was rejected.** It is 32 bits, and Aeron also checks it on snapshot load,
+  which would refuse the geometry changes the restore allows.
+- **The check:** `run-e2e.sh` reads the announcement back (`configurationAnnouncementsAgreed=1`).
+  Breaking the encode offset, the refusal guard or the client-session check each fails
+  `ConfigurationAnnouncementTest`.
+- **What verifying it found.** `run-restart.sh` step 7 passed while its engine refused during replay:
+  it waited for lines `loadSnapshot` prints before the tail is replayed. Step 6 now snapshots first,
+  step 7 asserts the node survived, and a new step 8 proves a tail replayed under another file
+  refuses. The consequence for operators: a geometry change needs `most cluster shutdown`, never
+  SIGTERM.
+
+**Releases never written into an existing directory** (Status open issue 6a). `Files.createDirectory`
+claims the version's directory and fails on one that exists. `ReleaseDirectoryExists` rolls the row
+back and reaches the API as 409. A directory the publisher created itself is removed if a later write
+fails. A refused attempt uses up its version number, because a Postgres identity is not handed back
+on rollback.
+
+**Bulk cancel of one participant** (Design.md §4.8). Through `decision-fork`, the choice was an
+operator-only command that reuses `CANCELED`, with the CLI, REST and an SPA button as senders.
+- **The command:** `CancelParticipantOrders` (schema v5, id 8). Its "every book" value is `-1`, not
+  the `0` first proposed, because `0` is a legal security id.
+- **The engine** walks the ladders through the purge's walk, now shared as `OrderBook.removeWhere`.
+  Each order goes out as an ordinary `CANCELED` report and `OrderRemoved(CANCELED)`, so no consumer
+  changed.
+- **The proofs:** `run-e2e.sh` step 7a on a real node; a new `AllocationTest` case, which fails in 8
+  of 8 windows without `inline` on `cancelParticipant`, the fifth load-bearing `inline`; and a
+  click-through on the dev stack. The manual gained the dialog as Figure 5.2, and `screenshots.cjs`
+  takes named dialog shots with an `ONLY=` filter.
+- **Correction:** I said at the fork that `web/` had vitest. It has none; CI type-checks and builds it.
+
+**A rule that was the wrong way round** (R§5). CLAUDE.md said stopping only the service container
+makes the consensus module replay the log to the new one. On Aeron 1.53 the opposite happened. The
+module watches the service's Aeron client, and on an orderly SIGTERM of the engine it logged the
+client closing, moved to `CLOSED` and terminated the cluster. The restarted engine was told "expected
+termination". Found by stopping the dev stack's engine to read a shutdown counter. Restarting the
+node's processes together recovered it, with the next order id where it should be. The superseded
+rule is struck through in R§5, not removed. How the original observation arose is not known.
 
 ## 3. Decisions that are load-bearing
 

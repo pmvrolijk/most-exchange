@@ -245,6 +245,17 @@ publish:sdk:
       when: manual
   allow_failure: true
   script:
+    # The registry is this GitLab, behind a certificate from the instance's own CA. Git trusts it
+    # because the runner hands git that CA; Gradle runs on the image's JDK, which does not, and fails
+    # the PKIX check on the first GET. The runner exposes the same CA as $CI_SERVER_TLS_CA_FILE
+    # (runner `tls-ca-file`), so trust exactly that -- never a certificate fetched from the server at
+    # job time, which would trust whatever answered.
+    - |
+      if [ -z "${CI_SERVER_TLS_CA_FILE:-}" ] || [ ! -s "$CI_SERVER_TLS_CA_FILE" ]; then
+        echo "publish:sdk: CI_SERVER_TLS_CA_FILE is not set; give the runner tls-ca-file for this GitLab" >&2
+        exit 1
+      fi
+    - keytool -importcert -noprompt -cacerts -storepass changeit -alias gitlab-instance-ca -file "$CI_SERVER_TLS_CA_FILE"
     - ./gradlew :sbe:publishSdkPublicationToGitlabRepository :client:publishSdkPublicationToGitlabRepository
 
 # ---------------------------------------------------------------------------- measure

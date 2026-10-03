@@ -969,6 +969,41 @@ is what would turn that sentence into a fact.
 
 ---
 
+## Failover by gateway placement (F1–F2)
+
+**Not a latency or throughput measurement.** These are what a client lost when the leader's node was
+stopped under steady load, one run per gateway placement (Design.md §7, "Gateway placement").
+`e2e/run-failover.sh`, three members on **one machine**, so they are about how a failover behaves.
+
+Conditions: M4 Pro laptop, working tree on `2eb790e` plus this session's changes, **not idle** (load
+average ~6.5, a desktop and an IDE open), JVM, `--driver-threading SHARED`. One security, `most load`
+at **2,000 orders/s** paced for 20 s, four participants, band 99.90–100.10. The leader's node (engine,
+cluster host and, co-located, its gateway) was SIGTERMed 5 s in.
+`aeron.cluster.leader.heartbeat.timeout=2s` on every process; Aeron's default is 10 s, which would
+lengthen every window below. Client publication connection timeout at Aeron's default (5 s).
+
+| run | date | placement | egress | blind window | sent | unanswered | `GATEWAY_UNAVAILABLE` | switches | new leader `undeliverableReports` |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| F1 | 2026-10-03 | independent | UDP, 1,408 B | ~3.5 s (5.0 → ~8.5 s) | 40,000 | 6,412 | 12 | — | 0 |
+| F2 | 2026-10-03 | colocated | IPC | ~5 s (5.0 → ~10.0 s) | 40,000 | 9,978 | 19 | 3 on reject, 1 on disconnect | 0 |
+
+### What F1–F2 say
+
+- **The co-located blind window is the client's, not the cluster's.** The gateway dies with its
+  node and sends no reject, so the client keeps publishing into the dead endpoint until Aeron's
+  publication connection timeout declares it gone (5 s). Then it switches, is refused by a standby
+  gateway or two, and lands on the new leader's. The independent gateway survives the node, and its
+  window is the election itself. **With the default 10 s heartbeat the election is the longer of the
+  two**, and the placements should come out about even. That is unmeasured.
+- **Routes followed the active gateway.** `undeliverableReports=0` on the leader that served between
+  the two failovers. In the co-located run that leader's gateway was a different process on a
+  different node from the one the participants had spoken to.
+- **Nothing tells a client what became of an unanswered order** (Design.md §8).
+- **One order in each run was answered ~13.6 s after it was sent** (`ack service max=13.6 s`).
+  Unexplained.
+
+---
+
 ## Adding a row
 
 ```sh
@@ -988,7 +1023,8 @@ paste in here. R1 above was produced by the harness that became that script.
 `SECURITIES=n` drives n securities (max 10) and the rates stay the aggregate, so a one-book sweep
 and a fan-out sweep are the same script and the same row format.
 
-Not yet recorded here, and worth a row when they happen: a multi-node cluster, an Epsilon soak
+Not yet recorded here, and worth a row when they happen: a multi-node cluster *across machines*
+(F1–F2 are three members on one), an Epsilon soak
 measured in hours, an unpinned sweep on a many-core host booted *without* `isolcpus` (the only
 unpinned arm that means anything — see "What L0–L4 say"), and a host whose cores are as fast as the
 laptop's. A native-binary sweep on x86-64 is L3.

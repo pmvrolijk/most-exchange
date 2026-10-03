@@ -15,7 +15,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 same commit when the design changes.
 
 Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`,
-`control` — all implemented, 463 tests passing. See `docs/Status.md` §1 for what is real.
+`control` — all implemented, 624 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -26,6 +26,8 @@ Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gat
 ./gradlew :engine:nativeCompile                    # native binary (needs a GraalVM toolchain)
 ./gradlew installDist && ./e2e/run-e2e.sh          # every process, a real trade, a load run
 ./e2e/run-restart.sh                               # does the shard come back with its book?
+./e2e/run-cluster3.sh                              # three members: election, two failovers, a rejoin
+PLACEMENT=colocated ./e2e/run-failover.sh          # what a failover costs a client, per gateway placement
 ./e2e/run-attribution.sh                           # where a round trip goes, by stage
 SECURITIES=10 ./e2e/run-sweep.sh                   # how far a shard goes, and where it stops
 ./e2e/run-epsilon-soak.sh                          # steady-state allocation
@@ -36,6 +38,9 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   tests could not. It wipes everything and starts fresh, so it says nothing about durability.
 - **`e2e/run-restart.sh` is the only check that state survives a restart** — and the only one that
   covers the geometry-change refusals and the multi-gateway cases (§4c, §4d, §4e).
+- **`e2e/run-cluster3.sh` and `e2e/run-failover.sh` are the only multi-node checks**, three members
+  on one machine. Run them after touching replicated state, role handling or the gateway's session.
+  Their first run found a determinism defect no single-node test could (see "Market data").
 - `run-e2e.sh` takes each binary path from `ENGINE`/`GATEWAY`/`MARKETDATA`/`DISCOVERY`, so the same
   run drives native images. A native binary must pass it unchanged, with the same report and fill
   counts. That is the check, not that it started.
@@ -151,7 +156,10 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   `Min` variant would let the slowest subscriber throttle the publisher. Gap detection and snapshot
   re-synchronisation are subscriber responsibilities. → R§6
 - **Every book event carries a `seqNum` and a `shardId`**, stamped by the engine and snapshotted
-  with `nextExchangeOrderId`, which makes L3 a verbatim byte-forward. `OrderRemoved` carries
+  with `nextExchangeOrderId`, which makes L3 a verbatim byte-forward. **The number is consumed on
+  every node whether or not the event is published** — taken in `publishBookEvent` before the
+  leader check, never inside the encode. A book image goes through `publishOnBookStream` and consumes
+  none. Followers once never advanced it (`BookEventSequenceTest`). `OrderRemoved` carries
   `leavesQty` so the whole L2 aggregate is derivable without shadowing per-order state.
 - **Feed sequences are namespaced by shard**, each numbering from 1. `FeedSequenceTracker` in
   `reference` distinguishes a gap from a replay.
@@ -172,6 +180,17 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 - **The outbound leg cannot do this** — egress must keep being drained or the session dies — so it
   drops and counts. Retrying there was measured and cost 10x on the p99 while still dropping. → R§7
 - **A gateway serves exactly one shard** and rejects anything outside its list.
+- **`gateway.placement` is `independent` (default; UDP, its own tier) or `colocated`** (one per node
+  on that node's driver, IPC both ways, needs `most cluster --ipc-ingress`). → R§15
+- **A co-located gateway decides active/standby from its node's `Cluster node role` counter
+  (`LeaderWatch`), never from its cluster client** — with IPC egress a new leader elsewhere is never
+  announced to it, and Aeron's client would wait ~20 s offering into a follower. Standby refuses
+  `GATEWAY_UNAVAILABLE`; it neither holds nor drops. → R§15
+- **Every node's co-located gateway presents the same registry identity**, primary for its
+  participants, so the one that connects takes every route at open. An identity per node leaves
+  routes on the dead session until it times out. → R§15
+- **A client of co-located gateways moves on `GATEWAY_UNAVAILABLE` and on a disconnect.** The
+  leader's machine dying takes its gateway with it, and a dead gateway sends no reject.
 - **The directory publishes the GATEWAY's client endpoints**, not the cluster ingress/egress.
 
 ## Participants and the registry
@@ -280,8 +299,8 @@ here as well:
 - **The `.hgrm` files from `run-attribution.sh` exist to be diffed.** Re-run it either side of a
   change to the core. Set `ATTRIBUTION_DIR` — a run wipes its directory — and compare against
   `docs/baselines/`, which is where the A1–A4 histograms live so a `./gradlew clean` cannot take them.
-- Every measurement to date is **single-node**. Say so when quoting one, and say how many
-  securities: the fan-out result is that **the shard's ceiling is aggregate, not per-security** —
+- Every throughput measurement to date is **single-node** (F1–F2 are failover behaviour, three
+  members on one machine). Say so when quoting one, and say how many securities: the fan-out result is that **the shard's ceiling is aggregate, not per-security** —
   ~350k/s across ten is the same aggregate one book reached, so Design.md §2's 1M/s/shard target is
   over-stated by ~2.9x (Measurements.md R5), or ~1.8x with a `DEDICATED` driver (R7). Both figures
   are with UDP egress in 1,408 B datagrams. With IPC egress one node carries 1M/s at an 83 µs median

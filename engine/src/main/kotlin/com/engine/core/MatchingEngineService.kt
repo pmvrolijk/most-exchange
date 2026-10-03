@@ -277,6 +277,9 @@ class MatchingEngineService(
     override fun onStart(cluster: Cluster, snapshotImage: Image?) {
         this.cluster = cluster
         this.isLeader = cluster.role() == Cluster.Role.LEADER
+        // A service starts as a follower and hears onRoleChange only on a change, so a member that
+        // never leads would otherwise never say what it is.
+        println("engine: role ${cluster.role()}")
         this.bookEventPub =
             cluster.aeron().addExclusivePublication(bookEventChannel, bookEventStreamId)
         if (snapshotImage != null) loadSnapshot(snapshotImage)
@@ -311,6 +314,9 @@ class MatchingEngineService(
 
     override fun onRoleChange(newRole: Cluster.Role) {
         isLeader = newRole == Cluster.Role.LEADER
+        // Rare, and off the order path. Which member leads is otherwise invisible from the
+        // engine's log, and it is what a multi-node operator reads first.
+        println("engine: role $newRole")
     }
 
     /**
@@ -1492,9 +1498,9 @@ class MatchingEngineService(
         side: Byte,
     ) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + OrderAddedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         orderAddedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .exchangeOrderId(exchangeOrderId)
             .price(price)
             .qty(qty)
@@ -1512,9 +1518,9 @@ class MatchingEngineService(
         side: Byte,
     ) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + OrderReducedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         orderReducedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .exchangeOrderId(exchangeOrderId)
             .price(price)
             .lastQty(lastQty)
@@ -1533,9 +1539,9 @@ class MatchingEngineService(
         reason: RemoveReason,
     ) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + OrderRemovedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         orderRemovedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .exchangeOrderId(exchangeOrderId)
             .price(price)
             .leavesQty(leavesQty)
@@ -1554,9 +1560,9 @@ class MatchingEngineService(
         aggressorSide: Byte,
     ) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + TradeExecutedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         tradeExecutedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .price(price)
             .qty(qty)
             .takerOrderId(takerOrderId)
@@ -1569,9 +1575,9 @@ class MatchingEngineService(
     private fun publishAuctionUncrossed(securityId: Int, price: Long, executedQty: Long) =
         publishBookEvent(
             MessageHeaderEncoder.ENCODED_LENGTH + AuctionUncrossedEncoder.BLOCK_LENGTH,
-        ) { buffer, offset ->
+        ) { buffer, offset, seqNum ->
             auctionUncrossedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-                .seqNum(nextBookEventSeqNum++)
+                .seqNum(seqNum)
                 .uncrossPrice(price)
                 .executedQty(executedQty)
                 .securityId(securityId)
@@ -1580,9 +1586,9 @@ class MatchingEngineService(
 
     private fun publishSessionChanged(securityId: Int, phase: Byte) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + SessionChangedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         sessionChangedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .securityId(securityId)
             .shardId(shardId)
             .phase(SbePhase.get(phase))
@@ -1596,9 +1602,9 @@ class MatchingEngineService(
         aggressorSide: Byte,
     ) = publishBookEvent(
         MessageHeaderEncoder.ENCODED_LENGTH + VolatilityHaltedEncoder.BLOCK_LENGTH,
-    ) { buffer, offset ->
+    ) { buffer, offset, seqNum ->
         volatilityHaltedEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
-            .seqNum(nextBookEventSeqNum++)
+            .seqNum(seqNum)
             .collarReference(collarReference)
             .attemptedPrice(attemptedPrice)
             .breachedBound(breachedBound)
@@ -1634,7 +1640,7 @@ class MatchingEngineService(
         val securityId = book.securityId
         val levels = book.occupiedLevelCount()
 
-        publishBookEvent(
+        publishOnBookStream(
             MessageHeaderEncoder.ENCODED_LENGTH + BookImageBeginEncoder.BLOCK_LENGTH,
         ) { buffer, offset ->
             bookImageBeginEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
@@ -1647,7 +1653,7 @@ class MatchingEngineService(
         publishImageSide(book, baseline, Side.BUY)
         publishImageSide(book, baseline, Side.SELL)
 
-        publishBookEvent(
+        publishOnBookStream(
             MessageHeaderEncoder.ENCODED_LENGTH + BookImageEndEncoder.BLOCK_LENGTH,
         ) { buffer, offset ->
             bookImageEndEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
@@ -1661,7 +1667,7 @@ class MatchingEngineService(
     private fun publishImageSide(book: OrderBook, baseline: Long, side: Byte) {
         val securityId = book.securityId
         book.forEachOccupiedLevel(side == Side.BUY) { price, qty, orders ->
-            publishBookEvent(
+            publishOnBookStream(
                 MessageHeaderEncoder.ENCODED_LENGTH + BookImageLevelEncoder.BLOCK_LENGTH,
             ) { buffer, offset ->
                 bookImageLevelEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
@@ -1676,7 +1682,21 @@ class MatchingEngineService(
         }
     }
 
-    private inline fun publishBookEvent(length: Int, encode: (MutableDirectBuffer, Int) -> Unit) {
+    private inline fun publishBookEvent(length: Int, encode: (MutableDirectBuffer, Int, Long) -> Unit) {
+        // Consumed where the event is generated, on every node, whether or not it is published:
+        // only the leader publishes, and only to a connected publication, but the sequence is
+        // replicated state a follower must hold identically to continue it (Design.md §5,
+        // "Sequence Numbers and Shard Namespacing"; BookEventSequenceTest).
+        val seqNum = nextBookEventSeqNum++
+        publishOnBookStream(length) { buffer, offset -> encode(buffer, offset, seqNum) }
+    }
+
+    /**
+     * The leader's write to the book event stream, consuming no sequence number. A book image
+     * calls this directly, since it carries the sequence as a baseline (Design.md §5); every other
+     * event goes through [publishBookEvent].
+     */
+    private inline fun publishOnBookStream(length: Int, encode: (MutableDirectBuffer, Int) -> Unit) {
         if (!isLeader) return
         val publication = bookEventPub ?: return
         var attempts = 0

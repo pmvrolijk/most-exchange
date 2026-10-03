@@ -59,7 +59,7 @@ fun runLoad(args: Args) {
             return
         }
 
-        val override = GatewayOverride.from(args)
+        val overrides = GatewayOverride.listFrom(args)
         val securities = ArrayList<RoutedSecurity>(symbols.size)
         for (symbol in symbols) {
             val security = directory.routeForSymbol(symbol)
@@ -67,7 +67,7 @@ fun runLoad(args: Args) {
                 System.err.println("most: unknown symbol '$symbol' -- try `most securities`")
                 return
             }
-            securities += override.applyTo(security)
+            securities += overrides.first().applyTo(security)
         }
         // One publication drives the run, so every symbol has to be reachable through it. Two
         // shards would need two schedules, and interleaving them on one clock is a different
@@ -82,12 +82,17 @@ fun runLoad(args: Args) {
 
         for (warning in bandWarnings(spec, securities)) System.err.println("most: warning -- $warning")
 
-        execute(aeron, spec, securities)
+        val gateways = overrides.map { it.applyTo(securities.first()) }
+        execute(aeron, spec, securities, gateways)
     }
 }
 
-private fun execute(aeron: Aeron, spec: LoadSpec, securities: List<RoutedSecurity>) {
-    val route = securities.first()
+private fun execute(
+    aeron: Aeron,
+    spec: LoadSpec,
+    securities: List<RoutedSecurity>,
+    gateways: List<RoutedSecurity>,
+) {
     println(
         "load: generating ${spec.count} orders for " +
             "${securities.joinToString(",") { it.symbol }} (seed ${spec.seed})"
@@ -96,28 +101,36 @@ private fun execute(aeron: Aeron, spec: LoadSpec, securities: List<RoutedSecurit
     val run = LoadRun(spec)
 
     // Listen before publishing: an acknowledgement can beat the subscription going live, and a
-    // report missed at the start is indistinguishable from one the engine never sent.
-    val reports = aeron.addSubscription(route.executionReportChannel, route.executionReportStreamId)
+    // report missed at the start is indistinguishable from one the engine never sent. Every
+    // gateway's reports, since with co-located gateways the one answering moves on a failover.
+    val reports = gateways.map { aeron.addSubscription(it.executionReportChannel, it.executionReportStreamId) }
     // Exclusive: one thread sends, and an exclusive publication's tryClaim avoids the shared
     // publication's term-position CAS on every message.
-    val orders = aeron.addExclusivePublication(route.orderEntryChannel, route.orderEntryStreamId)
+    val orders = gateways.map { aeron.addExclusivePublication(it.orderEntryChannel, it.orderEntryStreamId) }
 
     val idle = SleepingIdleStrategy(Duration.ofMillis(1).toNanos())
     val connectDeadline = System.nanoTime() + Duration.ofSeconds(5).toNanos()
-    while ((!orders.isConnected || !reports.isConnected) && System.nanoTime() < connectDeadline) {
+    while ((orders.any { !it.isConnected } || reports.any { !it.isConnected }) &&
+        System.nanoTime() < connectDeadline
+    ) {
         idle.idle(0)
     }
-    if (!orders.isConnected) {
-        System.err.println(
-            "most: no gateway listening on ${route.orderEntryChannel}:${route.orderEntryStreamId}"
-        )
-        return
+    for ((i, route) in gateways.withIndex()) {
+        if (!orders[i].isConnected) {
+            System.err.println("most: no gateway listening on ${route.orderEntryChannel}:${route.orderEntryStreamId}")
+        }
+        if (!reports[i].isConnected) {
+            System.err.println(
+                "most: warning -- not subscribed to ${route.executionReportChannel}:" +
+                    "${route.executionReportStreamId}; orders sent there will look unanswered"
+            )
+        }
     }
-    if (!reports.isConnected) {
-        System.err.println(
-            "most: warning -- not subscribed to ${route.executionReportChannel}:" +
-                "${route.executionReportStreamId}; every order will look unanswered"
-        )
+    val first = orders.indexOfFirst { it.isConnected }
+    if (first < 0) return
+    run.activeGateway = first
+    if (gateways.size > 1) {
+        println("load: ${gateways.size} gateways; starting on ${gateways[first].orderEntryChannel}")
     }
 
     val receiver = Thread({ receiveReports(reports, run) }, "load-receiver")
@@ -147,7 +160,7 @@ private fun execute(aeron: Aeron, spec: LoadSpec, securities: List<RoutedSecurit
  * Sends the run and returns the elapsed nanoseconds. Allocation-free: one encoder, one header, one
  * claim, all reused.
  */
-private fun send(orders: Publication, spec: LoadSpec, pool: OrderPool, run: LoadRun): Long {
+private fun send(gateways: List<Publication>, spec: LoadSpec, pool: OrderPool, run: LoadRun): Long {
     val header = MessageHeaderEncoder()
     val encoder = NewOrderSingleEncoder()
     val claim = BufferClaim()
@@ -168,7 +181,7 @@ private fun send(orders: Publication, spec: LoadSpec, pool: OrderPool, run: Load
         run.sendNs[i] = sentNs
         run.dueNs[i] = if (spec.delayNs > 0L) dueNs else sentNs
 
-        if (!offer(orders, claim, header, encoder, spec, pool, slot, spec.clOrdIdBase + i, run)) {
+        if (!offer(gateways, claim, header, encoder, spec, pool, slot, spec.clOrdIdBase + i, run)) {
             if (run.aborted) return System.nanoTime() - startNs
             continue
         }
@@ -201,7 +214,7 @@ private fun awaitDue(dueNs: Long) {
 /** Claims, encodes in place and commits. Returns false when the order could not be sent. */
 @Suppress("LongParameterList")
 private fun offer(
-    orders: Publication,
+    gateways: List<Publication>,
     claim: BufferClaim,
     header: MessageHeaderEncoder,
     encoder: NewOrderSingleEncoder,
@@ -213,7 +226,9 @@ private fun offer(
 ): Boolean {
     var attempts = 0
     while (true) {
-        val result = orders.tryClaim(FRAME_LENGTH, claim)
+        // Read on every attempt: the receiver moves it when the gateway in use refuses to forward,
+        // and a disconnect below moves it too.
+        val result = gateways[run.activeGateway].tryClaim(FRAME_LENGTH, claim)
         if (result > 0L) {
             // A plain publication, NOT a cluster ClientSession: encode at claim.offset() with no
             // SESSION_HEADER_LENGTH allowance. That reservation is the engine's egress rule
@@ -241,6 +256,18 @@ private fun offer(
                 Thread.onSpinWait()
             }
 
+            Publication.NOT_CONNECTED -> {
+                // The gateway is gone, not refusing: a co-located gateway dies with its node and
+                // sends no GATEWAY_UNAVAILABLE. Aeron says so only once its publication has heard
+                // nothing for the connection timeout, and every order sent to it until then is lost
+                // without a reply -- the cost of this placement that no reject can cover.
+                if (!switchGateway(gateways, run)) {
+                    System.err.println("most: no gateway is connected (${describeOfferResult(result)}); stopping")
+                    run.aborted = true
+                    return false
+                }
+            }
+
             else -> {
                 System.err.println(
                     "most: publication unusable (${describeOfferResult(result)}); stopping"
@@ -252,6 +279,20 @@ private fun offer(
     }
 }
 
+/** Moves to the next connected gateway after the one in use; false when there is none. */
+private fun switchGateway(gateways: List<Publication>, run: LoadRun): Boolean {
+    val from = run.activeGateway
+    for (step in 1..<gateways.size) {
+        val next = (from + step) % gateways.size
+        if (gateways[next].isConnected) {
+            run.activeGateway = next
+            run.disconnectSwitches++
+            return true
+        }
+    }
+    return false
+}
+
 private fun describeOfferResult(result: Long): String = when (result) {
     Publication.NOT_CONNECTED -> "the gateway is not connected"
     Publication.CLOSED -> "closed"
@@ -261,10 +302,12 @@ private fun describeOfferResult(result: Long): String = when (result) {
 
 // ---------------------------------------------------------------- receiving
 
-private fun receiveReports(subscription: Subscription, run: LoadRun) {
+private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
     val header = MessageHeaderDecoder()
     val decoder = ClientExecutionReportDecoder()
     val spec = run.spec
+    // Which gateway the fragment being handled came from; set before each poll.
+    var polling = 0
 
     val assembler = FragmentAssembler { buffer, offset, length, _ ->
         if (length >= MessageHeaderDecoder.ENCODED_LENGTH) {
@@ -275,20 +318,36 @@ private fun receiveReports(subscription: Subscription, run: LoadRun) {
                     header.blockLength(), header.version(),
                 )
                 run.onReport(decoder, System.nanoTime())
+                // A co-located gateway on a node that does not lead refuses every order this way.
+                // Move on from it once -- the rejects still in flight from it must not move again.
+                if (decoder.execType() == ExecType.REJECTED &&
+                    decoder.rejectReason() == RejectReason.GATEWAY_UNAVAILABLE &&
+                    polling == run.activeGateway && subscriptions.size > 1
+                ) {
+                    run.activeGateway = (polling + 1) % subscriptions.size
+                    run.rejectSwitches++
+                }
             }
         }
     }
-
     val idle = BusySpinIdleStrategy()
     while (!run.stopped) {
-        idle.idle(subscription.poll(assembler, FRAGMENT_LIMIT))
+        var work = 0
+        for (i in subscriptions.indices) {
+            polling = i
+            work += subscriptions[i].poll(assembler, FRAGMENT_LIMIT)
+        }
+        idle.idle(work)
         if (run.progressDue) {
             run.progressDue = false
             printProgress(run)
         }
     }
     // One last sweep: reports can be sitting in the image when the drain deadline expires.
-    subscription.poll(assembler, FRAGMENT_LIMIT)
+    for (i in subscriptions.indices) {
+        polling = i
+        subscriptions[i].poll(assembler, FRAGMENT_LIMIT)
+    }
     if (spec.intervalMs > 0L) printProgress(run)
 }
 
@@ -305,6 +364,12 @@ private class LoadRun(val spec: LoadSpec) {
     @Volatile var answered = 0
     @Volatile var stopped = false
     @Volatile var progressDue = false
+
+    /** The gateway orders go to. Written by the receiver on a GATEWAY_UNAVAILABLE, read per send. */
+    @Volatile var activeGateway = 0
+    /** Each written by one thread only: the receiver on a reject, the sender on a disconnect. */
+    @Volatile var rejectSwitches = 0L
+    @Volatile var disconnectSwitches = 0L
     var aborted = false
     var startNs = 0L
 
@@ -432,6 +497,14 @@ private fun printSummary(
             run.tradedQty, run.takerFills, tradePercent
         )
     )
+
+    if (run.rejectSwitches + run.disconnectSwitches > 0L) {
+        println(
+            "  failover       gateway switches: %,d on GATEWAY_UNAVAILABLE, %,d on a disconnect".format(
+                Locale.ROOT, run.rejectSwitches, run.disconnectSwitches,
+            )
+        )
+    }
 
     val unanswered = run.sent - run.answered
     println("  unanswered     %,d orders never saw a report".format(Locale.ROOT, unanswered.coerceAtLeast(0)))

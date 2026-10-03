@@ -612,3 +612,37 @@ the books. A per-security reading would have hidden that behind a factor of ten.
   inlined" would break the zero-allocation profile. Do not disable it to get a build through — fix
   the warning. Reserve `inline` for functions taking callbacks; on plain helpers Kotlin correctly
   warns it buys nothing.
+
+---
+
+## 15. Gateway placement, and why the gateway reads its node's role
+
+IPC egress roughly triples what one node carries (Design.md §2, K1–K5), and it requires the gateway
+to share the leader's media driver. ProdDeployment.md had argued that co-locating a gateway "buys
+nothing", which was true until egress was found to be the knee. Neither placement is right for every
+operator. One costs throughput, the other costs a gateway switch on every failover. So it is a key,
+`gateway.placement`, and both are kept honest by `e2e/run-failover.sh` (Design.md §7).
+
+- **A co-located gateway cannot learn of a new leader from its cluster client.** Read in Aeron 1.53's
+  source: a client whose egress image closes enters `AWAIT_NEW_LEADER` and waits `newLeaderTimeoutNs`
+  (2 × the leader heartbeat timeout, ~20 s by default) for a `NewLeaderEvent`. The new leader sends
+  that event on its own egress, and with an IPC egress channel that is the *new* leader's driver,
+  which the old leader's gateway never sees. For those ~20 s its offers go to a node that is now a
+  follower. The `Cluster node role` counter on its own driver changes the moment the role does, so
+  the gateway polls it (`LeaderWatch`, every 10 ms) and stands down on anything but LEADER.
+- **The per-node gateways share one identity** because the engine already does the right thing with
+  it. A primary gateway binds its participants at session open even beside a live holder, so the
+  newly active gateway takes every route at once. The ex-leader's session stays open on the new
+  leader until the session timeout and owns nothing. An identity per node would leave routes on that
+  dead session for up to 10 s, and every maker fill in that window would be undeliverable.
+- **Standby refuses; it does not drop or hold.** Holding an order on a standby gateway would wait for
+  an election that may never make this node leader. Dropping it would be silent. A
+  `GATEWAY_UNAVAILABLE` costs the client one round trip and tells it exactly what to do.
+- **The client also moves on a disconnect**, because the case that matters most, the leader's
+  machine dying, takes its gateway with it, and a dead gateway sends nothing. That blind window
+  (Aeron's publication connection timeout, 5 s) was found by running the failover, not by reasoning
+  about it. Reject-and-retry alone had been the plan.
+- **The directory is not the failover signal.** Discovery broadcasts on an interval (5 s), so a
+  client following it learns later than one that is refused. An "active gateway" entry would still
+  serve a client that is starting up.
+

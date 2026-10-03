@@ -263,6 +263,8 @@ gateway.client.outbound.streamId=21
 | `gateway.metrics` | `false` | Hot-path timing on both legs, and the poll thread's duty cycle as the `duty-ns: gateway <id>` counter (5.8) |
 | `gateway.metrics.file` | none | Percentile distributions at shutdown |
 | `gateway.idleStrategy` | `busyspin` | How the poll thread waits for work; same values as `engine.idleStrategy` |
+| `gateway.placement` | `independent` | `independent`: its own tier, UDP to every member. `colocated`: one per node on that node's media driver (`gateway.aeronDir`), IPC both ways, active only while the node leads (3.2). Co-located needs `gateway.gatewayId`, and refuses a UDP ingress or egress channel and `gateway.ingressEndpoints` |
+| `gateway.leaderPollMs` | `10` | How often a co-located gateway reads its node's role |
 
 `gateway.gatewayId` and one of the two credential keys must be set **together**: an id with no secret
 cannot authenticate, and a secret with no id has nothing to authenticate as. The process refuses to
@@ -353,6 +355,8 @@ otherwise.
 | `--cluster-dir DIR` | `<dir>/cluster` | Consensus module directory — **durable** |
 | `--host HOST` | `localhost` | Host name used to build default endpoints |
 | `--members STRING` | single-node default | Aeron member string (3.6) |
+| `--member-id N` | `0` | Which entry of `--members` this node is |
+| `--ipc-ingress` | off | Let a gateway on this node's media driver reach the consensus module over IPC while it leads. Needed by `gateway.placement=colocated` |
 | `--participants FILE` | none | The participant registry (4.3). With it, every cluster session must authenticate — anonymous ones are refused — and a snapshot request through consensus is granted only to an `operator=true` identity. Without it, anyone connects and anyone may snapshot |
 | `--participants-reload-ms N` | `5000` | Registry poll interval; `0` disables |
 | `--driver-threading MODE` | `SHARED` | Media driver threads: `SHARED`, `SHARED_NETWORK` or `DEDICATED`. **The shard's first throughput ceiling**; the gateway's egress channel is the second (see below) |
@@ -408,11 +412,13 @@ shard's driver. So:
 - **A single-node shard** (development, performance measurement): `gateway.egressChannel=aeron:ipc`.
   It always holds, because the one node always leads. The scripts take it as
   `EGRESS_CHANNEL=aeron:ipc`.
-- **A multi-node cluster**: IPC egress holds only while the gateway's node leads. After a failover the
-  new leader cannot reach it, and that gateway's reports stop. The separate gateway tier of 3.2 uses
-  UDP egress. There, fewer and larger datagrams (`|mtu=8192`) are the lever that removed the same step
-  on loopback. On a real network an MTU above the link's needs jumbo frames end to end on the trading
-  VLAN, and that combination has not been measured.
+- **A multi-node cluster** chooses with `gateway.placement` (3.2). **`colocated`** keeps IPC egress
+  across failovers by running a gateway on every node, active only on the leader's, with clients
+  moving between them. **`independent`** uses UDP egress, where fewer and larger datagrams
+  (`|mtu=8192`) are the lever that removed the same step on loopback. On a real network an MTU above
+  the link's needs jumbo frames end to end on the trading VLAN, and that combination has not been
+  measured. Neither placement's *throughput* has been measured multi-node: log replication to
+  followers crosses the same UDP sender either way.
 
 ::: warning A 100% engine is not always a busy one
 The engine retries a full publication inside its work, so behind a full egress publication it reads

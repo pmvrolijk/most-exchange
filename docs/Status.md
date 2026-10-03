@@ -4,7 +4,19 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03, in the session that closed three integrity items (Handover §2m):
+Last updated 2026-10-03, in the session that **ran three members for the first time** and made the
+gateway's placement configuration (Handover §2n):
+- **Multi-node.** `most cluster --member-id`; `e2e/run-cluster3.sh` elects, fails over twice, takes a
+  snapshot through consensus and rejoins a member from it. Its first run found that **followers never
+  advanced the book event sequence**, so snapshots differed between nodes and a new leader would have
+  restarted the feed's numbering. Fixed (Design.md §5, `BookEventSequenceTest`).
+- **Gateway placement** (Design.md §7). `gateway.placement=independent` is today's tier on UDP.
+  `colocated` runs a gateway per node on IPC (`most cluster --ipc-ingress`), active only on the
+  leader's, which it learns from its node's role counter. Clients move on `GATEWAY_UNAVAILABLE` or a
+  disconnect, and `most load` does both. `e2e/run-failover.sh` measures what a failover costs in each
+  placement (Measurements.md F1–F2).
+
+Earlier the same day, the session that closed three integrity items (Handover §2m):
 - **Configuration enforced through the log.** The leader announces the shard and engine fingerprints
   at each term start, and a node that disagrees refuses (Design.md §7).
 - **Releases.** A release is never written into an existing directory.
@@ -43,11 +55,11 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 
 | | |
 | --- | --- |
-| Branch | `master` has `integrity-checks` merged (`8f60884`, `0561fa0`). `bulk-cancel` is at `2bc01e2` (the bulk cancel, the SPA check, the manual), plus this session-close write-up; the user commits it and merges it to `master`. Check the pipelines for both merges first. The two measure jobs stay manual |
+| Branch | `master` at `2eb790e`, with this session's work **uncommitted** on top (the user commits it). `docs/Future.md` also carried an uncommitted edit of the user's from before the session |
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
-| Kotlin | ~27,500 lines — 15,100 main across 70 files, 12,440 test across 60 |
+| Kotlin | ~28,200 lines — 15,450 main across 71 files, 12,740 test across 63 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 606, all passing |
+| Tests | 624, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -62,9 +74,11 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
-./gradlew clean build                        # 542 tests (control's need Docker)
+./gradlew clean build                        # 624 tests (control's need Docker)
 ./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
 ./e2e/run-restart.sh                         # does the shard come back with its book?
+./e2e/run-cluster3.sh                        # three members: election, two failovers, a rejoin
+PLACEMENT=colocated ./e2e/run-failover.sh    # what a failover costs a client (or independent)
 ./e2e/run-attribution.sh                     # where a round trip goes, by stage
 SECURITIES=10 ./e2e/run-sweep.sh             # rate sweep (aggregate); prints a Measurements.md row
 ./e2e/run-epsilon-soak.sh                    # steady-state allocation (needs an Epsilon binary)
@@ -108,9 +122,11 @@ that authors reference data and drives the market over REST, and a console that 
 
 ### The caveats that still stand
 
-**This system has never run multi-node.** Failover, leader election and cross-node snapshot recovery
-are the reasons Aeron Cluster was chosen and not one has been exercised. Every result below
-describes a single node doing no replication work beyond its own log.
+~~**This system has never run multi-node.**~~ **Three members have run, on one machine**
+(`run-cluster3.sh`, `run-failover.sh`): election, failover, a snapshot through consensus restored on
+another member, and a member catching up on the log tail. **Still never run: across machines**, with
+log replication over a real network, and nothing has measured throughput with followers. Every rate
+below is a single node doing no replication work beyond its own log.
 
 **The design's throughput target is over-stated by about 2.9x.** Ten securities have now been driven
 together (runs R2–R6 in [`Measurements.md`](Measurements.md)) and the shard's ceiling is
@@ -189,6 +205,12 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    so revocation is "publish, then bulk cancel". And the control plane cannot *verify* that the gateway it sends
    operator commands through is an operator — `control.cluster.operatorChannel.<shard>` names one,
    but a wrong one is still a silent `refusedCommands` count.
+3a. **An order in flight at a failover is lost with no reply, and cannot be asked about** (Design.md
+   §8). Measured in both gateway placements (Measurements.md F1–F2): thousands of orders at 2,000/s
+   on a laptop, in a window of the election (independent) or of the client's publication timeout
+   (co-located, when the leader's machine dies). There is no order-status query, so a client cannot
+   tell "never sequenced" from "resting". Today's recourse is a bulk cancel and re-entry. One order
+   per run was also answered ~13.6 s late, unexplained.
 4. **Authorisation is all-or-nothing.** One `ADMIN` role with full access. Also, a command refused
    locally before the send attempt is not audited, because the audit is written on the way out of
    the REST layer.
@@ -226,8 +248,8 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     back (`configurationAnnouncementsAgreed=1`), and `run-restart.sh` step 8 refuses a log tail
     replayed under another file. **Still open:** a tail with no term start in it is not compared; a
     term sequenced by a misconfigured leader cannot be replayed by a correct node, and recovering from
-    one has no procedure; and **no multi-node run has exercised it**, so a follower refusing a leader
-    is unit-tested only. Operational consequence: a geometry change now needs `most cluster shutdown`,
+    one has no procedure; and **a follower refusing a leader is unit-tested only** — three members
+    now run (`run-cluster3.sh`) and agree, but none has been started on a different file. Operational consequence: a geometry change now needs `most cluster shutdown`,
     not SIGTERM.
 12. Smaller confirmations: collars in the auction (uncollared, deliberate); a closing auction and
     whether it resets `staticReference`; order modify/replace (unsupported, cancel/new only);
@@ -252,10 +274,11 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     no untimed work is involved. Of the "multi-ms stalls", 8 of 1.6M orders were over 1 ms at 200k/s,
     most likely first-use costs. The knee without the UDP egress limit is measured: ~1.5M/s with IPC
     egress, the engine thread full by 2.1M/s (K1–K5). **Still open under it:**
-    - which egress configuration production runs. It's a decision: IPC egress needs the gateway on the
-      leader's media driver, which the manual's separate gateway tier doesn't have, and a real NIC
-      changes loopback's MTU trade;
-    - log replication over UDP in a multi-node cluster, which should meet the same datagram limit;
+    - ~~which egress configuration production runs~~ **decided: the operator's, by `gateway.placement`**
+      (Design.md §7; Handover §2n). Independent on UDP (8 KB datagrams need jumbo frames on a real
+      NIC), or co-located on IPC with clients moving on a failover;
+    - log replication over UDP in a multi-node cluster, which should meet the same datagram limit —
+      runnable now, on one machine, but unmeasured;
     - the 22–72 ms p99 tails in unsaturated runs;
     - an engine counter that can see back-pressure (Design.md §8).
 13b. **The cluster host's duty counters disagree with the kernel** — sender 92–97% by `duty-ns`, ~2% by
@@ -277,7 +300,10 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 ## 3. To do next
 
 **Next session: archive retention (item 4 below)**, then the remaining correctness items, then the
-throughput follow-ups. The ceiling is named (item 3, open issue 13a); what remains there is the next
+throughput follow-ups. Multi-node now runs on one machine, which makes retention checkable across
+members too (does a follower truncate when the leader snapshots?). The next multi-node step needs
+machines: three members across hosts, and a sweep with followers (item 3(b)). That is billed, so it
+waits for a go. The ceiling is named (item 3, open issue 13a); what remains there is the next
 knee and a production decision. That work isn't dangerous, and the correctness items are. In the
 order I would take them, cheapest-and-most-dangerous first:
 
@@ -353,9 +379,11 @@ The full list, in the order it was written:
    knee, and 650k/s runs at 26–35% engine duty. Huge pages and storage move nothing. ~~(a) a sweep with
    `EGRESS_CHANNEL=aeron:ipc` to find the next knee~~ **done on the laptop** (I1–I3, K1–K5: ~1.5M/s, the
    engine full by 2.1M/s, 1M/s held at an 83 µs median). **Next, in order:**
-   (a) the production egress decision, which changes where the gateway runs relative to the node, so
-   it goes through `decision-fork`;
-   (b) a multi-node check of log replication over UDP, with the log channel's MTU as the lever;
+   ~~(a) the production egress decision~~ **decided 2026-10-03 with the user: both, by
+   `gateway.placement`** (Design.md §7, Handover §2n, Measurements.md F1–F2);
+   (b) a multi-node check of log replication over UDP, with the log channel's MTU as the lever —
+   `run-cluster3.sh` makes it runnable on one machine, but a figure wants three hosts. Then
+   `run-failover.sh` again there, with Aeron's default 10 s heartbeat;
    (c) a back-pressure counter in the engine (Design.md §8);
    (d) the p99 tails;
    (e) recordable pinned sweeps on the Linode (the plan's "Phase B", ~$1–2), with a second generator,
@@ -387,10 +415,11 @@ The full list, in the order it was written:
    Aeron client conductor's per-duty-cycle allocation — it shares this heap and would be invisible
    in a 20-second run. The runner is in place, so with the soak `engine.useEpsilonGc=true` is a
    one-line change backed by measurement.
-8. **Bring up a three-node cluster.** Expect the fixed single-node member string in
-   `ClusterCommand.kt` to need generalising. What is untested is specifically the multi-node part:
-   whether a snapshot taken through consensus on one member restores on another, and whether a
-   rejoining node catches up from the archive rather than from genesis.
+8. ~~**Bring up a three-node cluster.**~~ **Done on one machine** (`e2e/run-cluster3.sh`,
+   Handover §2n): `--member-id`, a snapshot through consensus restored on another member, and a
+   rejoining member that restores and then catches up on the tail rather than replaying from genesis.
+   Its first run found the follower book-event sequence defect. **Still open:** across machines, and
+   a follower started on a different security file.
 9. ~~**Fingerprint enforcement at boot**~~ **Done** (open issue 11).
 10. **Reconcile `Design.md` §6 with the code**, or cut it. Outstanding for several sessions.
 11. **Tests for the `discovery` process** itself. Also outstanding.

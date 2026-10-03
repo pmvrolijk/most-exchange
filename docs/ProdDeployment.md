@@ -97,9 +97,22 @@ was the only place `origQty` lived, so a standby on another machine had no copy 
 marked every in-flight order `UNKNOWN`. The engine holds `origQty` now (Design.md §3.1) and states
 both quantities on every execution report, so a gateway holds no state. Two things follow:
 
-- **Co-locating a gateway with a cluster node buys nothing.** An `AeronCluster` client lists every
-  member and follows the leader, so a gateway on its own machine reaches the leader exactly as one
-  sitting beside it does. It is its own tier, sized and restarted independently of the Raft group.
+- **Where the gateway runs is the operator's choice: `gateway.placement`** (Design.md §7, "Gateway
+  placement"). This section used to say co-locating one "buys nothing", which was true until the
+  driver's UDP sender on the egress stream was found to be the shard's knee (Design.md §2). Now:
+  - **`independent`** (the default, and the topology drawn above): its own tier, listing every
+    member, followed across failovers by Aeron's client. Egress over UDP; set
+    `gateway.egressChannel=…|mtu=8192` and **enable jumbo frames on the trading VLAN**, or each
+    8 KB datagram is fragmented. One set of client endpoints, so a failover is invisible to adapters
+    except for its duration.
+  - **`colocated`**: one gateway on *each* core machine, on that machine's media driver, IPC both
+    ways (`most cluster --ipc-ingress`). Only the leader's is active; the others refuse
+    `GATEWAY_UNAVAILABLE`. **Adapters hold all three machines' endpoints and move** on that reject,
+    or when their publication disconnects because the leader's machine died. Roughly three times
+    the egress capacity on one node (K1–K5), paid for with a client-visible gateway switch on every
+    failover and a blind window of Aeron's publication connection timeout when the leader's machine
+    dies (Measurements.md F2). Every node's gateway presents the **same** registry identity.
+  Pick one per shard. Core allocation (§3.3) already has cores 9–10 for a gateway on every machine.
 - **What must be disjoint is endpoints, not state.** `gateway.client.inbound.channel` is a single
   address; two gateways subscribed to *one* would each receive every order and forward both, which
   is duplicate orders rather than redundancy. So each gateway gets its own client endpoints and
@@ -222,10 +235,10 @@ are on different machines, so they do not need to differ.
 
 Pass it identically to all three with `most cluster --members`, varying only the member id.
 
-> **Blocker.** `ClusterCommand.runClusterHost` hardcodes `.clusterMemberId(0)` and takes no
-> `--member-id` argument, so today all three nodes would claim to be member 0. It also hardcodes
-> `ThreadingMode.SHARED` and `ArchiveThreadingMode.SHARED`, which is right for a laptop and wrong
-> for §3.3. See §11.
+Each node gets `--member-id 0|1|2`; the archive's control endpoint is taken from that member's entry,
+so it always agrees with what the other members dial. Three members on one machine is
+`e2e/run-cluster3.sh`, which elects, fails over twice, and rejoins a member from its snapshot. Set
+`--driver-threading DEDICATED` (Design.md §7) and, for co-located gateways, `--ipc-ingress`.
 
 ### 4.2 Port map
 
@@ -260,6 +273,18 @@ gateway.ingressEndpoints=0=shard0-a:20110,1=shard0-b:20110,2=shard0-c:20110
 
 This is what the comment in `deploy/config/gateway.properties` anticipates when it says "One member
 here; production lists three or five."
+
+Co-located instead, on each core machine, with the same file everywhere except the endpoints:
+
+```properties
+gateway.placement=colocated
+gateway.aeronDir=/dev/shm/aeron-shard0            # this machine's cluster-host driver
+gateway.client.inbound.channel=aeron:udp?endpoint=shard0-a:20001
+gateway.client.outbound.channel=aeron:udp?control=shard0-a:20002|control-mode=dynamic
+gateway.gatewayId=gw-shard0                       # one identity for all three machines
+```
+
+No ingress or egress channel: co-located means IPC, and a UDP one is refused at startup.
 
 ### 4.4 The gateway needs no storage
 
@@ -624,10 +649,9 @@ exchange. Run the load generator on a fourth machine, never on a cluster node.
 
 Honest list. None of these are large; all of them are blocking.
 
-1. **`most cluster` cannot be a member other than 0.** `ClusterCommand.runClusterHost` hardcodes
-   `.clusterMemberId(0)` and exposes no `--member-id`. Blocking for §4.1.
-2. **Threading modes are hardcoded `SHARED`.** The driver and archive both. Correct for a laptop,
-   wrong for §3.3; needs `--threading-mode` or config, defaulting to today's behaviour.
+1. ~~**`most cluster` cannot be a member other than 0.**~~ **Done:** `--member-id` (§4.1).
+2. ~~**Threading modes are hardcoded `SHARED`.**~~ **Done:** `--driver-threading` and
+   `--archive-threading` (Design.md §7); the default stays `SHARED` for laptops.
 3. **Idle strategies are not configurable.** Busy-spin is right on isolated cores and harmful
    without them, so this has to be a knob rather than a constant.
 4. **`engine.march` is x86-only.** `gradle.properties` documents `x86-64-v3`; the build passes it
@@ -643,8 +667,9 @@ Honest list. None of these are large; all of them are blocking.
    dynamic MDC, which is what forces the single choice in §7.3.
 7. **No health endpoint on the core processes.** Everything above alarms on log lines and
    shutdown-time counters. A scrape endpoint per process would make §9.4 mechanisable.
-8. **Nothing here has been run.** The port map, the member string and the systemd units are derived
-   from the code and the dev stack, not from a working deployment.
+8. **Nothing here has been run across machines.** Three members on one machine have
+   (`e2e/run-cluster3.sh`, `e2e/run-failover.sh`). The port map, the systemd units and real-network
+   replication have not.
 
 ---
 

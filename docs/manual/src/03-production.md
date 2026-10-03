@@ -37,15 +37,24 @@ cross-machine hop for a stream that was deliberately made shared-memory.
 harmless — each cycle is staged and replaces the routing table wholesale, so a truncated cycle never
 replaces a good table.
 
-**`gateway` is not on these machines and is not active/standby.** A gateway holds no per-order state,
-so co-locating one with a cluster node buys nothing for correctness: an `AeronCluster` client lists
-every member and follows the leader whether it sits beside it or a rack away. It is its own tier,
-sized and restarted independently of the Raft group.
+**Where the gateway runs is a choice: `gateway.placement`.** A gateway holds no per-order state, so
+either placement is correct. They differ in throughput and in what a failover costs a client (4.5,
+4.8).
 
-**Throughput is the one thing co-location would buy.** A gateway that shares the *leader's* media
-driver can take its cluster egress over IPC. That is the highest-throughput setting there is, about
-three times the UDP ceiling on the same machine (4.8). But it holds only while that node leads, so it
-is a question of where gateways run, not a switch to flip. See "Gateway placement for IPC egress" below.
+- **`independent`** (the default): gateways are their own tier, on their own machines, as drawn above.
+  An `AeronCluster` client lists every member and follows the leader, so a failover is invisible to
+  adapters except for how long it takes. Execution reports come back over UDP, which caps one node at
+  about 500,000 orders/s with the default datagram size (4.8). Larger datagrams raise it, and on a
+  real network they need jumbo frames on the trading VLAN.
+- **`colocated`**: a gateway on **each** core machine, using that machine's media driver, IPC both
+  ways. About three times the throughput (4.8). Only the leader's gateway is active. The others refuse
+  every order with `GATEWAY_UNAVAILABLE`, so adapters hold all three machines' endpoints and move to
+  the next on that reject. They also move when their publication disconnects, because when the
+  leader's *machine* dies its gateway dies with it and sends nothing. All three gateways present
+  **the same** registry identity, so the one that becomes active takes every participant's routes the
+  moment it connects. The cluster hosts run `most cluster --ipc-ingress`.
+
+Pick one per shard. `e2e/run-failover.sh` runs either through two failovers and prints what each cost.
 
 ::: warning Gateways must have disjoint client endpoints
 `gateway.client.inbound.channel` is a single address. Two gateways subscribed to **one** inbound
@@ -54,13 +63,13 @@ each gateway its own client endpoints and partition adapters across them. Losing
 adapters a reconnect and nothing else; a peer reports correctly on orders it never saw.
 :::
 
-::: todo Gateway placement for IPC egress
-A gateway on the leader's media driver with `gateway.egressChannel=aeron:ipc` raises the single-node
-ceiling from ~500,000 to ~1,500,000 orders/s (4.8). But when leadership moves, the new leader can't
-reach an IPC channel on another machine, and that gateway's execution reports stop: they're counted
-as undeliverable. Nothing has been designed or tested that follows the leader, for instance a gateway
-per node, with adapters moving to whichever one sits beside the leader. Until something is, this
-topology runs UDP egress and plans against 5.7's UDP rows.
+::: warning A failover costs a co-located client its in-flight orders, and a blind window
+When the leader's machine dies, a client keeps publishing to its dead gateway until Aeron's publication
+connection timeout (5 s by default, on the client's driver) declares it gone. Every order sent in
+that window is lost without a reply. Measured on one machine at 2,000 orders/s: ~5 s and 9,978
+orders, against ~3.5 s and 6,412 for an independent gateway, whose window is the election itself.
+In both placements nothing tells a client what became of an unanswered order; reconcile with a
+cancel-all (5.3) and re-enter.
 :::
 
 ::: todo The directory advertises one gateway per shard
@@ -207,12 +216,10 @@ machines, so they do not need to differ.
 2,shard0-c:20110,shard0-c:20220,shard0-c:20330,shard0-c:20440,shard0-c:8010
 ```
 
-Pass it identically to all three with `most cluster --members`, varying only the member id.
-
-::: todo `most cluster` cannot be a member other than 0
-The cluster host hardcodes member id 0 and exposes no `--member-id`, so all three nodes would claim
-to be member 0. This is blocking for a multi-node deployment.
-:::
+Pass it identically to all three with `most cluster --members`, and give each its own
+`--member-id 0`, `1` or `2`. A node's archive listens on its own entry's archive endpoint.
+`e2e/run-cluster3.sh` runs three members on one machine through an election, two failovers and a
+member rejoining from its snapshot.
 
 ### Port map
 
@@ -351,7 +358,8 @@ systemctl start most-engine
 systemctl start most-market-data           # all three; followers stay silent
 systemctl start most-discovery             # all three is safe
 
-# 5. Gateways, on their own machines. Order does not matter and neither does how many.
+# 5. Gateways: independent ones on their own machines, co-located ones on every core machine.
+#    Order does not matter; a co-located gateway stands by until its node leads.
 systemctl start most-gateway
 
 # 6. Control plane last — it is a client of everything above.
@@ -385,11 +393,11 @@ An honest list. None of these are large; all of them block a production deployme
 
 | # | Gap | Blocks |
 | --- | --- | --- |
-| 1 | `most cluster` hardcodes member id 0 and exposes no `--member-id` | 3.6 — a multi-node cluster |
-| 2 | Driver and archive threading modes are hardcoded `SHARED` | 3.4 — dedicated threads |
+| ~~1~~ | ~~`most cluster` hardcodes member id 0~~ — **done**, `--member-id` | — |
+| ~~2~~ | ~~Driver and archive threading modes are hardcoded `SHARED`~~ — **done**, `--driver-threading`, `--archive-threading` | — |
 | 3 | Idle strategies are constants, not configuration | 3.4 — busy-spin only where cores are isolated |
 | 4 | `engine.march` is x86-only and passed straight to `native-image` | A second architecture |
 | 5 | The directory advertises one gateway per shard | 3.2 — naming several gateways |
 | 6 | A feed is one channel; multicast and MDC cannot coexist | 3.7 — mixed subscribers |
 | 7 | No health endpoint on the core processes | 6.8 — mechanised alerting; today everything is log lines and shutdown counters |
-| 8 | None of this has been run as described | All of section 3 |
+| 8 | None of this has been run across machines; three members on one machine have | All of section 3 |

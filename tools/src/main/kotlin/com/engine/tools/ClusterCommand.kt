@@ -11,6 +11,7 @@ import com.engine.reference.requestSnapshot
 import io.aeron.Aeron
 import io.aeron.archive.Archive
 import io.aeron.archive.ArchiveThreadingMode
+import io.aeron.cluster.ClusterMember
 import io.aeron.cluster.ClusterTool
 import io.aeron.cluster.ClusteredMediaDriver
 import io.aeron.cluster.ConsensusModule
@@ -88,6 +89,16 @@ private fun runClusterHost(args: Args) {
     // memberId,ingress,consensus,log,catchup,archiveControl
     val members = args.optional("members")
         ?: "0,$host:20110,$host:20220,$host:20330,$host:20440,$host:8010"
+    // Which entry of the member string this process is. Every member is passed the same string and
+    // differs only here, so a node that names the wrong id binds another member's endpoints --
+    // refused below rather than discovered as an election that never forms.
+    val memberId = args.int("member-id", 0)
+    val thisMember = ClusterMember.findMember(ClusterMember.parse(members), memberId)
+        ?: throw IllegalArgumentException("--member-id $memberId is not in --members $members")
+    // A client on this node's own media driver may then reach the consensus module over IPC, which
+    // it subscribes to only while it is the leader (Design.md §7, "Gateway placement"). Off by
+    // default, as in Aeron: an independent gateway has no use for it.
+    val ipcIngress = args.has("ipc-ingress")
 
     // Who may connect as which gateway. Optional: without it every client connects anonymously,
     // the engine learns its routes from traffic, and the shard behaves exactly as it did before
@@ -115,7 +126,7 @@ private fun runClusterHost(args: Args) {
             "gateways=${registry.gateways.map { it.gatewayId }} " +
             (if (reloadMs > 0) "reload=${reloadMs}ms" else "reload=off")
     )
-    println("cluster: members=$members")
+    println("cluster: member=$memberId members=$members ipcIngress=$ipcIngress")
     println(
         if (fresh) "cluster: --fresh -- deleting the archive and cluster directories on start"
         else "cluster: persisting the archive and cluster directories (pass --fresh to wipe them)"
@@ -131,7 +142,9 @@ private fun runClusterHost(args: Args) {
     val archiveContext = Archive.Context()
         .aeronDirectoryName(aeronDir)
         .archiveDir(File(archiveDir))
-        .controlChannel("aeron:udp?endpoint=$host:8010")
+        // The member string's archive endpoint, so the other members' catch-up and snapshot
+        // replication reach this archive and not whichever one happens to own the default port.
+        .controlChannel("aeron:udp?endpoint=${thisMember.archiveEndpoint()}")
         .replicationChannel("aeron:udp?endpoint=$host:0")
         .recordingEventsEnabled(false)
         .threadingMode(archiveThreading)
@@ -141,8 +154,9 @@ private fun runClusterHost(args: Args) {
     val consensusContext = ConsensusModule.Context()
         .aeronDirectoryName(aeronDir)
         .clusterDir(File(clusterDir))
-        .clusterMemberId(0)
+        .clusterMemberId(memberId)
         .clusterMembers(members)
+        .isIpcIngressAllowed(ipcIngress)
         // The ingress term length caps how far the gateway's publication may run ahead of the
         // consensus module's ingress subscription, so it bounds how much of a hiccup the shard can
         // absorb before the sender is flow-controlled. 64k is small; whether it is the shard's

@@ -78,6 +78,9 @@ so the matching thread never pays for feed fan-out.
   and would have required replay from genesis — billions of events after a single trading day.
 * **Market data still needs explicit muting.** The Book Event Stream is a plain publication, not
   cluster egress, so the service gates it on `Cluster.Role.LEADER` via `onRoleChange`.
+* **Members.** `most cluster --member-id N --members SPEC` makes a process one member of a group;
+  every member gets the same string. `e2e/run-cluster3.sh` runs three on one machine and
+  `e2e/run-failover.sh` runs them through two failovers in each gateway placement (§7).
 
 ### Order Entry Gateway
 
@@ -1034,6 +1037,15 @@ core from slow feed consumers.
 Every book event carries a monotonic `seqNum`, stamped by the engine where the event is
 **generated** — which happens identically on every node, so a new leader continues the sequence
 rather than restarting it. It is snapshotted alongside `nextExchangeOrderId`.
+
+**A number is consumed whether or not the event is published.** Only the leader publishes, and only
+to a connected publication, but every node generates every event. Until 2026-10-03 the number was
+taken inside the publish, so followers never advanced it, their snapshots disagreed with the
+leader's, and a new leader would have restarted the feed's sequence. One node is always the leader,
+so nothing saw it until the first three-node run (`e2e/run-cluster3.sh`). `BookEventSequenceTest`
+pins it. One consequence is intended: an event the leader drops because market data is not
+connected now leaves a gap a subscriber can see, where before the feed looked contiguous and was
+silently missing it.
 
 This makes the L3 feed a **verbatim forward**: the engine's per-order events already *are* market by
 order and already carry a sequence, so the Market Data Process copies the bytes rather than
@@ -2586,6 +2598,78 @@ actively harmful, because a dedicated archive thread behind a shared driver thre
 the component that needed it. `SHARED_NETWORK` — conductor alone, sender and receiver shared — is
 untested here and is not assumed to sit between the two.
 
+#### Gateway placement
+
+**Where the gateway runs is an operator's choice, made with one key: `gateway.placement`.** The two
+values trade throughput against what a failover costs a client, and nothing in the engine or on the
+wire differs between them.
+
+| | `independent` (default) | `colocated` |
+| --- | --- | --- |
+| Runs | its own tier, on its own media driver | one per node, on that node's media driver (`gateway.aeronDir`) |
+| Cluster legs | UDP ingress to every member (`gateway.ingressEndpoints`); UDP egress | `aeron:ipc` both ways, to its own node only |
+| Holds a session | always; Aeron's client follows the leader | only while its node leads |
+| Throughput (one node) | the UDP sender's datagram rate binds: ~0.5M/s, or more in 8 KB datagrams (§2) | ~1.5M/s knee; the engine thread binds (§2, K1–K5) |
+| On a failover | the same gateway and session, re-routed by Aeron | a different gateway, on another machine |
+| Client endpoints | one set | one set per node; the client moves |
+
+**`independent`** is unchanged by the key's existence. Its production setting is egress in large
+datagrams, `gateway.egressChannel=…|mtu=8192`. On a real network that needs **jumbo frames on the
+trading VLAN**; otherwise every 8 KB datagram is IP-fragmented. The 8 KB result (Measurements.md
+E-series) was measured on loopback.
+
+**`colocated`** runs a gateway beside every node's cluster host. The cluster host needs
+**`most cluster --ipc-ingress`**, since Aeron's consensus module subscribes to IPC ingress only when
+asked, and then only while it leads. The gateway is a two-state loop:
+
+* **Standby.** No cluster session. Its client endpoints stay bound, and every order, cancel and
+  operator command is refused **`GATEWAY_UNAVAILABLE`** at once, so a client learns it has the wrong
+  node instead of waiting. Nothing is consumed silently.
+* **Active.** A session over IPC. Orders that arrive while it connects (milliseconds) are held,
+  not refused (`controlledPoll`, `ABORT`).
+
+**The node's role, not the cluster client, decides which.** The gateway reads its consensus module's
+`Cluster node role` counter (type 201) from its own driver's counters every `gateway.leaderPollMs`
+(10 ms). LEADER means connect; anything else, or a closed session, means stand down. The cluster
+client cannot be relied on for this. With egress on IPC, a new leader's `NewLeaderEvent` goes out on
+the *new* leader's driver, which an ex-leader's gateway never sees. Aeron's client would then sit in
+`AWAIT_NEW_LEADER` for `newLeaderTimeoutNs` (~20 s), offering orders into a follower, before closing
+(Rationale §15). Reading the counter is legal for the same reason re-reading the registry is: the
+gateway is not replicated, and a refusal never enters the log.
+
+**Every node's gateway presents the same registry identity.** One `gatewayId` and one secret, primary
+for the shard's participants. The engine binds a participant at session open if the connecting
+gateway is its primary, even beside a live holder (§1, "Declared, at session open"). So the gateway
+that has just connected takes every route at once, and the ex-leader's session, which the new leader
+keeps open until its session timeout, holds nothing. **No engine change was needed.**
+`e2e/run-failover.sh` proves it: a maker resting before a failover is filled after it, and the new
+leader reports `undeliverableReports=0`. The config refuses to start a co-located gateway with no
+identity, with no `aeronDir`, with a UDP cluster channel, or with member endpoints.
+
+**Clients reject-and-retry.** A client of co-located gateways holds every node's endpoints and moves
+to the next on **`GATEWAY_UNAVAILABLE`**, which costs it one round trip. It also moves when the
+publication to the one in use **disconnects**. A co-located gateway dies with its node and sends no
+reject, so a leader's *crash* is seen only when Aeron's publication connection timeout expires (5 s
+by default on the client's driver), and every order sent in that window is lost without a reply.
+`most load` implements both rules (`--order-entry-channel` and `--report-channel` as
+comma-separated lists, paired by position). The directory is deliberately **not** the failover
+signal: discovery broadcasts every `discovery.intervalMs` (5 s), so a client following it learns
+later than one that is refused. An explicit "active gateway" entry would still help a client that is
+starting up; that is §8 open issue 6's wire change.
+
+**What a failover cost, measured on one laptop** (Measurements.md F1–F2; three members, 2,000
+orders/s, `aeron.cluster.leader.heartbeat.timeout=2s`, the leader's node stopped mid-run). Two runs,
+one per placement, so these show how a failover behaves, not latency or throughput figures:
+
+| | blind window | orders unanswered | `GATEWAY_UNAVAILABLE` | switches |
+| --- | --- | --- | --- | --- |
+| `independent` | ~3.5 s (the election) | 6,412 | 12 | — |
+| `colocated` | ~5 s (the client's publication timeout) | 9,978 | 19 | 3 on reject, 1 on disconnect |
+
+With Aeron's default 10 s leader heartbeat the election dominates both. In both placements an order
+in flight at the moment of failure is lost with no reply, and nothing exists to ask what became of it
+(§8).
+
 ### Market Data Process
 
 Consumes the book event stream and maintains a **`DepthBook`** per security: price-aggregated
@@ -3070,9 +3154,26 @@ It found three defects that unit tests could not:
     with UDP egress, and not yet multi-node;
   - log replication to followers over UDP, which should meet the same datagram-rate limit unless the
     log channel's MTU is raised (unmeasured);
-  - which egress configuration production should run: IPC egress needs the gateway on the leader's
-    media driver, and on a real NIC the MTU trade differs from loopback's;
+  - ~~which egress configuration production should run~~ **decided 2026-10-03: the operator's
+    choice, by configuration** (§7, "Gateway placement"). `gateway.placement=colocated` runs a gateway
+    per node on IPC and moves clients on a failover; `independent` keeps one tier on UDP. On a real
+    NIC the independent placement's 8 KB datagrams need jumbo frames;
   - the 22–72 ms p99 tails in unsaturated runs.
+* **An order in flight at a failover is lost with no reply, and cannot be asked about.** In both
+  gateway placements (§7, Measurements.md F1–F2), orders sent between the leader's failure and a
+  new leader taking them never see a report: 6,412 and 9,978 of them at 2,000/s on a laptop. The
+  engine has no order-status query, so a client cannot tell an order that never reached the log
+  from one that rests unacknowledged. A participant's only recourse today is a bulk cancel (§4.8)
+  and re-entry. An order-status request, or a per-session "last clOrdId sequenced" on reconnect,
+  would close it, and both are wire changes. **Also unexplained in the same runs:** one order in
+  each placement was answered ~13.6 s after it was sent.
+* **Multi-node is exercised, but only on one machine.** `e2e/run-cluster3.sh` runs three members
+  locally: an election, two failovers, a snapshot taken through consensus and restored on another
+  member, and a rejoining member catching up on the log tail. Its first run found that followers
+  never advanced the book event sequence (§5, "Sequence Numbers"; fixed, `BookEventSequenceTest`).
+  Not yet run: three machines, log replication over a real network, a follower refusing a leader's
+  configuration (§7, "Enforced through the log", unit-tested only), and anything under load beyond
+  `run-failover.sh`'s 2,000/s.
 * **The engine cannot report its own back-pressure.** `backpressureStalls` counts one stall per
   1,000,000 *consecutive* failed `tryClaim`s, and it read 0 through every saturated run in E1–E14, with
   the engine spinning the whole time. A write-only count of every failed claim, egress and book events

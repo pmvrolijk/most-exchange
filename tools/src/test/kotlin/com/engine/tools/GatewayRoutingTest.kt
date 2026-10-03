@@ -70,6 +70,46 @@ class GatewayRoutingTest {
         assertContains(failure.message!!, "--order-entry-stream")
     }
 
+    // ------------------------------------------------- several gateways, for co-located failover
+
+    private fun overrides(vararg argv: String) = GatewayOverride.listFrom(Args(arrayOf(*argv)))
+
+    @Test
+    fun `one gateway, or none named, is a list of one exactly as before`() {
+        assertEquals(listOf(override()), overrides())
+        assertEquals(
+            listOf(override("--order-entry-channel", "aeron:ipc")),
+            overrides("--order-entry-channel", "aeron:ipc"),
+        )
+    }
+
+    @Test
+    fun `a gateway per node, paired with its own report channel by position`() {
+        val routes = overrides(
+            "--order-entry-channel", "aeron:udp?endpoint=node0:20001,aeron:udp?endpoint=node1:20001",
+            "--report-channel", "aeron:udp?control=node0:20002|control-mode=dynamic, aeron:udp?control=node1:20002|control-mode=dynamic",
+            "--order-entry-stream", "20",
+        ).map { it.applyTo(security) }
+
+        assertEquals(2, routes.size)
+        assertEquals("aeron:udp?endpoint=node1:20001", routes[1].orderEntryChannel)
+        assertEquals("aeron:udp?control=node1:20002|control-mode=dynamic", routes[1].executionReportChannel)
+        assertEquals(20, routes[1].orderEntryStreamId)
+    }
+
+    @Test
+    fun `one report channel is shared by every gateway`() {
+        val routes = overrides("--order-entry-channel", "aeron:ipc,aeron:ipc", "--report-channel", "aeron:ipc")
+        assertEquals(listOf("aeron:ipc", "aeron:ipc"), routes.map { it.reportChannel })
+    }
+
+    @Test
+    fun `lists that cannot be paired are refused`() {
+        assertFailsWith<IllegalArgumentException> {
+            overrides("--order-entry-channel", "a,b,c", "--report-channel", "x,y")
+        }
+    }
+
     // --------------------------------------------------------------------------- cluster identity
 
     @Test

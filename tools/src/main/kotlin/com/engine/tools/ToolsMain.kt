@@ -18,7 +18,7 @@ private val USAGE = """
       most purge  [--trading-date YYYYMMDD] [--shard N]
       most image  [--shard N]
       most cancel-all --participant ID [--symbol SYM | --shard N]
-      most cluster [--dir DIR] [--fresh]
+      most cluster [--dir DIR] [--fresh] [--member-id N --members SPEC] [--ipc-ingress]
       most cluster snapshot [--ingress 0=HOST:PORT [--identity ID --secret-file F] | --dir DIR]
       most cluster shutdown [--dir DIR]
       most counters [--match REGEX] [--interval-ms N] [--samples N] [--all]
@@ -37,7 +37,11 @@ private val USAGE = """
       cancel-all  Cancel every resting order of one participant, on one security or on the
                   whole shard. The operator side of revocation: publish the participant's
                   move to cancelOnly first, then send this. --participant is required.
-      cluster     Run a single-node cluster host for local development. It persists the
+      cluster     Run a cluster host: media driver, archive and consensus module. Alone it
+                  is a single-node cluster; for several, pass every node the same --members
+                  (id,ingress,consensus,log,catchup,archive|...) and each its own
+                  --member-id. --ipc-ingress lets a gateway on this node's media driver
+                  reach the leader over IPC (gateway.placement=colocated). It persists the
                   archive and cluster directories unless --fresh is given, because those
                   are the shard's only resumption point.
                   `cluster snapshot` asks for a snapshot -- with --ingress through
@@ -85,6 +89,9 @@ private val USAGE = """
                                A gateway other than the one the directory advertises: the
                                participant's own, or one with operator=true for define,
                                session, purge, image and cancel-all (Design.md §1).
+                               `most load` takes a comma-separated list of each, one per
+                               co-located gateway, and moves to the next on a
+                               GATEWAY_UNAVAILABLE reject (Design.md §7).
       --timeout SECONDS        How long to wait for a directory (default 15)
 """.trimIndent()
 

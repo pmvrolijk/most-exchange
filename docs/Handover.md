@@ -9,8 +9,10 @@ Section numbers are stable and are cited from `CLAUDE.md`, `docs/Design.md` and 
 so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and their headings are kept
 below as pointers.
 
-**The chronology this file records**, most recent first: the session that closed three integrity
-items: configuration enforced through the log, releases that refuse an existing directory, and a
+**The chronology this file records**, most recent first: the session that ran three members for the
+first time, found that followers never numbered book events, and made the gateway's placement a key:
+independent on UDP, or co-located on IPC with clients moving on a failover (§2n). Before that, the
+session that closed three integrity items: configuration enforced through the log, releases that refuse an existing directory, and a
 bulk cancel for revocation. That session also found that stopping the engine alone stops the cluster
 (§2m). Before that, the session that fixed the control plane's
 feed-gap counting, drove ten securities at once for the first time and attributed the result —
@@ -1224,6 +1226,66 @@ client closing, moved to `CLOSED` and terminated the cluster. The restarted engi
 termination". Found by stopping the dev stack's engine to read a shutdown counter. Restarting the
 node's processes together recovered it, with the next order id where it should be. The superseded
 rule is struck through in R§5, not removed. How the original observation arose is not known.
+
+### 2n. Three members, and where the gateway runs
+
+Working tree on `2eb790e`, uncommitted at the end of the session. Status §3 item 3(a), the production
+egress decision, and item 8, a three-node cluster. They were taken together because neither placement
+could be tested without the other.
+
+**The question** (from the user): IPC egress carries ~3x what UDP does on one node, but it needs the
+gateway on the leader's media driver. Run a gateway per node and fail clients over from the
+ex-leader's gateway to the new leader's, or keep gateways independent on large UDP datagrams and take
+the throughput hit? **Answer: both, by configuration.** `gateway.placement=independent|colocated`
+(Design.md §7, "Gateway placement"; R§15). Clients of co-located gateways **reject-and-retry**. The
+user preferred that to an "active gateway" entry in the directory once it was clear that discovery's
+5 s broadcast would make the failover slower. The entry is kept as a startup hint under open issue 6.
+
+**What Aeron 1.53's source settled before any code.** The consensus module subscribes to IPC ingress
+only while leader, and only with `isIpcIngressAllowed`. A cluster client with IPC egress never hears a
+`NewLeaderEvent` from another machine, and closes itself only after `newLeaderTimeoutNs` (~20 s), so
+the gateway watches its node's `Cluster node role` counter instead (`LeaderWatch`). And the engine
+already binds a primary gateway's participants at session open beside a live holder, so the node
+gateways share one identity and the engine needed no change.
+
+**Built.**
+- `most cluster --member-id N` (the archive's control endpoint is now the member's own entry) and
+  `--ipc-ingress`. The engine prints `engine: role X` at start and on each change.
+- `e2e/run-cluster3.sh`: three members on one machine. An election, a snapshot through consensus, two
+  failovers with the book checked by exact fill quantities, and a member rejoining from its snapshot
+  and catching up on the tail. Passed on its first real run, apart from the defect below.
+- The gateway's placement: `GatewayPlacement`, `LeaderWatch`, and a `ClusterLink` that holds a
+  session only while the node leads (async connect, orders held while connecting, refused
+  `GATEWAY_UNAVAILABLE` in standby). Config refuses a co-located gateway with no identity, no
+  `aeronDir`, a UDP cluster channel or member endpoints.
+- `most load` takes `--order-entry-channel`/`--report-channel` lists and moves on a reject or a
+  disconnect, with separate counts for each.
+- `e2e/run-failover.sh PLACEMENT=…`: a maker filled across a failover (`undeliverableReports=0` on
+  the new leader), then load through a second failover. Measurements.md F1–F2.
+
+**Found by running it.**
+- **Followers never advanced the book event sequence** (Design.md §5). `seqNum(nextBookEventSeqNum++)`
+  sat inside the encode lambda, which runs only on a leader with a connected publication. Snapshots
+  differed between nodes, and a new leader would have restarted the feed's sequence. It was invisible
+  on one node, and invisible to the unit harness, which has no book event publication: every unit
+  test ran with the sequence stuck at 1. Found because the rejoined member printed
+  `nextBookEventSeqNum=1` after a session of trading. `BookEventSequenceTest` was written from the
+  clause first and failed 3 of 3. The fix takes the number in `publishBookEvent` before the leader
+  check, and images go through a new `publishOnBookStream`, which consumes none. `run-cluster3.sh` now
+  asserts the restored sequence (5, counted by hand).
+- **Reject-and-retry alone does not cover the case that matters most.** When the leader's *machine*
+  dies, its co-located gateway dies too and sends no reject. `most load` kept publishing into the dead
+  endpoint for Aeron's 5 s publication connection timeout and then aborted on `NOT_CONNECTED`. It now
+  moves on a disconnect too. The blind window stays, and is the measured cost of the placement (F2).
+
+**The checks.** `./gradlew build` with 624 tests, `run-e2e.sh`, `run-restart.sh`, `run-cluster3.sh`
+and `run-failover.sh` in both placements all pass. A mutation of `LeaderWatch`'s slot revalidation
+fails its test. Removing `inline` from `publishOnBookStream` fails compilation, so it is not a silent
+load-bearing keyword.
+
+**Not done.** Three machines; a co-located `run-failover.sh` with Aeron's default 10 s heartbeat;
+throughput multi-node in either placement; `most send` with a gateway list; the 13.6 s late answer
+seen in both F runs.
 
 ## 3. Decisions that are load-bearing
 

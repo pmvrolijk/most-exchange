@@ -44,6 +44,32 @@ data class GatewayOverride(
             reportStreamId = stream(args, "report-stream"),
         )
 
+        /**
+         * One override per gateway, for `most load`'s failover between co-located gateways
+         * (Design.md §7, "Gateway placement"): `--order-entry-channel` and `--report-channel` may
+         * each be a comma-separated list, paired by position, and a single value is shared by every
+         * gateway. An Aeron channel URI separates its parameters with `|`, never a comma.
+         */
+        fun listFrom(args: Args): List<GatewayOverride> {
+            val single = from(args)
+            val orders = split(single.orderEntryChannel)
+            val reports = split(single.reportChannel)
+            val count = maxOf(orders.size, reports.size, 1)
+            require(orders.size <= 1 || reports.size <= 1 || orders.size == reports.size) {
+                "--order-entry-channel names ${orders.size} gateways and --report-channel ${reports.size}; " +
+                    "pair them by position, or give one report channel for all"
+            }
+            return List(count) { i ->
+                single.copy(
+                    orderEntryChannel = orders.getOrNull(i) ?: orders.singleOrNull(),
+                    reportChannel = reports.getOrNull(i) ?: reports.singleOrNull(),
+                )
+            }
+        }
+
+        private fun split(value: String?): List<String> =
+            value?.split(",")?.map { it.trim() }?.filter { it.isNotEmpty() } ?: emptyList()
+
         private fun stream(args: Args, name: String): Int? = args.optional(name)?.let {
             requireNotNull(it.toIntOrNull()) { "--$name must be a stream id, not '$it'" }
         }

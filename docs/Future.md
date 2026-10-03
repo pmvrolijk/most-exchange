@@ -33,6 +33,11 @@
 - [x] Configuration enforced through the log — the leader announces the shard and engine
       fingerprints at each term start and a node that disagrees refuses (docs/Design.md §7
       "Enforced through the log", docs/Handover.md §2m)
-- [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries  
-- [ ] Admin frontend for backend control plane, Vue
-
+- [x] Multi-node and gateway placement — three members elect, fail over and rejoin
+      (`e2e/run-cluster3.sh`); the gateway runs independent on UDP or co-located on IPC per node,
+      by configuration, with clients moving on a failover (docs/Design.md §7 "Gateway placement",
+      docs/Handover.md §2n). Not yet across machines
+- [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries
+- [ ] Persisted full TradeReports; each matched trade needs to be reliably persisted with deal and participant data. Either two sided or central counterparty.
+- [x] Admin frontend for backend control plane, Vue
+- [ ] Install scripts for Node and Kubernetes deploy for control plane components.

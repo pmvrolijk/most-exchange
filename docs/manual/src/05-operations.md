@@ -309,6 +309,28 @@ order arrived — never the live value, which that order's own fills are advanci
 
 There is no automatic recovery and no `VOLATILITY_HALT` phase. Recovery is 6.4.
 
+### After a failover: no order is left unknown
+
+When the leader fails, orders in flight end up in one of two states. Most never reached the log, so
+nothing happened to them. A few were sequenced, but their execution reports were lost while the new
+leader took over. Measured on one machine at 2,000 orders/s, about 65–95 per failover. Those orders
+rest or fill, and the client must be told.
+
+Every execution report carries the participant's **`reportSeq`**: from 1, without gaps, across all of
+that participant's orders and every gateway. A client recovers like this:
+
+1. **On a gap in `reportSeq`, or after switching to another gateway**, send one
+   `ReportResendRequest` per participant, from the first `reportSeq` it has not received.
+2. The engine replays every retained report from there, each with its original `reportSeq`. Count
+   one you already have only once. Then it sends `ReportResendComplete`.
+3. **After the completion, any order you sent before the request that still has no report was never
+   sequenced.** Reject it to your own client, or send it again; either way it executes at most once.
+
+A completion with status `TRUNCATED` means the reports below `oldestRetainedSeq` are no longer
+retained. `engine.reportRetention` was smaller than the failover's traffic, or the shard was
+restarted since. Reconcile that participant with a cancel-all (5.3) and re-entry. `most load`
+implements all of this, and `e2e/run-failover.sh` requires that no order is left unknown.
+
 ## 5.5 Market data operations
 
 Four feeds, on four channels, plus the recovery feed. A subscriber's responsibilities are fixed by

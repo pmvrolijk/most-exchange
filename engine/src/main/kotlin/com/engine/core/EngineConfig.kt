@@ -60,9 +60,18 @@ data class EngineConfig(
      * node idles cannot change what it computes.
      */
     val idleStrategy: IdleStrategySpec = IdleStrategySpec.BUSY_SPIN,
+    /**
+     * How many execution reports every node retains for a `ReportResendRequest` (Design.md §5,
+     * "Report sequence and resend"). ~96 B each. It must cover a failover's worth of reports -- the
+     * window from the leader's failure to the participants' resend requests -- or a resend answers
+     * `TRUNCATED`. In [engineFingerprintValue]: which reports can be sent again is computed from the
+     * log, and every node should give the same answer.
+     */
+    val reportRetention: Int = ReportRing.DEFAULT_CAPACITY,
 ) {
     init {
         require(auctionMaxPasses > 0) { "auctionMaxPasses must be positive" }
+        require(reportRetention > 0) { "$REPORT_RETENTION must be positive" }
         require(backpressureAlertThreshold > 0) { "backpressureAlertThreshold must be positive" }
     }
 
@@ -95,9 +104,9 @@ data class EngineConfig(
      * hash. The leader announces it beside [fingerprint] and a node that disagrees refuses to go on
      * (Design.md §7, "Enforced through the log").
      *
-     * Today that is [auctionMaxPasses] alone: it bounds the SMP fixed point of an uncross, so two
-     * nodes on different values print the same uncross from the same log only until one of them
-     * runs out of passes. A *separate* value rather than folded into [fingerprint], because
+     * Today that is [auctionMaxPasses], which bounds the SMP fixed point of an uncross, so two nodes
+     * on different values print the same uncross from the same log only until one of them runs out
+     * of passes; and [reportRetention], which decides what a resend request can answer. A *separate* value rather than folded into [fingerprint], because
      * `ShardSpec.fingerprint()` is recorded by the control plane and published in every release.
      *
      * A setting added to [EngineConfig] belongs in here unless it is node-local in the sense the
@@ -107,7 +116,7 @@ data class EngineConfig(
      */
     fun engineFingerprintValue(): Long {
         var hash = 1125899906842597L
-        for (c in "auctionMaxPasses=$auctionMaxPasses") hash = hash * 31 + c.code
+        for (c in "auctionMaxPasses=$auctionMaxPasses reportRetention=$reportRetention") hash = hash * 31 + c.code
         return hash
     }
 
@@ -140,6 +149,7 @@ data class EngineConfig(
         const val METRICS_STAGES = "engine.metrics.stages"
         const val METRICS_FILE = "engine.metrics.file"
         const val IDLE_STRATEGY = "engine.idleStrategy"
+        const val REPORT_RETENTION = "engine.reportRetention"
 
         fun from(
             properties: Properties,
@@ -164,6 +174,8 @@ data class EngineConfig(
             metricsStages = properties.getProperty(METRICS_STAGES).toBoolean(),
             metricsFile = properties.getProperty(METRICS_FILE),
             idleStrategy = IdleStrategySpec.parse(properties.getProperty(IDLE_STRATEGY)),
+            reportRetention = properties.getProperty(REPORT_RETENTION)?.trim()?.toInt()
+                ?: ReportRing.DEFAULT_CAPACITY,
         )
 
         /** Loads [path] if given, then lets `engine.*` system properties override individual keys. */

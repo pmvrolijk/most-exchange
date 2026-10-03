@@ -39,6 +39,19 @@ data class Report(
     val rejectReason: Int,
     val origQty: Long,
     val cumQty: Long,
+    /** The participant's report sequence (Design.md §5, "Report sequence and resend"). */
+    val reportSeq: Long = 0L,
+)
+
+/** A `ReportResendComplete`, captured off a fake session's egress. */
+data class ResendCompletion(
+    val participantId: Long,
+    val requestId: Long,
+    val fromSeq: Long,
+    val nextSeq: Long,
+    val oldestRetainedSeq: Long,
+    val replayedCount: Int,
+    val status: com.engine.sbe.ResendStatus,
 )
 
 /**
@@ -74,6 +87,22 @@ class FakeSession(
     private val decoder = ExecutionReportDecoder()
 
     val reports: List<Report> get() = sink
+    val completions = mutableListOf<ResendCompletion>()
+
+    /**
+     * What a real session answers off the leader: Aeron mocks a follower's egress and reports the
+     * offer as taken. A fake that always accepted could not show a report a follower generated but
+     * never sent -- which is exactly the report a resend exists to recover.
+     */
+    var mocked = false
+
+    /** A session whose publication has no subscriber yet: a new leader before its gateway reconnects. */
+    var notConnected = false
+    private val completionDecoder = com.engine.sbe.ReportResendCompleteDecoder()
+    private val scratch = UnsafeBuffer(ByteArray(4096))
+
+    /** Bytes claimed before the last drain, so the returned position keeps rising like a stream's. */
+    private var totalClaimed = 0L
 
     override fun id(): Long = sessionId
     override fun responseStreamId(): Int = 1
@@ -89,17 +118,35 @@ class FakeSession(
      * the service must use is the one it would use in production.
      */
     override fun tryClaim(length: Int, bufferClaim: BufferClaim): Long {
+        // As Aeron does off the leader: the claim wraps a scratch buffer and the offer reports
+        // success, so an encoder that writes before checking the result writes somewhere harmless.
+        if (mocked) {
+            bufferClaim.wrap(scratch, 0, length + AeronCluster.SESSION_HEADER_LENGTH + DataHeaderFlyweight.HEADER_LENGTH)
+            return ClientSession.MOCKED_OFFER
+        }
+        if (notConnected) return io.aeron.Publication.NOT_CONNECTED
         val framed = length + AeronCluster.SESSION_HEADER_LENGTH + DataHeaderFlyweight.HEADER_LENGTH
         bufferClaim.wrap(buffer, position, framed)
         claimed += position + DataHeaderFlyweight.HEADER_LENGTH + AeronCluster.SESSION_HEADER_LENGTH
         position += (framed + 31) and 31.inv()
-        return 1L
+        // The new position, as Aeron returns it -- never 1, which is MOCKED_OFFER. A fake that
+        // answered 1 for a real claim was indistinguishable from a follower's mocked one.
+        return totalClaimed + position
     }
 
     /** Decodes everything claimed since the last drain, in claim order. */
     fun drain() {
         for (offset in claimed) {
             header.wrap(buffer, offset)
+            if (header.templateId() == com.engine.sbe.ReportResendCompleteDecoder.TEMPLATE_ID) {
+                completionDecoder.wrap(buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version())
+                completions += ResendCompletion(
+                    completionDecoder.participantId(), completionDecoder.requestId(), completionDecoder.fromSeq(),
+                    completionDecoder.nextSeq(), completionDecoder.oldestRetainedSeq(),
+                    completionDecoder.replayedCount(), completionDecoder.status(),
+                )
+                continue
+            }
             if (header.templateId() != ExecutionReportDecoder.TEMPLATE_ID) continue
             decoder.wrap(
                 buffer,
@@ -120,9 +167,11 @@ class FakeSession(
                 decoder.rejectReason().value(),
                 decoder.origQty(),
                 decoder.cumQty(),
+                decoder.reportSeq(),
             )
         }
         claimed.clear()
+        totalClaimed += position
         position = 0
     }
 }
@@ -200,6 +249,8 @@ class Harness(
     shardFingerprint: Long = FINGERPRINT,
     /** A stand-in for `EngineConfig.engineFingerprintValue()`, for the same reason. */
     engineFingerprint: Long = ENGINE_FINGERPRINT,
+    /** Reports retained for a resend; small, so a test can overflow it. */
+    reportRetention: Int = 4096,
 ) {
     val session = FakeSession(SESSION_ID, principal = sessionPrincipal)
 
@@ -226,6 +277,7 @@ class Harness(
         auctionMaxPasses = auctionMaxPasses,
         participantRegistry = { this.participantRegistry },
         metrics = metrics,
+        reportRetention = reportRetention,
     )
 
     private val buffer = UnsafeBuffer(ByteArray(4096))
@@ -404,6 +456,15 @@ class Harness(
         securityId: Int = com.engine.reference.OperatorCommands.ALL_SECURITIES,
     ) {
         submit(com.engine.reference.OperatorCommands.encodeCancelParticipantOrders(buffer, participantId, securityId))
+    }
+
+    /** `ReportResendRequest`, as a participant's adapter sends it after a failover or a gap. */
+    fun reportResendRequest(participantId: Long, fromSeq: Long, requestId: Long = 1L) {
+        com.engine.sbe.ReportResendRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(participantId)
+            .requestId(requestId)
+            .fromSeq(fromSeq)
+        submit(MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.ReportResendRequestEncoder.BLOCK_LENGTH)
     }
 
     fun purge(tradingDate: Int) {

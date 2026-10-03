@@ -64,7 +64,9 @@ internal class CountingSession(
         // logic that is itself a source of allocation.
         bufferClaim.wrap(buffer, 0, framed)
         claims++
-        return 1L
+        // A position, as Aeron returns one. Never 1: that is MOCKED_OFFER, and the engine skips the
+        // copy into a mocked claim -- so answering 1 here would leave the leader's copy unmeasured.
+        return CLAIMED_POSITION
     }
 
     private companion object {
@@ -227,6 +229,20 @@ internal class Driver(
         service.onSessionMessage(session, 0L, buffer, 0, newOrderLength, header)
     }
 
+    private val resendBuffer = UnsafeBuffer(ByteArray(64))
+    private val resendEncoder = com.engine.sbe.ReportResendRequestEncoder()
+    private val resendLength =
+        MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.ReportResendRequestEncoder.BLOCK_LENGTH
+
+    /** `ReportResendRequest` (Design.md §5): a participant asking for its reports again. */
+    fun reportResendRequest(participantId: Long, fromSeq: Long) {
+        resendEncoder.wrapAndApplyHeader(resendBuffer, 0, headerEncoder)
+            .participantId(participantId)
+            .requestId(fromSeq)
+            .fromSeq(fromSeq)
+        service.onSessionMessage(session, 0L, resendBuffer, 0, resendLength, header)
+    }
+
     fun sessionTransition(phase: Byte) {
         sessionEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .transitionTime(0L)
@@ -269,6 +285,9 @@ internal class Driver(
 }
 
 // ------------------------------------------------------------ measurement
+
+/** What [CountingSession] reports a claim reached: any position above MOCKED_OFFER's 1. */
+private const val CLAIMED_POSITION = 1L shl 20
 
 internal object Alloc {
     const val SECURITY_ID = 1

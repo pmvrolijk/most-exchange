@@ -646,3 +646,46 @@ operator. One costs throughput, the other costs a gateway switch on every failov
   client following it learns later than one that is refused. An "active gateway" entry would still
   serve a client that is starting up.
 
+---
+
+## 16. Lost execution reports are pulled by the client, not pushed by the engine
+
+A failover loses two kinds of thing (Design.md §5, "Report sequence and resend"; §8). Orders that
+never reached a committed log entry: nothing happened to them. And reports for orders that *were*
+sequenced: a node that is not yet leader has its egress mocked, and a new leader's reports go to
+`NOT_CONNECTED` until its gateway reconnects. The second kind is the dangerous one: an order rests
+or fills and nobody is told. F3–F4 measured ~65–95 such reports per failover at 2,000 orders/s.
+
+**Engine back-pressure was proposed, and cannot work, for three reasons:**
+- **It deadlocks.** The engine learns of a new gateway only from a session-open event in the log,
+  and its one thread is the thing that would be waiting for that gateway.
+- **There is nothing to back-pressure.** The new leader generated the lost reports while it was a
+  follower, with egress mocked. No send failed; none was attempted.
+- **One slow client would stall the shard.** The engine already spins when its egress publication is
+  full. Waiting on a client's stream as well would make matching for every participant wait on the
+  slowest consumer. That is why the outbound leg drops and counts, and retrying even at the gateway
+  cost 10x on the p99.
+
+**Pull:**
+- Every node numbers each participant's reports and retains them in a ring, written whether or not
+  they are delivered, so the node that takes over holds what it could not send.
+- The client asks with a `ReportResendRequest` from its first missing report. It does so on a gap or
+  after switching gateway, as FIX's ResendRequest does, because only the receiver knows what it
+  received.
+- The request is sequenced like an order, so it is a fence. After its completion, an order with no
+  report was never sequenced, and rejecting or resending it is safe.
+- The same mechanism recovers reports dropped under load (open issue 1), since a drop leaves a gap.
+
+**Pushed redelivery** was considered and deferred. Gateways would acknowledge delivered sequences
+through the log, so every node knew what each participant had received, and the leader redelivered
+the rest unprompted. It costs acknowledgement entries on every node and per-participant state in
+the gateway. It cannot replace the client's fence, because the never-sequenced orders are invisible
+to the engine. It is worth revisiting if a participant whose *last* report was dropped needs to learn
+of it before its next report.
+
+**Two fakes hid a real ambiguity.** `MOCKED_OFFER` is `1`, and both engine test sessions returned `1`
+for a successful claim, so "the leader sent it" and "a follower mocked it" were the same number. Once
+the engine checked for the mock first, every unit and allocation test silently stopped exercising the
+leader's copy into the claim. Both fakes now return a position, as Aeron does, and `FakeSession` can
+mock as a follower's session does, wrapping a scratch buffer.
+

@@ -262,7 +262,10 @@ the way ingress can — the poller that drains it is the same thread that keeps 
 a subscriber that falls behind loses execution reports, counted as `droppedToClient`. Retrying the
 outbound offer was measured and made matters worse: the spin burned the poller thread that also
 drives ingress and keepalives, moving the round-trip p99 from 0.3 ms to 4 ms while still dropping.
-The remedy is a larger term buffer or a faster subscriber, not a busier gateway.
+**A dropped report is no longer lost** (§5, "Report sequence and resend"): it leaves a gap in the
+participant's `reportSeq`, the client asks, and the engine replays it from the ring. The shard
+never waits on the slow subscriber. A larger term buffer or a faster subscriber still decides how
+often that happens.
 
 ### Determinism Protocol
 
@@ -485,7 +488,8 @@ nothing here, and are the cheaper next look.
 | Order pool: 10 books × 1M orders × 64 B | 640 MB |
 | `orderIdToIndex` maps: 10 × ~34 MB (`Long2LongHashMap`, 2²¹ slots × 16 B) | 336 MB |
 | Price ladders: 10 books × 2 sides × 65,536 levels × 20 B | 26 MB |
-| **Total** | **~1.0 GB** |
+| Report ring (§5, "Report sequence and resend"): 1,048,576 reports × 96 B, plus per-slot participant, sequence and two links | 124 MB |
+| **Total** | **~1.1 GB** |
 
 Allocated eagerly at startup and never grown. This footprint mandates huge pages (§7).
 
@@ -964,7 +968,9 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `6` | `RequestBookImage` | Inbound | Cluster ingress |
 | `7` | `ConfigurationAnnouncement` | Service message, leader's copy | Cluster log |
 | `8` | `CancelParticipantOrders` | Inbound, operator | Cluster ingress |
+| `9` | `ReportResendRequest` | Inbound, participant | Cluster ingress |
 | `10` | `ExecutionReport` | Outbound, private | Cluster egress |
+| `11` | `ReportResendComplete` | Outbound, private; forwarded to the client unchanged | Cluster egress, then the gateway's client stream |
 | `20` | `OrderAdded` | Outbound, book event | IPC 12 |
 | `21` | `OrderReduced` | Outbound, book event | IPC 12 |
 | `22` | `OrderRemoved` | Outbound, book event | IPC 12 |
@@ -974,6 +980,7 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `26` | `VolatilityHalted` | Outbound, book event | IPC 12 |
 | `27`–`29` | `BookImageBegin` / `BookImageLevel` / `BookImageEnd` | Outbound, book event | IPC 12 |
 | `30`–`33` | `SnapshotEngineState` / `SnapshotBook` / `SnapshotOrder` / `SnapshotEnd` | Snapshot | Cluster snapshot |
+| `34` | `SnapshotReportSeq` | Snapshot, one per participant | Cluster snapshot |
 
 The snapshot messages are cluster-internal and never reach a client. A snapshot walks each book's
 ladders and writes only **occupied** orders, never the whole 1M-slot pool; restoring replays them in
@@ -1079,6 +1086,65 @@ The Market Data Process uses the same shard id to **reject foreign events**: it 
 engine, so an event stamped with another shard means it is pointed at the wrong one. Those are
 counted and dropped rather than aggregated, which turns a misconfiguration that would have silently
 folded another shard's orders into these books into a visible counter.
+
+#### Report sequence and resend
+
+**A participant can always learn the outcome of an order it sent, and of every fill against it,
+including across a failover** (decided 2026-10-03; §8 has the reasoning). Schema version 6.
+
+* **`reportSeq`.** Every `ExecutionReport` carries the participant's report sequence: from 1,
+  gap-free, one counter per participant. It is replicated state, snapshotted, and **consumed on every
+  node whether or not the report is delivered**, because a follower's egress is mocked and a new
+  leader's goes nowhere until its gateway reconnects, and the counter must agree regardless. The
+  gateway copies it onto `ClientExecutionReport`. A report the gateway makes itself (a local reject)
+  carries `0`: it never reached the log and has no place in the sequence. A report from before
+  version 6 decodes as `0` too.
+* **Retention.** Every node keeps the last `engine.reportRetention` reports in a preallocated ring,
+  chained per participant. Every node generates the same reports, so every node holds the same ring,
+  and the new leader after a failover holds the reports that were never delivered. The ring is not
+  snapshotted.
+* **`ReportResendRequest(participantId, requestId, fromSeq)`.** The gateway checks it as it checks a
+  cancel. It refuses with a `ReportResendComplete` of status `UNAUTHORIZED_PARTICIPANT` or
+  `GATEWAY_UNAVAILABLE`, exactly where it would refuse an order. The engine sequences it like an
+  order. It replays that participant's retained reports from `fromSeq`, each with its original
+  `reportSeq`, on the requesting session, then sends **`ReportResendComplete`**: `nextSeq` (everything
+  below it has now been sent), `oldestRetainedSeq`, `replayedCount`, and `COMPLETE`, or `TRUNCATED`
+  when the reports between `fromSeq` and `oldestRetainedSeq` are no longer retained.
+* **The request is a fence.** Everything sequenced before it is reflected in the replay. So after the
+  completion, an unacknowledged order with no report **was never sequenced**: the client rejects it
+  upstream or resends it, and either way it executes at most once. A gap in `reportSeq` is how a maker
+  learns it missed a fill.
+
+**What a client does.** It tracks the `reportSeq` it has received per participant. On a gap, or
+after it switches gateway, it sends one `ReportResendRequest` per participant from its first
+missing report, counts a replayed report it already had once, and after the completions treats
+every still-unanswered order sent before the request as never sequenced. `most load` is the worked
+example (`ReportLedger`). `e2e/run-failover.sh` requires that no order is left unknown in either
+placement.
+
+**Measured** (Measurements.md F3–F4, A11–A12). Through a leader's crash at 2,000 orders/s on one
+machine, a resend recovered **94 (co-located) and 66 (independent) reports for orders that had been
+sequenced and never reported**, the case this exists for. The other 9,674 and 6,463 unanswered
+orders were proven never sequenced, and **none was left unknown**. The ring costs +0.04 µs on a
+whole new order at p50 (0.46 → 0.50 µs) and ~124 MB per node.
+
+**Not engine back-pressure** (decided 2026-10-03, R§16). Three reasons:
+- the engine learns of a new gateway's session only from the log its one thread would be blocked
+  reading;
+- the new leader generated the lost reports as a follower, with egress mocked, so there was no send
+  to back-pressure;
+- waiting on one client's stream would stall matching for every participant.
+
+Pushed redelivery, with gateways acknowledging delivery through the log, was considered and
+deferred: the client fence is needed for the never-sequenced orders either way.
+
+**Implementation.**
+- `MatchingEngineService.sendExecutionReport` numbers and retains first, then routes.
+- `ReportRing` is the ring.
+- The leader copies the retained report into its `tryClaim`: one 96 B copy, never an `offer`.
+- `SnapshotReportSeq` (id 34) carries each participant's last sequence, counted by
+  `participantSeqCount` on `SnapshotEngineState`. The ring is not snapshotted.
+- `engine.reportRetention` is in the engine fingerprint.
 
 #### Feed Transport
 
@@ -1196,7 +1262,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="5"
+                   package="com.engine.sbe" id="1" version="6"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1280,6 +1346,16 @@ answers, and a consumer must not render the first when it means the second.
            never emits it, since a message it never saw cannot be rejected by it. -->
       <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
     </enum>
+    <!-- How a ReportResendRequest ended. COMPLETE: every report from fromSeq up to nextSeq has been
+         sent again. TRUNCATED: the reports from fromSeq up to oldestRetainedSeq were no longer
+         retained and cannot be sent again; the rest were. The two refusals are the gateway's, for the
+         same reasons it refuses an order, and mean nothing was replayed. -->
+    <enum name="ResendStatus" encodingType="int8">
+      <validValue name="COMPLETE">0</validValue>
+      <validValue name="TRUNCATED">1</validValue>
+      <validValue name="UNAUTHORIZED_PARTICIPANT">2</validValue>
+      <validValue name="GATEWAY_UNAVAILABLE">3</validValue>
+    </enum>
   </types>
 
   <!-- ============================ Inbound ============================ -->
@@ -1347,6 +1423,18 @@ answers, and a consumer must not render the first when it means the second.
     <field name="securityId"    id="2" type="SecurityId"/>
   </sbe:message>
 
+  <!-- A participant asking for its execution reports again, from fromSeq on (Design.md §5,
+       "Report sequence and resend"). Sent after a failover, or on any gap in reportSeq. The gateway
+       checks it as it checks a cancel. The engine sequences it like any order, so it is a fence:
+       every report generated before it is replayed, ReportResendComplete follows, and an order of
+       this participant's that still has no report after that was never sequenced. requestId is the
+       client's own, echoed on the completion. Added in version 6. -->
+  <sbe:message name="ReportResendRequest" id="9" blockLength="24" sinceVersion="6">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="fromSeq"       id="3" type="SeqNum"/>
+  </sbe:message>
+
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
     <field name="referencePrice"    id="1" type="Price"/>
     <field name="priceFloor"        id="2" type="Price"/>
@@ -1365,8 +1453,12 @@ answers, and a consumer must not render the first when it means the second.
        explicitly and not left as origQty - leavesQty: a terminal report carries leavesQty = 0
        whether the order filled or was cancelled, which is exactly the defect that subtraction
        produced when the gateway did it. origQty = 0 means unknown: an order restored from a
-       version 2 snapshot, which predates the field. -->
-  <sbe:message name="ExecutionReport" id="10" blockLength="80">
+       version 2 snapshot, which predates the field.
+       reportSeq is this participant's report sequence, from 1, gap-free, and consumed on every node
+       whether or not the report reaches anyone (Design.md §5, "Report sequence and resend"). A
+       replayed report carries its original reportSeq. Absent before version 6, read as 0: not
+       sequenced. -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="88">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="clOrdId"         id="2" type="ClOrdId"/>
     <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
@@ -1379,6 +1471,23 @@ answers, and a consumer must not render the first when it means the second.
     <field name="side"            id="10" type="Side"/>
     <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
     <field name="cumQty"          id="12" type="Quantity" offset="72" sinceVersion="3"/>
+    <field name="reportSeq"       id="13" type="SeqNum"   offset="80" sinceVersion="6"/>
+  </sbe:message>
+
+  <!-- The end of a resend: everything this participant was reported before nextSeq has now been
+       sent, including the replay. The engine emits it on the requesting session after the replayed
+       reports, and the gateway forwards it to the client unchanged; the gateway also emits one itself,
+       with nothing replayed, when it refuses the request. oldestRetainedSeq is the lowest reportSeq the
+       engine could still send for this participant; above fromSeq, status is TRUNCATED and the reports
+       in between are gone. Added in version 6. -->
+  <sbe:message name="ReportResendComplete" id="11" blockLength="48" sinceVersion="6">
+    <field name="participantId"     id="1" type="ParticipantId"/>
+    <field name="requestId"         id="2" type="ClOrdId"/>
+    <field name="fromSeq"           id="3" type="SeqNum"/>
+    <field name="nextSeq"           id="4" type="SeqNum"/>
+    <field name="oldestRetainedSeq" id="5" type="SeqNum"/>
+    <field name="replayedCount"     id="6" type="OrderCount"/>
+    <field name="status"            id="7" type="ResendStatus"/>
   </sbe:message>
 
   <!-- =================== Outbound: book events ======================= -->
@@ -1577,7 +1686,7 @@ answers, and a consumer must not render the first when it means the second.
   <!-- Both quantities come from the engine, which holds origQty in the cold word beside the
        order's cache line (Design.md §3.1). The gateway copies them across rather than deriving
        anything, which is why it needs no per-order state of its own. -->
-  <sbe:message name="ClientExecutionReport" id="50" blockLength="80">
+  <sbe:message name="ClientExecutionReport" id="50" blockLength="88">
     <field name="participantId"   id="1"  type="ParticipantId"/>
     <field name="clOrdId"         id="2"  type="ClOrdId"/>
     <field name="exchangeOrderId" id="3"  type="ExchangeOrderId"/>
@@ -1595,6 +1704,10 @@ answers, and a consumer must not render the first when it means the second.
          an order restored from a version 2 snapshot, so the two quantities above are not to be
          believed. -->
     <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
+    <!-- Copied from the engine's report. 0 on a report the gateway made itself (a local reject),
+         which never reached the log and so has no place in the sequence; a client tracks gaps over
+         the reports carrying one. Added in version 6. -->
+    <field name="reportSeq"       id="14" type="SeqNum" offset="80" sinceVersion="6"/>
   </sbe:message>
 
 
@@ -1650,6 +1763,20 @@ answers, and a consumer must not render the first when it means the second.
          second implementation of the hash. -->
     <field name="shardFingerprint"    id="3" type="SeqNum"  offset="16" sinceVersion="2"/>
     <field name="shardId"             id="4" type="ShardId" offset="24" sinceVersion="2"/>
+    <!-- How many SnapshotReportSeq records follow, so the restore can count them as it counts
+         orders: Image.poll swallows a throw, and a record lost on the way in would restart a
+         participant's report sequence quietly. In the block's existing padding. Absent before
+         version 6, when there were no records. -->
+    <field name="participantSeqCount" id="5" type="OrderCount" offset="28" sinceVersion="6"/>
+  </sbe:message>
+
+  <!-- One participant's report sequence (Design.md §5, "Report sequence and resend"): the last
+       reportSeq the engine assigned it. Replicated state, so a restored node continues every
+       participant's sequence where the snapshot left it. Written after SnapshotEngineState and
+       before the books. The retained reports themselves are not snapshotted. Added in version 6. -->
+  <sbe:message name="SnapshotReportSeq" id="34" blockLength="16" sinceVersion="6">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="lastReportSeq" id="2" type="SeqNum"/>
   </sbe:message>
 
   <!-- restingOrderCount is what makes the restore single-pass: the book header is written before
@@ -2413,7 +2540,9 @@ visible and most expensive.
 Epsilon-built binary against a real media driver, a real Raft cluster and a real archive, twice, at
 two different order counts, and takes the **slope**: startup is identical in both runs and cancels,
 which matters because the order pool and id map are ~95MB before a single order arrives and would
-otherwise swamp any per-order figure. Result: **0 bytes per order across 1.9M orders**, and the
+otherwise swamp any per-order figure. Result: **0 bytes per order across 1.9M orders** (repeated
+2026-10-03 with the report ring, which writes every report on every node: still 0.0000, the
+intercept up from ~98 MB to 223 MB by the ring's 124 MB), and the
 resolution of SubstrateVM's summary bounds the true figure below 0.006 bytes/order.
 
 All of it was validated by mutation rather than trusted. Three `inline` keywords were removed in
@@ -3161,12 +3290,45 @@ It found three defects that unit tests could not:
   - the 22–72 ms p99 tails in unsaturated runs.
 * **An order in flight at a failover is lost with no reply, and cannot be asked about.** In both
   gateway placements (§7, Measurements.md F1–F2), orders sent between the leader's failure and a
-  new leader taking them never see a report: 6,412 and 9,978 of them at 2,000/s on a laptop. The
-  engine has no order-status query, so a client cannot tell an order that never reached the log
-  from one that rests unacknowledged. A participant's only recourse today is a bulk cancel (§4.8)
-  and re-entry. An order-status request, or a per-session "last clOrdId sequenced" on reconnect,
-  would close it, and both are wire changes. **Also unexplained in the same runs:** one order in
-  each placement was answered ~13.6 s after it was sent.
+  new leader taking them never see a report: 6,412 and 9,978 of them at 2,000/s on a laptop. Such an
+  order is in one of two states, and today a client cannot tell which:
+  - **never sequenced**: lost before a committed log entry. Nothing happened to it; rejecting or
+    resending it is safe *if the client knows*;
+  - **sequenced, reports dropped**: it rests or has filled, and nobody was told. A node that does not
+    yet lead has its egress mocked (`MOCKED_OFFER`), and a new leader's reports go to `NOT_CONNECTED`
+    until its gateway reconnects; the engine counts them as undeliverable and drops them. This
+    reaches **makers** too: a resting order filled during the transition reports to no one.
+
+  ~~**Decided 2026-10-03 (user): a per-participant report sequence with retained reports and a resend
+  request.**~~ **Built** (§5, "Report sequence and resend"; Measurements.md F3–F4). After a failover
+  every order is answered or proven never sequenced, and nothing a node sequenced goes unreported.
+  What remains open is listed after the design below. The design, as decided:
+  - every `ExecutionReport` carries the participant's `reportSeq`, a counter that is replicated state,
+    snapshotted, and **consumed on every node whether or not the report is delivered** (the lesson of
+    §5's book event sequence);
+  - every node keeps the last `engine.reportRetention` reports in a preallocated ring. Every node
+    generates the same reports, so every node holds the same ring. It is not snapshotted;
+  - `ReportResendRequest(participantId, fromSeq)` travels like a cancel, checked by the gateway
+    against the registry, and is sequenced like any order, so it is a **fence**. The engine replays
+    that participant's reports from `fromSeq` and ends with `ReportResendComplete(nextSeq,
+    oldestRetainedSeq)`;
+  - after the marker, an unacknowledged order with no report **was never sequenced**. The client
+    rejects it upstream or resends it, and either way it executes at most once. A gap in `reportSeq`
+    is how a maker learns it missed a fill.
+
+  Still open:
+  - a request older than the ring (after a full-cluster restart, or a ring sized below the failover
+    window). It is answered `TRUNCATED` with `oldestRetainedSeq`, and the client reconciles by bulk
+    cancel (§4.8);
+  - a client that has lost its own record of what it sent;
+  - a participant whose *last* report was dropped learns of it only at its next report or its next
+    request;
+  - resending never-sequenced orders, which is the client's choice and which `most load` does not do;
+  - order-status queries generally.
+
+  The ~13.6 s late answers of F1–F2 are most likely the same class F3–F4 recovered, sequenced orders
+  whose reports were dropped, reaching the client by a route not established. With the resend, all
+  of them arrive at the fence.
 * **Multi-node is exercised, but only on one machine.** `e2e/run-cluster3.sh` runs three members
   locally: an election, two failovers, a snapshot taken through consensus and restored on another
   member, and a rejoining member catching up on the log tail. Its first run found that followers

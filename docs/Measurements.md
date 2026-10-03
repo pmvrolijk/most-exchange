@@ -908,6 +908,8 @@ the wire. These three runs answer the question runs R2–R4 opened — the ceili
 | A8 | 2026-09-29 | `cf6e302`+ | 10 | 200k/s | 20k/s | 54.6 µs | 0.2 µs | 1.4 µs | 0.3 µs | 1.9 µs (**3.5%**) | 52.7 µs (96.5%) |
 | A9 | 2026-09-29 | `cf6e302`+ | 10 | 250k/s | 25k/s | 90.9 µs | 0.2 µs | 1.2 µs | 0.3 µs | 1.7 µs (**1.9%**) | 89.2 µs (98.1%) |
 | A10 | 2026-09-29 | `cf6e302`+ | 10 | 300k/s | 30k/s | 503 ms ✗ | 0.2 µs | 1.4 µs | 0.2 µs | 1.8 µs | a draining queue |
+| A11 | 2026-10-03 | `2eb790e`+v6 wire | 10 | 250k/s | 25k/s | 78.1 µs | 0.1 µs | 0.5 µs | 0.1 µs | 0.7 µs (**0.9%**) | 77.4 µs (99.1%) |
+| A12 | 2026-10-03 | `258c1dd`+ring | 10 | 250k/s | 25k/s | 58.7 µs | 0.1 µs | 0.5 µs | 0.1 µs | 0.7 µs (**1.2%**) | 58.0 µs (98.8%) |
 
 Engine stage split, same runs (`newOrder` p50, and its three stages):
 
@@ -919,9 +921,25 @@ Engine stage split, same runs (`newOrder` p50, and its three stages):
 | A8 | 1.40 µs | 0.56 µs | 0.11 µs | 0.42 µs | 146 ms | 163 ms | 166 ms |
 | A9 | 1.23 µs | 0.54 µs | 0.09 µs | 0.34 µs | 189 ms | 223 ms | 227 ms |
 | A10 | 1.35 µs | 0.60 µs | 0.09 µs | 0.35 µs | 546 ms ✗ | 555 ms | 558 ms |
+| A11 | 0.46 µs | 0.13 µs | 0.04 µs | 0.17 µs | 553 µs | 140 ms | 192 ms |
+| A12 | 0.50 µs | 0.17 µs | 0.04 µs | 0.17 µs | 146 µs | 1.49 ms | 17.2 ms |
 
 A6–A10 are on the cloud host of L0–L4 and are comparable only with each other: a 2.0 GHz Zen 3 core
 costs ~3x an M4 Pro P-core per order, so their engine columns cannot be set against A1–A5's.
+
+**A11–A12 conditions: the cost of the report ring** (Design.md §5, "Report sequence and resend").
+A same-hour pair on the M4 Pro, either side of the engine numbering and retaining every report and
+the leader copying the retained report into its claim. A11 is the v6 wire with the engine still
+encoding straight into the claim; A12 adds the counter, the ring (`engine.reportRetention` 1,048,576)
+and the copy. Single node, ten securities, 2,500,000 orders at 250k/s aggregate,
+`--driver-threading DEDICATED`, **egress `aeron:ipc`** so egress back-pressure does not inflate the
+stages, metrics and stages on. **Not idle**: load average 6.5–7.8 throughout, a desktop and an IDE
+open. That is what the client columns show (A11's p99 of 140 ms against A12's 1.5 ms is the machine,
+not the change, whose direction would be the other way). Read the engine columns only.
+**What they say:** a whole new order costs **+0.04 µs at p50** (0.46 → 0.50 µs), all of it in `admit`
+(0.13 → 0.17 µs), which writes the `NEW` report. `match`'s p90 rises 0.54 → 0.71 µs, the fill reports.
+A new order still costs half Design.md §2's 1 µs budget. One pair, so +0.04 µs is a single reading,
+not a distribution.
 
 **A1–A3 conditions.** Single node, Aeron IPC, JVM start scripts, `engine.metrics=true`,
 `engine.metrics.stages=true`, `gateway.metrics=true`. 2,000,000 orders per run, 1,000 warmup, band
@@ -986,6 +1004,24 @@ lengthen every window below. Client publication connection timeout at Aeron's de
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | F1 | 2026-10-03 | independent | UDP, 1,408 B | ~3.5 s (5.0 → ~8.5 s) | 40,000 | 6,412 | 12 | — | 0 |
 | F2 | 2026-10-03 | colocated | IPC | ~5 s (5.0 → ~10.0 s) | 40,000 | 9,978 | 19 | 3 on reject, 1 on disconnect | 0 |
+
+F3–F4 repeat F1–F2 the same evening with the report sequence and resend in place (Design.md §5,
+"Report sequence and resend"): `most load` fences on a gateway switch, on a `reportSeq` gap and at the
+end of the run, and classifies every unanswered order. Same conditions as F1–F2 (2,000/s, 2 s heartbeat,
+not idle, load average ~6.5–7).
+
+| run | date | placement | sent | unanswered | recovered by resend | proven never sequenced | **unknown** | fences | worst answer |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| F3 | 2026-10-03 | colocated | 40,000 | 9,674 | 94 reports | 9,674 | **0** | 4 (1 gap seen) | 4.87 s |
+| F4 | 2026-10-03 | independent | 40,000 | 6,463 | 66 reports | 6,463 | **0** | 2 (4 gaps seen) | 3.27 s |
+
+**What F3–F4 say.** The case the resend exists for is real: ~65–95 reports per failover belonged to
+orders a node had sequenced and never reported. Without the resend those orders rested or filled
+with no one told. With it, every order the load sent ends answered or proven never sequenced. The
+worst answer is now the time to the fence, about the failover's own length: it is the recovered
+orders, answered late rather than never. A first independent run fenced only at the end of the load,
+and its recovered answers came up to 20 s late. Fencing on a gap brought that to the failover's
+length, which is the rule Design.md §5 gives a client.
 
 ### What F1–F2 say
 

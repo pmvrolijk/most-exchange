@@ -9,8 +9,9 @@ Section numbers are stable and are cited from `CLAUDE.md`, `docs/Design.md` and 
 so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and their headings are kept
 below as pointers.
 
-**The chronology this file records**, most recent first: the session that ran three members for the
-first time, found that followers never numbered book events, and made the gateway's placement a key:
+**The chronology this file records**, most recent first: the session that made every order end with
+an outcome across a failover: report sequence, retention ring and a client resend fence (§2o).
+Before that, the session that ran three members for the first time, found that followers never numbered book events, and made the gateway's placement a key:
 independent on UDP, or co-located on IPC with clients moving on a failover (§2n). Before that, the
 session that closed three integrity items: configuration enforced through the log, releases that refuse an existing directory, and a
 bulk cancel for revocation. That session also found that stopping the engine alone stops the cluster
@@ -1286,6 +1287,71 @@ load-bearing keyword.
 **Not done.** Three machines; a co-located `run-failover.sh` with Aeron's default 10 s heartbeat;
 throughput multi-node in either placement; `most send` with a gateway list; the 13.6 s late answer
 seen in both F runs.
+
+### 2o. No order left unknown across a failover
+
+Commits after `258c1dd`, uncommitted at the end of the session. Status open issue 3a, and open
+issue 1 with it.
+
+**The problem.** F1–F2 lost thousands of orders without a reply at each failover, and a client could
+not tell which had been sequenced. Some had: a node that is not yet leader mocks egress, and a new
+leader's reports go to `NOT_CONNECTED` until its gateway reconnects, so an order could rest or fill
+with nobody told. A maker could too.
+
+**Decided, twice** (`decision-fork`, Design.md §8, R§16).
+- **The design: a per-participant report sequence, a retained ring and a client resend.** An
+  idempotent clOrdId resend was rejected because it cannot recover a maker's fill. Gateway-side
+  sequencing was rejected because the gateway dies with its node when co-located.
+- **Then the user asked whether engine back-pressure to the new gateway would serve better.** It
+  cannot, for three reasons:
+  - the engine learns of the gateway only through the log its one thread would be blocked on;
+  - the lost reports were mocked on a follower, so there was never a send;
+  - it would stall the shard on its slowest client.
+- **Pull was kept.** Pushed redelivery, with acknowledgements through the log, is deferred.
+
+**Built.**
+- **Wire (schema v6):** `reportSeq` on both reports (blockLength 88), `ReportResendRequest` (9),
+  `ReportResendComplete` (11) with `COMPLETE`, `TRUNCATED` and the two gateway refusals, and
+  `SnapshotReportSeq` (34) with a count on `SnapshotEngineState`.
+- **Gateway:** copies `reportSeq`, checks a request like a cancel, answers every request it does not
+  forward, and passes the completion through.
+- **Engine:**
+  - `sendExecutionReport` numbers and writes into `ReportRing` before it routes;
+  - the leader copies the retained report into its claim;
+  - a replay walks the participant's chain;
+  - `engine.reportRetention` (1,048,576) is in the engine fingerprint, so an upgrade replaying an
+    old tail needs `most cluster shutdown` first.
+- **`most load`:** a `ReportLedger` per participant; a fence on a switch, on a gap and at the end;
+  and every unanswered order classified as recovered, never sequenced or unknown.
+- **`run-failover.sh`** requires 0 unknown. **`run-restart.sh`** requires the sequences restored and
+  continued.
+
+**Found on the way.**
+- **Two test fakes returned `1` for a successful claim, and `1` is `MOCKED_OFFER`.** Once the engine
+  checked for the mock first, every unit and allocation test silently stopped covering the leader's
+  copy. Both fakes now return a position, and `FakeSession` mocks as Aeron does, wrapping a scratch
+  buffer.
+- **The ~13.6 s late answers of F1–F2 were the case this fixes.** F3–F4 recovered such orders at the
+  fence.
+- **A harness that fenced only at the end** answered recovered orders up to 20 s late. Fencing on a
+  gap, as §5 tells a client to, brought that to the failover's own length.
+- **On macOS `grep -c` prints nothing for the native binary**; `strings | grep -c` gives the 3.
+
+**The checks.**
+- `./gradlew build`: 653 tests.
+- `ReportSequenceTest` (10 cases, written from §5) and
+  `GatewayResendTest` (9).
+- Snapshot round trip, v5 and miscount cases.
+- `AllocationTest` with a replay case; `AeronAllocationTest` caught a capturing lambda on the
+  snapshot walk by mutation.
+- `run-e2e.sh`, `run-restart.sh`, `run-cluster3.sh`, and `run-failover.sh` in both placements.
+- Epsilon soak: 0.0000 bytes per order.
+- Attribution A11–A12: +0.04 µs a new order.
+
+**Not done.**
+- A drop of a participant's last report is still found only at its next report.
+- Resending never-sequenced orders, in `most load` or anywhere.
+- Multi-machine.
 
 ## 3. Decisions that are load-bearing
 

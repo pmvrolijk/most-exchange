@@ -333,5 +333,15 @@ echo "  member $SECOND's engine: undeliverableReports=${UNDELIVERABLE:-?}"
 pass "every report the first new leader generated was delivered, the maker's fill among them"
 
 grep -qE "unanswered" "$RUN/load.out" || fail "the load printed no summary"
+
+# Design.md §5, "Report sequence and resend": after the fence, every order the load sent is either
+# answered or proven never sequenced. None may be left unknown, and a complete resend may leave
+# nothing missing -- an order resting or filled without the client hearing is the one outcome
+# this exists to rule out.
+grep -q "STILL MISSING" "$RUN/load.out" && fail "a complete resend left reports missing"
+UNKNOWN=$(grep -oE "unknown +[0-9,]+" "$RUN/load.out" | grep -oE "[0-9,]+" | tr -d , || true)
+[ "${UNKNOWN:-0}" = 0 ] || fail "$UNKNOWN orders were left with no outcome after the failover"
+grep -q "recovery " "$RUN/load.out" || fail "no resend fence was sent across the failover"
+pass "every order the load sent was answered, or proven never sequenced by a resend fence"
 echo
-echo "PASS ($PLACEMENT): two failovers, routes followed the active gateway, and the load's cost is above"
+echo "PASS ($PLACEMENT): two failovers, routes followed the active gateway, and no order was left unknown"

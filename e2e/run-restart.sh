@@ -343,6 +343,10 @@ sleep 2
 wait_for "$LOGS/engine-same.log" "restored 3 resting orders" 30 "the restore report" \
   || fail "the book was not restored from a snapshot"
 grep -o "matching-engine: restored .*" "$LOGS/engine-same.log"
+# Participants 7, 8 and 9 had reports before the snapshot; their report sequences (Design.md §5)
+# are replicated state and must come back with the book, or the next report would restart at 1.
+grep -qE "reportSequences=[1-9]" "$LOGS/engine-same.log" \
+  || fail "the snapshot carried no participant report sequences"
 pass "three resting orders restored from the snapshot, with both sequences carried"
 
 # Market data derives its books entirely from the book event stream, and a restore publishes no
@@ -368,6 +372,13 @@ $MOST send --symbol AAPL --side buy --price 101.00 --qty 6 --clordid 2001 --part
 cat "$RUN/cross.out"
 grep -q "TRADE" "$RUN/cross.out" || fail "the crossing order did not trade against a restored order"
 grep -q "cum 6" "$RUN/cross.out" || fail "the restored order did not carry its true leavesQty"
+# Participant 9's crossing buy before the snapshot left it some reports; its first report after
+# the restore must continue from the last of them, not start again at 1.
+LAST_BEFORE=$(grep -oE "seq [0-9]+" "$RUN/buy2.out" | tail -1 | cut -d' ' -f2)
+FIRST_AFTER=$(grep -oE "seq [0-9]+" "$RUN/cross.out" | head -1 | cut -d' ' -f2)
+[ -n "$LAST_BEFORE" ] && [ "$FIRST_AFTER" = "$((LAST_BEFORE + 1))" ] \
+  || fail "participant 9's report sequence did not continue: ${LAST_BEFORE:-?} then ${FIRST_AFTER:-?}"
+pass "participant 9's reports continued at seq $FIRST_AFTER after seq $LAST_BEFORE"
 pass "a restored, partially filled order matched for exactly its remaining 6"
 
 echo

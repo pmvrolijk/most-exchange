@@ -9,6 +9,10 @@ import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleDecoder
 import com.engine.sbe.OrderCancelRequestDecoder
 import com.engine.sbe.RejectReason
+import com.engine.sbe.ReportResendCompleteDecoder
+import com.engine.sbe.ReportResendCompleteEncoder
+import com.engine.sbe.ReportResendRequestDecoder
+import com.engine.sbe.ResendStatus
 import com.engine.sbe.Side
 import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
@@ -86,6 +90,8 @@ class GatewayService(
     private val cancel = OrderCancelRequestDecoder()
     private val execReport = ExecutionReportDecoder()
     private val clientReport = ClientExecutionReportEncoder()
+    private val resendRequest = ReportResendRequestDecoder()
+    private val resendComplete = ReportResendCompleteEncoder()
     private val outbound: MutableDirectBuffer = UnsafeBuffer(ByteArray(512))
 
     var rejectedLocally = 0L
@@ -146,6 +152,11 @@ class GatewayService(
             OrderCancelRequestDecoder.TEMPLATE_ID -> {
                 cancel.wrap(buffer, body, blockLength, version)
                 onCancel(buffer, offset, length)
+            }
+
+            ReportResendRequestDecoder.TEMPLATE_ID -> {
+                resendRequest.wrap(buffer, body, blockLength, version)
+                onResendRequest(buffer, offset, length)
             }
 
             // Session transitions, purges, security definitions and image requests are operator
@@ -253,6 +264,50 @@ class GatewayService(
     }
 
     /**
+     * A participant asking for its reports again (Design.md §5, "Report sequence and resend").
+     * Checked as a cancel is: a cancel-only participant still has fills to learn about. Refused with
+     * a [ResendStatus] where an order would be refused with a [RejectReason], so the client always
+     * gets an answer and never waits on a request that went nowhere.
+     */
+    private fun onResendRequest(
+        buffer: DirectBuffer,
+        offset: Int,
+        length: Int,
+    ): ClientMessageAction {
+        val participantId = resendRequest.participantId()
+        if (!access.mayCancel(participantId)) {
+            unauthorizedRejects++
+            refuseResend(ResendStatus.UNAUTHORIZED_PARTICIPANT)
+            return ClientMessageAction.CONSUME
+        }
+        return when (sink.toCluster(buffer, offset, length)) {
+            ClusterOffer.SENT -> ClientMessageAction.CONSUME
+            ClusterOffer.RETRY -> ClientMessageAction.RETRY
+            ClusterOffer.FAILED -> {
+                unreachableRejects++
+                refuseResend(ResendStatus.GATEWAY_UNAVAILABLE)
+                ClientMessageAction.CONSUME
+            }
+        }
+    }
+
+    /** The completion for a request that never reached the engine: nothing replayed, nothing known. */
+    private fun refuseResend(status: ResendStatus) {
+        resendComplete.wrapAndApplyHeader(outbound, 0, headerEncoder)
+            .participantId(resendRequest.participantId())
+            .requestId(resendRequest.requestId())
+            .fromSeq(resendRequest.fromSeq())
+            .nextSeq(0L)
+            .oldestRetainedSeq(0L)
+            .replayedCount(0)
+            .status(status)
+        sink.toClient(
+            outbound, 0,
+            MessageHeaderEncoder.ENCODED_LENGTH + ReportResendCompleteEncoder.BLOCK_LENGTH,
+        )
+    }
+
+    /**
      * Only what the gateway can decide alone. Collars, phase and capacity depend on book state
      * the gateway does not have, and stay in the engine; duplicating them here would mean two
      * places to get them wrong.
@@ -266,10 +321,18 @@ class GatewayService(
 
     // ------------------------------------------------------------ outbound
 
-    /** Cluster to client: restore `origQty` and `cumQty`, then forward. */
+    /**
+     * Cluster to client. An execution report is translated into the client's shape; the end of a
+     * resend is the same message on both legs and goes across unchanged. Anything else from the
+     * cluster is not for a client.
+     */
     fun onExecutionReport(buffer: DirectBuffer, offset: Int, length: Int) {
         if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
         header.wrap(buffer, offset)
+        if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID) {
+            sink.toClient(buffer, offset, length)
+            return
+        }
         if (header.templateId() != ExecutionReportDecoder.TEMPLATE_ID) return
         // Started after the template check, so a foreign fragment is not counted as a report the
         // gateway handled quickly.
@@ -305,6 +368,9 @@ class GatewayService(
             rejectReason = execReport.rejectReason(),
             enrichment = if (known || execType == ExecType.REJECTED) Enrichment.KNOWN
             else Enrichment.UNKNOWN,
+            // Copied, never assigned here: the sequence is the engine's, per participant. A report
+            // from an engine older than version 6 has none, and 0 says so.
+            reportSeq = execReport.reportSeq().let { if (it == REPORT_SEQ_ABSENT) 0L else it },
         )
 
         metrics?.outbound?.record(metrics.nanoTime() - started)
@@ -331,6 +397,11 @@ class GatewayService(
          * explicitly.
          */
         enrichment: Enrichment = Enrichment.KNOWN,
+        /**
+         * The engine's per-participant report sequence. Defaults to 0 for the same reason: a report
+         * the gateway makes itself never reached the log and has no place in that sequence.
+         */
+        reportSeq: Long = 0L,
     ) {
         clientReport.wrapAndApplyHeader(outbound, 0, headerEncoder)
             .participantId(participantId)
@@ -346,6 +417,7 @@ class GatewayService(
             .execType(execType)
             .side(side)
             .enrichment(enrichment)
+            .reportSeq(reportSeq)
         sink.toClient(
             outbound, 0,
             MessageHeaderEncoder.ENCODED_LENGTH + ClientExecutionReportEncoder.BLOCK_LENGTH,
@@ -360,5 +432,8 @@ class GatewayService(
     private companion object {
         /** What an `origQty` decodes to on a report from an engine older than schema version 3. */
         val ORIG_QTY_ABSENT: Long = ExecutionReportDecoder.origQtyNullValue()
+
+        /** What a `reportSeq` decodes to on a report from an engine older than schema version 6. */
+        val REPORT_SEQ_ABSENT: Long = ExecutionReportDecoder.reportSeqNullValue()
     }
 }

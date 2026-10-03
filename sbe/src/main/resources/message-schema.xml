@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="5"
+                   package="com.engine.sbe" id="1" version="6"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -84,6 +84,16 @@
            never emits it, since a message it never saw cannot be rejected by it. -->
       <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
     </enum>
+    <!-- How a ReportResendRequest ended. COMPLETE: every report from fromSeq up to nextSeq has been
+         sent again. TRUNCATED: the reports from fromSeq up to oldestRetainedSeq were no longer
+         retained and cannot be sent again; the rest were. The two refusals are the gateway's, for the
+         same reasons it refuses an order, and mean nothing was replayed. -->
+    <enum name="ResendStatus" encodingType="int8">
+      <validValue name="COMPLETE">0</validValue>
+      <validValue name="TRUNCATED">1</validValue>
+      <validValue name="UNAUTHORIZED_PARTICIPANT">2</validValue>
+      <validValue name="GATEWAY_UNAVAILABLE">3</validValue>
+    </enum>
   </types>
 
   <!-- ============================ Inbound ============================ -->
@@ -151,6 +161,18 @@
     <field name="securityId"    id="2" type="SecurityId"/>
   </sbe:message>
 
+  <!-- A participant asking for its execution reports again, from fromSeq on (Design.md §5,
+       "Report sequence and resend"). Sent after a failover, or on any gap in reportSeq. The gateway
+       checks it as it checks a cancel. The engine sequences it like any order, so it is a fence:
+       every report generated before it is replayed, ReportResendComplete follows, and an order of
+       this participant's that still has no report after that was never sequenced. requestId is the
+       client's own, echoed on the completion. Added in version 6. -->
+  <sbe:message name="ReportResendRequest" id="9" blockLength="24" sinceVersion="6">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="fromSeq"       id="3" type="SeqNum"/>
+  </sbe:message>
+
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
     <field name="referencePrice"    id="1" type="Price"/>
     <field name="priceFloor"        id="2" type="Price"/>
@@ -169,8 +191,12 @@
        explicitly and not left as origQty - leavesQty: a terminal report carries leavesQty = 0
        whether the order filled or was cancelled, which is exactly the defect that subtraction
        produced when the gateway did it. origQty = 0 means unknown: an order restored from a
-       version 2 snapshot, which predates the field. -->
-  <sbe:message name="ExecutionReport" id="10" blockLength="80">
+       version 2 snapshot, which predates the field.
+       reportSeq is this participant's report sequence, from 1, gap-free, and consumed on every node
+       whether or not the report reaches anyone (Design.md §5, "Report sequence and resend"). A
+       replayed report carries its original reportSeq. Absent before version 6, read as 0: not
+       sequenced. -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="88">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="clOrdId"         id="2" type="ClOrdId"/>
     <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
@@ -183,6 +209,23 @@
     <field name="side"            id="10" type="Side"/>
     <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
     <field name="cumQty"          id="12" type="Quantity" offset="72" sinceVersion="3"/>
+    <field name="reportSeq"       id="13" type="SeqNum"   offset="80" sinceVersion="6"/>
+  </sbe:message>
+
+  <!-- The end of a resend: everything this participant was reported before nextSeq has now been
+       sent, including the replay. The engine emits it on the requesting session after the replayed
+       reports, and the gateway forwards it to the client unchanged; the gateway also emits one itself,
+       with nothing replayed, when it refuses the request. oldestRetainedSeq is the lowest reportSeq the
+       engine could still send for this participant; above fromSeq, status is TRUNCATED and the reports
+       in between are gone. Added in version 6. -->
+  <sbe:message name="ReportResendComplete" id="11" blockLength="48" sinceVersion="6">
+    <field name="participantId"     id="1" type="ParticipantId"/>
+    <field name="requestId"         id="2" type="ClOrdId"/>
+    <field name="fromSeq"           id="3" type="SeqNum"/>
+    <field name="nextSeq"           id="4" type="SeqNum"/>
+    <field name="oldestRetainedSeq" id="5" type="SeqNum"/>
+    <field name="replayedCount"     id="6" type="OrderCount"/>
+    <field name="status"            id="7" type="ResendStatus"/>
   </sbe:message>
 
   <!-- =================== Outbound: book events ======================= -->
@@ -381,7 +424,7 @@
   <!-- Both quantities come from the engine, which holds origQty in the cold word beside the
        order's cache line (Design.md §3.1). The gateway copies them across rather than deriving
        anything, which is why it needs no per-order state of its own. -->
-  <sbe:message name="ClientExecutionReport" id="50" blockLength="80">
+  <sbe:message name="ClientExecutionReport" id="50" blockLength="88">
     <field name="participantId"   id="1"  type="ParticipantId"/>
     <field name="clOrdId"         id="2"  type="ClOrdId"/>
     <field name="exchangeOrderId" id="3"  type="ExchangeOrderId"/>
@@ -399,6 +442,10 @@
          an order restored from a version 2 snapshot, so the two quantities above are not to be
          believed. -->
     <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
+    <!-- Copied from the engine's report. 0 on a report the gateway made itself (a local reject),
+         which never reached the log and so has no place in the sequence; a client tracks gaps over
+         the reports carrying one. Added in version 6. -->
+    <field name="reportSeq"       id="14" type="SeqNum" offset="80" sinceVersion="6"/>
   </sbe:message>
 
 
@@ -454,6 +501,20 @@
          second implementation of the hash. -->
     <field name="shardFingerprint"    id="3" type="SeqNum"  offset="16" sinceVersion="2"/>
     <field name="shardId"             id="4" type="ShardId" offset="24" sinceVersion="2"/>
+    <!-- How many SnapshotReportSeq records follow, so the restore can count them as it counts
+         orders: Image.poll swallows a throw, and a record lost on the way in would restart a
+         participant's report sequence quietly. In the block's existing padding. Absent before
+         version 6, when there were no records. -->
+    <field name="participantSeqCount" id="5" type="OrderCount" offset="28" sinceVersion="6"/>
+  </sbe:message>
+
+  <!-- One participant's report sequence (Design.md §5, "Report sequence and resend"): the last
+       reportSeq the engine assigned it. Replicated state, so a restored node continues every
+       participant's sequence where the snapshot left it. Written after SnapshotEngineState and
+       before the books. The retained reports themselves are not snapshotted. Added in version 6. -->
+  <sbe:message name="SnapshotReportSeq" id="34" blockLength="16" sinceVersion="6">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="lastReportSeq" id="2" type="SeqNum"/>
   </sbe:message>
 
   <!-- restingOrderCount is what makes the restore single-pass: the book header is written before

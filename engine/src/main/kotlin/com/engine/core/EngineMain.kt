@@ -69,6 +69,7 @@ fun main(args: Array<String>) {
         backpressureAlertThreshold = config.backpressureAlertThreshold,
         participantRegistry = { registrySource?.registry() },
         metrics = metrics,
+        reportRetention = config.reportRetention,
     )
 
     // Every node must boot with identical configuration or the books diverge on the first order.
@@ -76,7 +77,7 @@ fun main(args: Array<String>) {
     // itself, against the leader's announcement in the log (Design.md §7).
     println(
         "matching-engine: shard=${config.shard.shardId} fingerprint=${config.fingerprint()} " +
-            "engineFingerprint=${config.engineFingerprint()} " +
+            "engineFingerprint=${config.engineFingerprint()} reportRetention=${config.reportRetention} " +
             "securities=${config.shard.securities.map { it.symbol }} " +
             "serviceId=${config.serviceId} clusterDir=${config.clusterDir} " +
             "participantRegistry=${config.registryFingerprint()}" +
@@ -181,6 +182,7 @@ fun main(args: Array<String>) {
                     "rejectedDefinitions=${service.rejectedDefinitions} " +
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
                     "bulkCancelledOrders=${service.bulkCancelledOrders} " +
+                    "resendRequests=${service.resendRequests} replayedReports=${service.replayedReports} " +
                     "rejectedBulkCancels=${service.rejectedBulkCancels} " +
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +

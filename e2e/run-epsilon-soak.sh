@@ -27,7 +27,8 @@
 #   ORDERS       orders in the measured run    (default 2,000,000)
 #   BASE_ORDERS  orders in the baseline run    (default 100,000)
 #   DELAY_US     microseconds between sends    (default 10 => 100k/s)
-#   HEAP         engine max heap               (default 256m)
+#   HEAP         engine max heap               (default 384m; startup takes ~223MB since the
+#                report ring, Design.md §5, so 256m left too little for a long soak to grow into)
 #   MAX_ORDERS   book capacity per security    (default 1,000,000)
 #   TOLERANCE    bytes/order the run may not exceed (default 1)
 set -uo pipefail
@@ -39,7 +40,7 @@ ORDERS="${ORDERS:-2000000}"
 BASE_ORDERS="${BASE_ORDERS:-100000}"
 DELAY_US="${DELAY_US:-10}"
 TOLERANCE="${TOLERANCE:-1}"
-HEAP="${HEAP:-256m}"
+HEAP="${HEAP:-384m}"
 MAX_ORDERS="${MAX_ORDERS:-1000000}"
 
 MOST="${MOST:-$ROOT/tools/build/install/most/bin/most}"

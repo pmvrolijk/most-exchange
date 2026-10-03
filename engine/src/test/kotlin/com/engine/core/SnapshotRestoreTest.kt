@@ -5,6 +5,7 @@ import com.engine.sbe.Phase as SbePhase
 import com.engine.sbe.SnapshotBookEncoder
 import com.engine.sbe.SnapshotEndEncoder
 import com.engine.sbe.SnapshotEngineStateEncoder
+import com.engine.sbe.SnapshotReportSeqEncoder
 import com.engine.sbe.SnapshotOrderEncoder
 import io.aeron.Aeron
 import io.aeron.ExclusivePublication
@@ -325,6 +326,62 @@ class SnapshotRestoreTest {
             assertFailsWith<ConfigurationMismatch> { source.service.onTakeSnapshot(pub) }
             assertEquals(0L, pub.position(), "nothing was written to the snapshot")
         }
+    }
+
+    // ------------------------------------------- report sequences (Design.md §5, schema v6)
+
+    @Test
+    fun `every participant's report sequence survives a snapshot and continues where it stopped`() {
+        val source = openHarness(arrayOf(serviceBook(securityId = 1)))
+        // One NEW per resting order: participant 7 at 3, participant 9 at 2.
+        repeat(3) { source.newOrder(7L, 100L + it, 1, Side.BUY, price = 90L - it, qty = 1) }
+        repeat(2) { source.newOrder(9L, 200L + it, 1, Side.SELL, price = 110L + it, qty = 1) }
+        val target = Harness(arrayOf(serviceBook(securityId = 1)))
+
+        roundTrip(source, target)
+
+        assertEquals(3L, target.service.lastReportSeq(7L))
+        assertEquals(2L, target.service.lastReportSeq(9L))
+        target.newOrder(7L, 300L, 1, Side.BUY, price = 80L, qty = 1)
+        assertEquals(4L, target.reports.last().reportSeq, "the restored node continues the sequence")
+    }
+
+    @Test
+    fun `a version 5 snapshot restores every report sequence at zero`() {
+        val target = Harness(arrayOf(serviceBook(securityId = 1)))
+        val image = publish { pub ->
+            val buffer = UnsafeBuffer(ByteArray(256))
+            val header = MessageHeaderEncoder()
+            SnapshotEngineStateEncoder().wrapAndApplyHeader(buffer, 0, header)
+                .nextExchangeOrderId(1L).nextBookEventSeqNum(1L).shardFingerprint(FINGERPRINT).shardId(1)
+            // Same block, older header: participantSeqCount reads as absent.
+            header.wrap(buffer, 0).version(5)
+            offer(pub, buffer, MessageHeaderEncoder.ENCODED_LENGTH + SnapshotEngineStateEncoder.BLOCK_LENGTH)
+            end(pub, 0L)
+        }
+
+        target.restore(image)
+
+        assertEquals(0L, target.service.lastReportSeq(7L))
+    }
+
+    @Test
+    fun `a snapshot claiming more report sequences than it carries refuses to restore`() {
+        val target = Harness(arrayOf(serviceBook(securityId = 1)))
+        val image = publish { pub ->
+            val buffer = UnsafeBuffer(ByteArray(256))
+            SnapshotEngineStateEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
+                .nextExchangeOrderId(1L).nextBookEventSeqNum(1L).shardFingerprint(FINGERPRINT).shardId(1)
+                .participantSeqCount(2)
+            offer(pub, buffer, MessageHeaderEncoder.ENCODED_LENGTH + SnapshotEngineStateEncoder.BLOCK_LENGTH)
+            SnapshotReportSeqEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
+                .participantId(7L).lastReportSeq(12L)
+            offer(pub, buffer, MessageHeaderEncoder.ENCODED_LENGTH + SnapshotReportSeqEncoder.BLOCK_LENGTH)
+            end(pub, 0L)
+        }
+        val failure = assertFailsWith<SnapshotRestoreFailed> { target.restore(image) }
+
+        assertContains(failure.message!!, "claims 2 participant report sequences but carries 1")
     }
 
     // ------------------------------------------------------------------ support

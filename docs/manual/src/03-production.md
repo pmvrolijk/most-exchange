@@ -85,7 +85,7 @@ tier is the interim answer; naming them individually is a wire change.
 | | Recommendation | Why |
 | --- | --- | --- |
 | CPU | 16+ physical cores, x86-64-v3 or better, **one socket** | ~12 threads need cores; one socket avoids NUMA on the hot path |
-| RAM | 64 GB minimum | ~0.9 GB per shard of pools, plus Aeron log buffers, plus page cache for the archive |
+| RAM | 64 GB minimum | ~1.1 GB per shard of pools and the report ring, plus Aeron log buffers, plus page cache for the archive |
 | Storage | NVMe SSD dedicated to the archive | The archive writes every replicated message and is the single largest contributor to round-trip latency |
 | Network | Dual 10 GbE, one dedicated to the trading VLAN | Multicast market data and consensus must not share a link with management traffic |
 

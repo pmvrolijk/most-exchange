@@ -9,6 +9,8 @@ import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleEncoder
 import com.engine.sbe.OrderCancelRequestEncoder
 import com.engine.sbe.RejectReason
+import com.engine.sbe.ReportResendCompleteDecoder
+import com.engine.sbe.ResendStatus
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import org.agrona.DirectBuffer
@@ -28,17 +30,32 @@ data class ClientReport(
     val origQty: Long,
     val rejectReason: Int,
     val enrichment: Enrichment,
+    /** The engine's per-participant sequence, or 0 for a report the gateway made itself. */
+    val reportSeq: Long = 0L,
+)
+
+/** A ReportResendComplete as the client received it. */
+data class ResendCompletion(
+    val participantId: Long,
+    val requestId: Long,
+    val fromSeq: Long,
+    val nextSeq: Long,
+    val oldestRetainedSeq: Long,
+    val replayedCount: Int,
+    val status: ResendStatus,
 )
 
 class RecordingSink : GatewaySink {
     val toCluster = mutableListOf<Int>()
     val toClient = mutableListOf<ClientReport>()
+    val resends = mutableListOf<ResendCompletion>()
 
     /** What the next offer to the cluster should pretend to be. */
     var clusterOffer = ClusterOffer.SENT
 
     private val header = MessageHeaderDecoder()
     private val decoder = ClientExecutionReportDecoder()
+    private val completion = ReportResendCompleteDecoder()
 
     override fun toCluster(buffer: DirectBuffer, offset: Int, length: Int): ClusterOffer {
         if (clusterOffer == ClusterOffer.SENT) toCluster += length
@@ -47,6 +64,15 @@ class RecordingSink : GatewaySink {
 
     override fun toClient(buffer: DirectBuffer, offset: Int, length: Int) {
         header.wrap(buffer, offset)
+        if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID) {
+            completion.wrap(buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version())
+            resends += ResendCompletion(
+                completion.participantId(), completion.requestId(), completion.fromSeq(),
+                completion.nextSeq(), completion.oldestRetainedSeq(), completion.replayedCount(),
+                completion.status(),
+            )
+            return
+        }
         decoder.wrap(
             buffer,
             offset + MessageHeaderDecoder.ENCODED_LENGTH,
@@ -57,7 +83,7 @@ class RecordingSink : GatewaySink {
             decoder.participantId(), decoder.clOrdId(), decoder.exchangeOrderId(),
             decoder.execType().name, decoder.lastQty(), decoder.leavesQty(),
             decoder.cumQty(), decoder.origQty(), decoder.rejectReason().value(),
-            decoder.enrichment(),
+            decoder.enrichment(), decoder.reportSeq(),
         )
     }
 }

@@ -160,6 +160,31 @@ class AllocationTest {
         assertEquals(0, driver.book.restingOrderCount(), "the bulk cancel must clear every order")
     }
 
+    /**
+     * Design.md §5, "Report sequence and resend": a replay walks the ring's per-participant chain and
+     * copies each retained report into a claim, then encodes the completion. It runs at a failover,
+     * for every participant at once, so it must cost what the reports cost and nothing more.
+     */
+    @Test
+    fun `a report resend allocates nothing`() {
+        val driver = Driver()
+        var clOrdId = 0L
+        // Participant 1's first report, outside the measured window: the maps grow on a first sight.
+        driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - 1, 1L)
+        driver.cancelParticipantOrders(1L)
+        var lastSeq = driver.service.lastReportSeq(1L)
+
+        assertNoSteadyStateAllocation("a report resend", opsPerRound = 12, rounds = 5_000) {
+            // Ten NEWs, a replay of exactly those ten and its completion, then the book cleared.
+            repeat(10) { driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - 1, 1L) }
+            driver.reportResendRequest(1L, fromSeq = lastSeq + 1)
+            driver.cancelParticipantOrders(1L)
+            lastSeq += 20 // ten NEWs and ten CANCELEDs
+        }
+        assertEquals(lastSeq, driver.service.lastReportSeq(1L), "sanity: every round numbered 20 reports")
+        assertTrue(driver.service.replayedReports >= 10L * 5_000, "the replay must actually have run")
+    }
+
     @Test
     fun `the expiry purge allocates nothing`() {
         val driver = Driver()

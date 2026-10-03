@@ -156,8 +156,11 @@ fun formatReport(decoder: ClientExecutionReportDecoder, symbol: String): String 
         "REJECTED" -> "reason $reject"
         else -> "leaves ${decoder.leavesQty()} cum $cum of $orig"
     }
+    // The participant's report sequence (Design.md §5), when the engine stamped one; a report the
+    // gateway made itself has none.
+    val seq = if (decoder.reportSeq() > 0L) "  seq ${decoder.reportSeq()}" else ""
     return "  $execType  $symbol  orderId=${decoder.exchangeOrderId()} " +
-        "clOrdId=${decoder.clOrdId()}  $detail"
+        "clOrdId=${decoder.clOrdId()}  $detail$seq"
 }
 
 private fun sendAndFollow(

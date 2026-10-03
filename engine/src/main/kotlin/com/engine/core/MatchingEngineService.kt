@@ -18,6 +18,9 @@ import com.engine.sbe.OrderReducedEncoder
 import com.engine.sbe.OrderRemovedEncoder
 import com.engine.sbe.PurgeExpiredOrdersDecoder
 import com.engine.sbe.RemoveReason
+import com.engine.sbe.ReportResendCompleteEncoder
+import com.engine.sbe.ReportResendRequestDecoder
+import com.engine.sbe.ResendStatus
 import com.engine.sbe.RequestBookImageDecoder
 import com.engine.sbe.SecurityDefinitionDecoder
 import com.engine.sbe.SessionChangedEncoder
@@ -30,6 +33,8 @@ import com.engine.sbe.SnapshotEngineStateDecoder
 import com.engine.sbe.SnapshotEngineStateEncoder
 import com.engine.sbe.SnapshotOrderDecoder
 import com.engine.sbe.SnapshotOrderEncoder
+import com.engine.sbe.SnapshotReportSeqDecoder
+import com.engine.sbe.SnapshotReportSeqEncoder
 import com.engine.sbe.TradeExecutedEncoder
 import com.engine.sbe.VolatilityHaltedEncoder
 import com.engine.reference.OperatorCommands
@@ -116,6 +121,12 @@ class MatchingEngineService(
      * production posture; see [EngineMetrics] for why an engine may read a clock at all.
      */
     private val metrics: EngineMetrics? = null,
+    /**
+     * How many execution reports every node retains for a resend (Design.md §5, "Report sequence
+     * and resend"); `engine.reportRetention`, in the engine fingerprint. Small here, for tests;
+     * a node is built with [ReportRing.DEFAULT_CAPACITY] unless configured.
+     */
+    reportRetention: Int = 4096,
 ) : ClusteredService {
 
     /**
@@ -161,6 +172,16 @@ class MatchingEngineService(
     private val participantToSession = Long2LongHashMap(NULL_SESSION)
 
     /**
+     * Each participant's last `reportSeq` (Design.md §5, "Report sequence and resend"). Replicated
+     * state, snapshotted: consumed on every node for every report, delivered or not, so a new
+     * leader continues each participant's sequence exactly. 0 is "none yet".
+     */
+    private val lastReportSeq = Long2LongHashMap(1024, 0.65f, 0L)
+
+    /** Every report this node generated, recently; the same on every node. Not snapshotted. */
+    private val reportRing = ReportRing(reportRetention)
+
+    /**
      * A book image is owed to the book event stream. Set by a snapshot restore and by
      * `RequestBookImage`; cleared once one has been written. Node-local by design, so it is not
      * snapshotted and cannot make one node's state differ from another's.
@@ -194,6 +215,8 @@ class MatchingEngineService(
     private val bookImageEndEncoder = BookImageEndEncoder()
     private val requestBookImageDecoder = RequestBookImageDecoder()
     private val cancelParticipantDecoder = CancelParticipantOrdersDecoder()
+    private val resendRequestDecoder = ReportResendRequestDecoder()
+    private val resendCompleteEncoder = ReportResendCompleteEncoder()
     private val announcementEncoder = ConfigurationAnnouncementEncoder()
     private val announcementDecoder = ConfigurationAnnouncementDecoder()
 
@@ -201,6 +224,7 @@ class MatchingEngineService(
     private val snapshotBookEncoder = SnapshotBookEncoder()
     private val snapshotOrderEncoder = SnapshotOrderEncoder()
     private val snapshotEndEncoder = SnapshotEndEncoder()
+    private val snapshotReportSeqEncoder = SnapshotReportSeqEncoder()
 
     /**
      * Set once this node has read a `ConfigurationAnnouncement` it disagrees with. From then on it
@@ -238,6 +262,15 @@ class MatchingEngineService(
     /** `CancelParticipantOrders` naming a security this shard does not host; nothing was cancelled. */
     var rejectedBulkCancels = 0L
         private set
+
+    /** `ReportResendRequest`s answered, and the reports they sent again. */
+    var resendRequests = 0L
+        private set
+    var replayedReports = 0L
+        private set
+
+    /** [participantId]'s last report sequence, 0 before its first report. */
+    fun lastReportSeq(participantId: Long): Long = lastReportSeq.get(participantId)
 
     /**
      * Participants bound to a session at session open from an authenticated gateway principal, as
@@ -573,6 +606,11 @@ class MatchingEngineService(
             CancelParticipantOrdersDecoder.TEMPLATE_ID -> {
                 cancelParticipantDecoder.wrap(buffer, body, blockLength, version)
                 onCancelParticipantOrders()
+            }
+
+            ReportResendRequestDecoder.TEMPLATE_ID -> {
+                resendRequestDecoder.wrap(buffer, body, blockLength, version)
+                onReportResendRequest(session)
             }
 
             RequestBookImageDecoder.TEMPLATE_ID -> {
@@ -1048,6 +1086,23 @@ class MatchingEngineService(
                 .nextBookEventSeqNum(nextBookEventSeqNum)
                 .shardFingerprint(shardFingerprint)
                 .shardId(shardId)
+                .participantSeqCount(lastReportSeq.size)
+        }
+        // The map's own cached iterator, unboxed: a capturing lambda here would allocate inside
+        // onTakeSnapshot, which AeronAllocationTest measures.
+        val sequences = lastReportSeq.entries.iterator()
+        while (sequences.hasNext()) {
+            sequences.next()
+            val participantId = sequences.longKey
+            val lastSeq = sequences.longValue
+            offerToSnapshot(
+                snapshotPublication,
+                MessageHeaderEncoder.ENCODED_LENGTH + SnapshotReportSeqEncoder.BLOCK_LENGTH,
+            ) { buffer, offset ->
+                snapshotReportSeqEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
+                    .participantId(participantId)
+                    .lastReportSeq(lastSeq)
+            }
         }
 
         var total = 0L
@@ -1134,7 +1189,11 @@ class MatchingEngineService(
         val orderDecoder = SnapshotOrderDecoder()
         val stateDecoder = SnapshotEngineStateDecoder()
         val endDecoder = SnapshotEndDecoder()
+        val reportSeqDecoder = SnapshotReportSeqDecoder()
         val report = SnapshotRestoreReport(shardId)
+        // Claimed by the state message from version 6 on; before that there are no records to count.
+        var claimedSequences = 0
+        var restoredSequences = 0
 
         // Null until the state message says otherwise. A version 1 snapshot carries no fingerprint
         // and no geometry, so it can only be reconciled on security ids -- which is weaker, and
@@ -1175,6 +1234,9 @@ class MatchingEngineService(
                         stateDecoder.wrap(buffer, body, blockLength, version)
                         nextExchangeOrderId = stateDecoder.nextExchangeOrderId()
                         nextBookEventSeqNum = stateDecoder.nextBookEventSeqNum()
+                        val sequences = stateDecoder.participantSeqCount()
+                        claimedSequences =
+                            if (sequences == SnapshotEngineStateDecoder.participantSeqCountNullValue()) 0 else sequences
 
                         val snapshotShard = stateDecoder.shardId()
                         val snapshotFingerprint = stateDecoder.shardFingerprint()
@@ -1316,8 +1378,22 @@ class MatchingEngineService(
                         totalRestored++
                     }
 
+                    SnapshotReportSeqDecoder.TEMPLATE_ID -> {
+                        reportSeqDecoder.wrap(buffer, body, blockLength, version)
+                        lastReportSeq.put(reportSeqDecoder.participantId(), reportSeqDecoder.lastReportSeq())
+                        restoredSequences++
+                    }
+
                     SnapshotEndDecoder.TEMPLATE_ID -> {
                         closeCurrentBook()
+                        // Counted for the reason orders are: Image.poll swallows a throw, and a
+                        // sequence lost here would restart a participant's numbering quietly.
+                        if (restoredSequences != claimedSequences) {
+                            report.fatal(
+                                "the snapshot claims $claimedSequences participant report sequences " +
+                                    "but carries $restoredSequences"
+                            )
+                        }
                         endDecoder.wrap(buffer, body, blockLength, version)
                         val claimed = endDecoder.restingOrderCount()
                         if (!report.hasFatal && claimed != totalRestored) {
@@ -1366,7 +1442,7 @@ class MatchingEngineService(
         println(
             "matching-engine: restored $totalRestored resting orders across ${books.size} books " +
                 "from a snapshot, nextExchangeOrderId=$nextExchangeOrderId " +
-                "nextBookEventSeqNum=$nextBookEventSeqNum"
+                "nextBookEventSeqNum=$nextBookEventSeqNum reportSequences=$restoredSequences"
         )
     }
 
@@ -1438,47 +1514,126 @@ class MatchingEngineService(
         origQty: Long,
         cumQty: Long,
     ) {
+        // Numbered and retained first, on every node, whatever happens to the report next: a
+        // follower's egress is mocked and a new leader's goes nowhere until its gateway reconnects,
+        // and the report must still be there, under the same number, when the participant asks.
+        val reportSeq = lastReportSeq.get(participantId) + 1
+        lastReportSeq.put(participantId, reportSeq)
+        val slot = reportRing.append(participantId, reportSeq)
+        execReportEncoder.wrapAndApplyHeader(reportRing.buffer, reportRing.offset(slot), headerEncoder)
+            .participantId(participantId)
+            .clOrdId(clOrdId)
+            .exchangeOrderId(exchangeOrderId)
+            .price(price)
+            .lastQty(lastQty)
+            .leavesQty(leavesQty)
+            .securityId(securityId)
+            .rejectReason(SbeRejectReason.get(rejectReason))
+            .execType(execType)
+            .side(SbeSide.get(side))
+            // Stated, not left to the gateway to subtract: a terminal report carries
+            // leavesQty = 0 whether the order filled or was cancelled, so
+            // origQty - leavesQty is wrong on exactly the reports that matter.
+            .origQty(origQty)
+            .cumQty(cumQty)
+            .reportSeq(reportSeq)
+
         val sessionId = participantToSession.get(participantId)
         val session = if (sessionId == NULL_SESSION) null else cluster.getClientSession(sessionId)
         if (session == null) {
             undeliverableReports++
             return
         }
+        if (!deliverRetained(session, slot)) undeliverableReports++
+    }
 
-        val length = MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH
+    /**
+     * Sends the report held in [slot] to [session]: a claim on the session's publication and one
+     * copy of the encoded report into it. Still `tryClaim`, never an `offer` of a scratch buffer --
+     * the ring is the report's home, written on every node, and the leader's claim is where a copy
+     * of it goes (CLAUDE.md, "Zero-copy publishing"). False when the session cannot take it.
+     */
+    private fun deliverRetained(session: ClientSession, slot: Int): Boolean {
+        var attempts = 0
+        while (true) {
+            val result = session.tryClaim(ReportRing.REPORT_LENGTH, claim)
+            // First: MOCKED_OFFER is 1, so it would pass `> 0`. Aeron wraps a mocked claim around a
+            // scratch buffer, so copying into it would be harmless -- and a wasted copy on every
+            // report a follower generates.
+            if (result == ClientSession.MOCKED_OFFER) return true
+            if (result > 0) {
+                // Aeron reserves the cluster session header in front of the payload; writing at
+                // claim.offset() would overwrite it and the egress adapter would reject the
+                // message for carrying the wrong schema.
+                claim.buffer().putBytes(
+                    claim.offset() + AeronCluster.SESSION_HEADER_LENGTH,
+                    reportRing.buffer, reportRing.offset(slot), ReportRing.REPORT_LENGTH,
+                )
+                claim.commit()
+                return true
+            }
+            if (result == Publication.CLOSED || result == Publication.NOT_CONNECTED ||
+                result == Publication.MAX_POSITION_EXCEEDED
+            ) {
+                return false
+            }
+            if (++attempts >= backpressureAlertThreshold) {
+                backpressureStalls++
+                attempts = 0
+            }
+        }
+    }
+
+    /**
+     * A participant asking for its reports again from `fromSeq` (Design.md §5, "Report sequence and
+     * resend"). Sequenced like an order, so it is a fence: every report generated before it is in
+     * the ring or reported as gone. Replies on the session that asked, and moves the participant's
+     * route there, since this is traffic.
+     */
+    private fun onReportResendRequest(session: ClientSession) {
+        val participantId = resendRequestDecoder.participantId()
+        val fromSeq = maxOf(resendRequestDecoder.fromSeq(), 1L)
+        countIfUndeclared(session, participantId)
+        participantToSession.put(participantId, session.id())
+        resendRequests++
+
+        val lastSeq = lastReportSeq.get(participantId)
+        val oldest = reportRing.oldestRetainedSeq(participantId, lastSeq)
+        var replayed = 0
+        if (fromSeq <= lastSeq) {
+            var slot = reportRing.slotOf(participantId, maxOf(fromSeq, oldest), lastSeq)
+            while (true) {
+                // A session that cannot take the replay cannot take the answer either; stop.
+                if (!deliverRetained(session, slot)) return
+                replayed++
+                if (reportRing.seqAt(slot) >= lastSeq) break
+                slot = reportRing.nextOf(slot)
+            }
+        }
+        replayedReports += replayed
+
+        val length = MessageHeaderEncoder.ENCODED_LENGTH + ReportResendCompleteEncoder.BLOCK_LENGTH
         var attempts = 0
         while (true) {
             val result = session.tryClaim(length, claim)
-            if (result > 0 || result == ClientSession.MOCKED_OFFER) {
-                if (result > 0) {
-                    // Aeron reserves the cluster session header in front of the payload; writing
-                    // at claim.offset() would overwrite it and the egress adapter would reject
-                    // the message for carrying the wrong schema.
-                    val payloadOffset = claim.offset() + AeronCluster.SESSION_HEADER_LENGTH
-                    execReportEncoder.wrapAndApplyHeader(claim.buffer(), payloadOffset, headerEncoder)
-                        .participantId(participantId)
-                        .clOrdId(clOrdId)
-                        .exchangeOrderId(exchangeOrderId)
-                        .price(price)
-                        .lastQty(lastQty)
-                        .leavesQty(leavesQty)
-                        .securityId(securityId)
-                        .rejectReason(SbeRejectReason.get(rejectReason))
-                        .execType(execType)
-                        .side(SbeSide.get(side))
-                        // Stated, not left to the gateway to subtract: a terminal report carries
-                        // leavesQty = 0 whether the order filled or was cancelled, so
-                        // origQty - leavesQty is wrong on exactly the reports that matter.
-                        .origQty(origQty)
-                        .cumQty(cumQty)
-                    claim.commit()
-                }
+            if (result == ClientSession.MOCKED_OFFER) return
+            if (result > 0) {
+                resendCompleteEncoder.wrapAndApplyHeader(
+                    claim.buffer(), claim.offset() + AeronCluster.SESSION_HEADER_LENGTH, headerEncoder,
+                )
+                    .participantId(participantId)
+                    .requestId(resendRequestDecoder.requestId())
+                    .fromSeq(resendRequestDecoder.fromSeq())
+                    .nextSeq(lastSeq + 1)
+                    .oldestRetainedSeq(oldest)
+                    .replayedCount(replayed)
+                    .status(if (fromSeq < oldest && fromSeq <= lastSeq) ResendStatus.TRUNCATED else ResendStatus.COMPLETE)
+                claim.commit()
                 return
             }
             if (result == Publication.CLOSED || result == Publication.NOT_CONNECTED ||
                 result == Publication.MAX_POSITION_EXCEEDED
             ) {
-                undeliverableReports++
                 return
             }
             if (++attempts >= backpressureAlertThreshold) {

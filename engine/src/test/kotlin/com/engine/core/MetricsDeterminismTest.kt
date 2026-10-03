@@ -136,6 +136,15 @@ class MetricsDeterminismTest {
             instrumented.service.nextBookEventSeqNum,
             "instrumentation changed the book event sequence",
         )
+        // Every participant the sequence above drives, by its own report sequence (Design.md §5).
+        for (participant in 1L..8L) {
+            assertEquals(
+                plain.service.lastReportSeq(participant),
+                instrumented.service.lastReportSeq(participant),
+                "instrumentation changed participant $participant's report sequence",
+            )
+        }
+        assertTrue(plain.service.lastReportSeq(4L) > 0L, "sanity: the run numbered reports")
 
         // And the run has to have been worth comparing.
         assertTrue(plain.reports.size > 5, "sanity: the sequence produced reports to compare")

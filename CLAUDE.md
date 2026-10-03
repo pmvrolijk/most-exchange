@@ -15,7 +15,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 same commit when the design changes.
 
 Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`,
-`control` — all implemented, 624 tests passing. See `docs/Status.md` §1 for what is real.
+`control` — all implemented, 633 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -64,7 +64,9 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
    `Array<Price>`) and `@JvmInline value class` parameters on any callback that is not an
    `inline fun`. → R§2
 4. **Zero-copy publishing.** Use `Publication.tryClaim` and encode directly into the log buffer;
-   never encode into a scratch buffer and `offer` it. → R§2
+   never encode into a scratch buffer and `offer` it. The one refinement: an execution report is
+   encoded into the report ring, its retained home on every node, and the leader copies it into its
+   claim — still `tryClaim`, never `offer`. → R§2, R§16
 
 ## The wire
 
@@ -161,6 +163,15 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   leader check, never inside the encode. A book image goes through `publishOnBookStream` and consumes
   none. Followers once never advanced it (`BookEventSequenceTest`). `OrderRemoved` carries
   `leavesQty` so the whole L2 aggregate is derivable without shadowing per-order state.
+- **Every execution report is numbered and retained before it is routed** — the participant's
+  `reportSeq` is taken, and the report written into `ReportRing`, on every node, ahead of the route
+  lookup and the claim, then the leader copies it into its `tryClaim`. A follower or an absent route
+  must still consume the number and keep the report: that is what a `ReportResendRequest` replays
+  after a failover. → R§16
+- **Lost reports are recovered by the client's resend request, never by engine back-pressure** — the
+  engine cannot wait for a gateway it learns of only through the log it would be blocked on. → R§16
+- **`ClientSession.MOCKED_OFFER` is `1`: check for it before `result > 0`**, and never let a test fake
+  return 1 for a real claim. → R§16
 - **Feed sequences are namespaced by shard**, each numbering from 1. `FeedSequenceTracker` in
   `reference` distinguishes a gap from a replay.
 
@@ -394,7 +405,7 @@ IPC egress needs the gateway on the leader's media driver.
 - **The native-image flags live in the root `build.gradle.kts`, not per module.** Two of them fail
   *silently* when missing — `--add-exports=java.base/jdk.internal.misc=ALL-UNNAMED` and
   `--initialize-at-build-time` for `org.agrona.UnsafeApi`. To check an image you cannot run:
-  `grep -c 'jdk.internal.misc.Unsafe' <binary>` returns 0 when the exports were missing and 3 when
+  `strings <binary> | grep -c 'jdk.internal.misc.Unsafe'` returns 0 when the exports were missing and 3 when
   they were not. → R§10
 - **`--install-exit-handlers` is load-bearing in the native build.** Without it SIGTERM kills the
   process outright and no shutdown counter is ever printed. → R§10

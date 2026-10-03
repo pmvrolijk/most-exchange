@@ -210,6 +210,7 @@ engine.bookEvent.streamId=12
 | `engine.bookEvent.streamId` | `12` | |
 | `engine.auction.maxPasses` | `64` | Safety valve on the uncross fixed-point loop, not part of the algorithm. Can change an uncross result, so it is the **engine fingerprint** and must be identical on every node |
 | `engine.backpressure.alertThreshold` | `1000000` | Consecutive back-pressured publications before alerting |
+| `engine.reportRetention` | `1048576` | Execution reports every node keeps for a participant's resend request (~96 B each, so ~124 MB at the default with its indexes). Must cover a failover's worth of reports, or a resend answers `TRUNCATED`. In the **engine fingerprint**: identical on every node (5.4, "After a failover") |
 | `engine.metrics` | `false` | Hot-path timing; two clock reads per message. Also publishes the service thread's duty cycle as the `duty-ns: engine service` counter (5.8) |
 | `engine.metrics.stages` | `false` | Adds the admit/match/settle partition of a new order; two more clock reads |
 | `engine.metrics.file` | none | Where percentile distributions are written at shutdown |

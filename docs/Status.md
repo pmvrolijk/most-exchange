@@ -4,7 +4,17 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03, in the session that **ran three members for the first time** and made the
+Last updated 2026-10-03 (evening), in the session that made **every order end with an outcome across
+a failover** (Handover §2o). A per-participant `reportSeq` on every execution report, a ring of
+recent reports on every node, and a client `ReportResendRequest` that acts as a fence (schema v6,
+Design.md §5 "Report sequence and resend"). Through a leader's crash, ~65–95 reports per failover
+belonged to orders a node had **sequenced and never reported**. They are now recovered, every other
+unanswered order is proven never sequenced, and `run-failover.sh` requires **0 unknown** in both
+placements (Measurements.md F3–F4). The same mechanism recovers reports dropped under load (open
+issue 1). Engine back-pressure was considered and rejected (R§16). Cost: +0.04 µs a new order at p50
+(A11–A12), ~124 MB per node, and still 0 bytes per order under Epsilon.
+
+Earlier the same day, the session that **ran three members for the first time** and made the
 gateway's placement configuration (Handover §2n):
 - **Multi-node.** `most cluster --member-id`; `e2e/run-cluster3.sh` elects, fails over twice, takes a
   snapshot through consensus and rejoins a member from it. Its first run found that **followers never
@@ -59,7 +69,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
 | Kotlin | ~28,200 lines — 15,450 main across 71 files, 12,740 test across 63 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 624, all passing |
+| Tests | 653, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -74,7 +84,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
-./gradlew clean build                        # 624 tests (control's need Docker)
+./gradlew clean build                        # 653 tests (control's need Docker)
 ./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
 ./e2e/run-restart.sh                         # does the shard come back with its book?
 ./e2e/run-cluster3.sh                        # three members: election, two failovers, a rejoin
@@ -172,7 +182,11 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ### Blocking
 
-1. **Execution reports are dropped under load.** The gateway's outbound leg has no back-channel —
+1. ~~**Execution reports are dropped under load.**~~ **Recoverable now** (Design.md §5, "Report
+   sequence and resend"): a dropped report leaves a gap in the participant's `reportSeq`, and the
+   client's resend request replays it from the ring. The drop itself, below, still happens; what is
+   left is how often, and a participant whose *last* report was dropped learns of it only at its
+   next report or request. The original analysis: the gateway's outbound leg has no back-channel —
    egress cannot be left unconsumed or the cluster session stalls — so a slow subscriber loses
    reports. Measured at ~8% (`droppedToClient=267853` of 3.26M) across a sweep reaching 333k/s.
    Retrying was tried and cost 10x on the p99 while still dropping. The remedy is a larger term
@@ -205,12 +219,18 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    so revocation is "publish, then bulk cancel". And the control plane cannot *verify* that the gateway it sends
    operator commands through is an operator — `control.cluster.operatorChannel.<shard>` names one,
    but a wrong one is still a silent `refusedCommands` count.
-3a. **An order in flight at a failover is lost with no reply, and cannot be asked about** (Design.md
+3a. ~~**An order in flight at a failover is lost with no reply, and cannot be asked about**~~ **Done
+   2026-10-03** (Handover §2o; Measurements.md F3–F4: 0 unknown in both placements). The history (Design.md
    §8). Measured in both gateway placements (Measurements.md F1–F2): thousands of orders at 2,000/s
    on a laptop, in a window of the election (independent) or of the client's publication timeout
    (co-located, when the leader's machine dies). There is no order-status query, so a client cannot
-   tell "never sequenced" from "resting". Today's recourse is a bulk cancel and re-entry. One order
-   per run was also answered ~13.6 s late, unexplained.
+   tell "never sequenced" from "resting", and a sequenced order's reports, a maker's fills included,
+   can be dropped silently while the new leader takes over. Today's recourse is a bulk cancel and
+   re-entry. **Decided 2026-10-03 (user): a per-participant report sequence, a retained-report ring
+   on every node, and a resend request that acts as a fence** (Design.md §8). **Built.** Still open
+   (Design.md §8): a resend older than the ring answers `TRUNCATED` and leaves a bulk cancel; resending
+   never-sequenced orders is the client's choice, and `most load` only counts them; pushed redelivery
+   was deferred.
 4. **Authorisation is all-or-nothing.** One `ADMIN` role with full access. Also, a command refused
    locally before the send attempt is not audited, because the audit is written on the way out of
    the REST layer.
@@ -299,7 +319,8 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 
 ## 3. To do next
 
-**Next session: archive retention (item 4 below)**, then the remaining correctness items, then the
+~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: archive
+retention (item 4 below)**, then the remaining correctness items, then the
 throughput follow-ups. Multi-node now runs on one machine, which makes retention checkable across
 members too (does a follower truncate when the leader snapshots?). The next multi-node step needs
 machines: three members across hosts, and a sweep with followers (item 3(b)). That is billed, so it

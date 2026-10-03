@@ -143,8 +143,19 @@ class EngineConfigTest {
     }
 
     // Design.md §7, "Enforced through the log": the engine fingerprint covers every setting that
-    // can change what the engine computes from a given log -- today auctionMaxPasses alone -- and
-    // nothing node-local.
+    // can change what the engine computes from a given log -- auctionMaxPasses and, since report
+    // resend, reportRetention -- and nothing node-local.
+
+    @Test
+    fun `report retention defaults to the ring's capacity and is in the engine fingerprint`() {
+        val spec = shard(1, 2)
+        val plain = EngineConfig.from(Properties(), spec)
+        assertEquals(ReportRing.DEFAULT_CAPACITY, plain.reportRetention)
+        val smaller = EngineConfig.from(Properties().apply { setProperty(EngineConfig.REPORT_RETENTION, "1024") }, spec)
+        assertEquals(1024, smaller.reportRetention)
+        // What a resend can answer is computed from the log, so two nodes must agree on it.
+        assertNotEquals(plain.engineFingerprintValue(), smaller.engineFingerprintValue())
+    }
 
     @Test
     fun `the engine fingerprint changes with the auction pass limit`() {

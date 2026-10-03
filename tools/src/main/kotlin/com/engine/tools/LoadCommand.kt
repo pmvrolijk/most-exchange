@@ -8,6 +8,9 @@ import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleEncoder
 import com.engine.sbe.RejectReason
+import com.engine.sbe.ReportResendCompleteDecoder
+import com.engine.sbe.ReportResendRequestEncoder
+import com.engine.sbe.ResendStatus
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import io.aeron.Aeron
@@ -144,9 +147,23 @@ private fun execute(
     )
     val elapsedNs = send(orders, spec, pool, run)
 
-    // The last orders are still in flight; without a drain they all count as unanswered.
+    // The last orders are still in flight; without a drain they all count as unanswered. A final
+    // fence settles any that never got an answer: after it completes, an unanswered order was never
+    // sequenced (Design.md §5, "Report sequence and resend").
     val drainDeadline = System.nanoTime() + spec.drainMs * 1_000_000L
     while (System.nanoTime() < drainDeadline && run.answered < run.sent) Thread.onSpinWait()
+    if (!run.aborted) {
+        var fencedOn = run.activeGateway
+        sendFence(orders, run, ordersBefore = spec.count)
+        while (System.nanoTime() < drainDeadline + spec.drainMs * 1_000_000L && run.pendingCompletions > 0) {
+            // Refused by a standby: the receiver has moved on, so fence again where it went.
+            if (run.activeGateway != fencedOn) {
+                fencedOn = run.activeGateway
+                sendFence(orders, run, ordersBefore = spec.count)
+            }
+            Thread.onSpinWait()
+        }
+    }
     run.stopped = true
     receiver.join(SHUTDOWN_JOIN_MS)
 
@@ -168,8 +185,20 @@ private fun send(gateways: List<Publication>, spec: LoadSpec, pool: OrderPool, r
     val startNs = System.nanoTime()
     run.startNs = startNs
     var nextProgressNs = startNs + spec.intervalMs * 1_000_000L
+    var fencedGateway = run.activeGateway
 
     for (i in 0..<spec.count) {
+        // A gateway switch is a failover, or a standby refusing: whatever the old path held is
+        // settled by a fence on the new one, before any further order (Design.md §5).
+        if (run.activeGateway != fencedGateway && gateways.size > 1) {
+            sendFence(gateways, run, ordersBefore = i)
+            fencedGateway = run.activeGateway
+        } else if (run.fenceWanted && run.pendingCompletions == 0) {
+            // A gap in some participant's reportSeq: reports were lost on the way -- a failover the
+            // client cannot otherwise see, or a drop under load. Ask, once, from the first missing.
+            run.fenceWanted = false
+            sendFence(gateways, run, ordersBefore = i)
+        }
         val dueNs = startNs + i * spec.delayNs
         if (spec.delayNs > 0L) awaitDue(dueNs)
 
@@ -182,6 +211,8 @@ private fun send(gateways: List<Publication>, spec: LoadSpec, pool: OrderPool, r
         run.dueNs[i] = if (spec.delayNs > 0L) dueNs else sentNs
 
         if (!offer(gateways, claim, header, encoder, spec, pool, slot, spec.clOrdIdBase + i, run)) {
+            // Never sent, so no report is owed: take it out of what the fence has to account for.
+            run.sendNs[i] = 0L
             if (run.aborted) return System.nanoTime() - startNs
             continue
         }
@@ -279,6 +310,49 @@ private fun offer(
     }
 }
 
+/**
+ * One `ReportResendRequest` per participant, from each one's first missing report, on the gateway
+ * in use. Sequenced after every order sent before it on this path, so once all of them complete,
+ * an order below [ordersBefore] with no report was never sequenced. A request the gateway cannot
+ * forward moves to the next gateway, and the fence starts again there.
+ */
+private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: Int) {
+    val header = MessageHeaderEncoder()
+    val encoder = ReportResendRequestEncoder()
+    val claim = BufferClaim()
+    val length = MessageHeaderEncoder.ENCODED_LENGTH + ReportResendRequestEncoder.BLOCK_LENGTH
+    val generation = run.fenceGeneration + 1
+    run.fenceOrders[generation.toInt() and FENCE_SLOTS_MASK] = ordersBefore
+    run.pendingCompletions = run.spec.participantCount
+    run.fenceGeneration = generation
+    run.fences++
+    for (p in 0..<run.spec.participantCount) {
+        var attempts = 0
+        while (true) {
+            val result = gateways[run.activeGateway].tryClaim(length, claim)
+            if (result > 0L) {
+                encoder.wrapAndApplyHeader(claim.buffer(), claim.offset(), header)
+                    .participantId(run.ledger.participantId(p))
+                    .requestId(generation)
+                    .fromSeq(run.ledger.firstMissing(p))
+                claim.commit()
+                break
+            }
+            if (result == Publication.NOT_CONNECTED && switchGateway(gateways, run)) {
+                return sendFence(gateways, run, ordersBefore)
+            }
+            if (result != Publication.BACK_PRESSURED && result != Publication.ADMIN_ACTION ||
+                ++attempts >= BACKPRESSURE_RETRY_LIMIT
+            ) {
+                System.err.println("most: could not send a resend request (${describeOfferResult(result)})")
+                run.pendingCompletions = 0
+                return
+            }
+            Thread.onSpinWait()
+        }
+    }
+}
+
 /** Moves to the next connected gateway after the one in use; false when there is none. */
 private fun switchGateway(gateways: List<Publication>, run: LoadRun): Boolean {
     val from = run.activeGateway
@@ -309,14 +383,32 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
     // Which gateway the fragment being handled came from; set before each poll.
     var polling = 0
 
+    val completion = ReportResendCompleteDecoder()
     val assembler = FragmentAssembler { buffer, offset, length, _ ->
         if (length >= MessageHeaderDecoder.ENCODED_LENGTH) {
             header.wrap(buffer, offset)
-            if (header.templateId() == ClientExecutionReportDecoder.TEMPLATE_ID) {
+            if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID) {
+                completion.wrap(
+                    buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    header.blockLength(), header.version(),
+                )
+                run.onCompletion(completion)
+                // A standby refusing the fence moves the run on, exactly as it would an order.
+                if (completion.status() == ResendStatus.GATEWAY_UNAVAILABLE &&
+                    polling == run.activeGateway && subscriptions.size > 1
+                ) {
+                    run.activeGateway = (polling + 1) % subscriptions.size
+                    run.rejectSwitches++
+                }
+            } else if (header.templateId() == ClientExecutionReportDecoder.TEMPLATE_ID) {
                 decoder.wrap(
                     buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     header.blockLength(), header.version(),
                 )
+                // A replay re-sends reports the run already has; count each report once.
+                val gapsBefore = run.ledger.gapsOpened
+                if (!run.ledger.accept(decoder.participantId(), decoder.reportSeq())) return@FragmentAssembler
+                if (run.ledger.gapsOpened != gapsBefore) run.fenceWanted = true
                 run.onReport(decoder, System.nanoTime())
                 // A co-located gateway on a node that does not lead refuses every order this way.
                 // Move on from it once -- the rejects still in flight from it must not move again.
@@ -367,6 +459,42 @@ private class LoadRun(val spec: LoadSpec) {
 
     /** The gateway orders go to. Written by the receiver on a GATEWAY_UNAVAILABLE, read per send. */
     @Volatile var activeGateway = 0
+    /** Which reports arrived, by participant and reportSeq. Receiver thread. */
+    val ledger = ReportLedger(spec.participantBase, spec.participantCount)
+
+    // The fence. The sender writes a generation's order count, then the generation; the receiver
+    // reads the generation, then its count -- volatile on both ends, so the count is visible.
+    val fenceOrders = IntArray(FENCE_SLOTS)
+    @Volatile var fenceGeneration = 0L
+    @Volatile var pendingCompletions = 0
+
+    /** Set by the receiver on a gap in some participant's reportSeq; the sender then fences. */
+    @Volatile var fenceWanted = false
+    var fences = 0L
+
+    /** Orders below this index were settled by a completed fence. Receiver thread. */
+    @Volatile var settledBefore = 0
+    var replayed = 0L
+    var truncated = 0L
+    var refusedFences = 0L
+    var missingAfterComplete = 0L
+
+    fun onCompletion(decoder: ReportResendCompleteDecoder) {
+        if (decoder.requestId() != fenceGeneration) return // an older fence, superseded by a switch
+        val p = (decoder.participantId() - spec.participantBase).toInt()
+        when (decoder.status()) {
+            ResendStatus.COMPLETE, ResendStatus.TRUNCATED -> {
+                replayed += decoder.replayedCount()
+                if (decoder.status() == ResendStatus.TRUNCATED) truncated++
+                else if (p in 0..<spec.participantCount) missingAfterComplete += ledger.missingBelow(p, decoder.nextSeq())
+                if (--pendingCompletions == 0) {
+                    settledBefore = fenceOrders[decoder.requestId().toInt() and FENCE_SLOTS_MASK]
+                }
+            }
+            else -> refusedFences++ // the receiver moves the gateway; the sender fences again
+        }
+    }
+
     /** Each written by one thread only: the receiver on a reject, the sender on a disconnect. */
     @Volatile var rejectSwitches = 0L
     @Volatile var disconnectSwitches = 0L
@@ -506,8 +634,29 @@ private fun printSummary(
         )
     }
 
+    if (run.fences > 0L) {
+        println(
+            "  recovery       %,d fences (%,d gaps seen), %,d reports replayed (%,d already received, %,d recovered), %,d truncated%s".format(
+                Locale.ROOT, run.fences, run.ledger.gapsOpened, run.replayed, run.ledger.duplicates,
+                (run.replayed - run.ledger.duplicates).coerceAtLeast(0), run.truncated,
+                if (run.missingAfterComplete > 0L) ", ${run.missingAfterComplete} STILL MISSING after a complete resend" else "",
+            )
+        )
+    }
+
     val unanswered = run.sent - run.answered
     println("  unanswered     %,d orders never saw a report".format(Locale.ROOT, unanswered.coerceAtLeast(0)))
+    if (unanswered > 0) {
+        // Settled by a fence: sequenced orders have their reports by now, so these never were.
+        var neverSequenced = 0
+        var unknown = 0
+        for (i in 0..<spec.count) {
+            if (run.sendNs[i] == 0L || run.ackNs[i] != 0L) continue
+            if (i < run.settledBefore) neverSequenced++ else unknown++
+        }
+        println("  never sent     %,d of them never sequenced, proven by a completed resend fence".format(Locale.ROOT, neverSequenced))
+        println("  unknown        %,d orders whose fate no fence settled".format(Locale.ROOT, unknown))
+    }
     if (run.foreignReports > 0L) {
         println("  ignored        %,d reports from outside this run".format(Locale.ROOT, run.foreignReports))
     }
@@ -579,3 +728,7 @@ private const val MAX_TRACKED_NS = 60_000_000_000L
 private const val HISTOGRAM_SIGNIFICANT_DIGITS = 3
 private const val EXEC_TYPE_SLOTS = 8
 private const val REJECT_REASON_SLOTS = 16
+
+/** Fence generations in flight at once; a switch supersedes the previous one long before this wraps. */
+private const val FENCE_SLOTS = 64
+private const val FENCE_SLOTS_MASK = FENCE_SLOTS - 1

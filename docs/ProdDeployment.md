@@ -141,7 +141,7 @@ catch (`docs/Design.md` §7).
 | | Recommendation | Why |
 | --- | --- | --- |
 | CPU | 16+ physical cores, x86-64-v3 or better, one socket | ~12 threads need cores; one socket avoids NUMA on the hot path |
-| RAM | 64 GB minimum | ~0.9 GB/shard of pools, plus Aeron log buffers, plus page cache for the archive |
+| RAM | 64 GB minimum | ~1.1 GB/shard of pools and the report ring, plus Aeron log buffers, plus page cache for the archive |
 | Storage | NVMe SSD, dedicated to the archive | The archive writes every replicated message; it is the single largest contributor to round-trip latency |
 | Network | Dual 10 GbE, one for the trading VLAN | Multicast market data and consensus should not share a link with management traffic |
 
@@ -621,6 +621,8 @@ if a deployment would rather restart.
 | `unauthorizedRejects` | gateway | Orders and cancels refused `UNAUTHORIZED_PARTICIPANT`: someone reached this gateway as a participant it does not serve |
 | `refusedCommands` | gateway | Operator commands consumed because this gateway is not an operator. With markets not moving, the control plane is pointed at the wrong gateway |
 | `undeclaredParticipantMessages` | engine | Orders and cancels from a gateway that does not list the participant — a gateway not enforcing the registry the engine holds |
+| `undeliverableReports` | engine | Reports with no live route or session when generated. Still numbered and retained, so a participant recovers them with a resend request; a rising count with no resends means a client is not asking |
+| `resendRequests` / `replayedReports` | engine | Clients recovering lost reports. A burst after a failover is expected; a steady rate means a subscriber keeps dropping (gateway `droppedToClient`) |
 | Leader changes | consensus | Any unexplained one is worth a look |
 
 `operator_audit` in the control plane records who asked for every market-moving command. Like the

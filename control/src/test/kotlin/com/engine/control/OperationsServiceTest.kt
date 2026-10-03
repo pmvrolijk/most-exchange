@@ -151,6 +151,38 @@ class OperationsServiceTest : PostgresTest() {
         assertContains(e.message.orEmpty(), "needs a securityId")
     }
 
+    // Design.md §4.8 -- what a bulk cancel can check before it goes on the wire.
+
+    @Test
+    fun `a bulk cancel names its scope and is never confirmed`() {
+        seed()
+        val shardWide = operations.cancelParticipantOrders(0, participantId = 42L)
+        assertEquals("cancel orders of participant 42 on shard 0", shardWide.command)
+        assertFalse(shardWide.confirmed)
+
+        val oneSecurity = operations.cancelParticipantOrders(0, participantId = 42L, securityId = 1)
+        assertEquals("cancel orders of participant 42 on AAPL on shard 0", oneSecurity.command)
+        assertFalse(oneSecurity.confirmed)
+    }
+
+    @Test
+    fun `a bulk cancel for a security another shard hosts is refused before the wire`() {
+        seed()
+        topology.createShard(shardRow(1))
+        topology.createSecurity(securityRow(2, 1, "MSFT", ISIN_MICROSOFT))
+
+        val e = assertFailsWith<IllegalArgumentException> {
+            operations.cancelParticipantOrders(0, participantId = 42L, securityId = 2)
+        }
+        assertContains(e.message.orEmpty(), "security 2 is not on shard 0")
+    }
+
+    @Test
+    fun `a bulk cancel for an unknown shard is refused before the wire`() {
+        val e = assertFailsWith<IllegalArgumentException> { operations.cancelParticipantOrders(9, 42L) }
+        assertContains(e.message.orEmpty(), "no such shard")
+    }
+
     @Test
     fun `a reopen only re-seeds securities that have a reference price`() {
         seed()

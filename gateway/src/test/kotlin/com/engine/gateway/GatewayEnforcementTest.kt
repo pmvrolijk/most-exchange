@@ -161,6 +161,30 @@ class GatewayEnforcementTest {
     }
 
     @Test
+    fun `a participant's own gateway may not bulk cancel, even for that participant`() {
+        // Design.md §4.8: only an operator gateway forwards it. gw-a places for 7 and still may not
+        // withdraw 7's whole book in one message.
+        val gateway = service("gw-a")
+        val length = com.engine.reference.OperatorCommands.encodeCancelParticipantOrders(buffer, participantId = 7L)
+
+        assertEquals(ClientMessageAction.CONSUME, gateway.onClientMessage(buffer, 0, length))
+
+        assertTrue(sink.toCluster.isEmpty())
+        assertEquals(1L, gateway.refusedCommands)
+    }
+
+    @Test
+    fun `an operator gateway forwards a bulk cancel untouched`() {
+        val gateway = service("control")
+        val length = com.engine.reference.OperatorCommands.encodeCancelParticipantOrders(buffer, participantId = 7L)
+
+        gateway.onClientMessage(buffer, 0, length)
+
+        assertEquals(1, sink.toCluster.size)
+        assertEquals(0L, gateway.refusedCommands)
+    }
+
+    @Test
     fun `an operator gateway forwards operator commands`() {
         val gateway = service("control")
 

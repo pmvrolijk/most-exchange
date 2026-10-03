@@ -17,6 +17,7 @@ private val USAGE = """
       most session --phase closed|pre-open|open-auction|continuous [--shard N]
       most purge  [--trading-date YYYYMMDD] [--shard N]
       most image  [--shard N]
+      most cancel-all --participant ID [--symbol SYM | --shard N]
       most cluster [--dir DIR] [--fresh]
       most cluster snapshot [--ingress 0=HOST:PORT [--identity ID --secret-file F] | --dir DIR]
       most cluster shutdown [--dir DIR]
@@ -33,6 +34,9 @@ private val USAGE = """
       purge       Run the off-session expiry sweep.
       image       Republish every book on the shard as a level image, for a market data
                   process that restarted and has no book to rebuild from.
+      cancel-all  Cancel every resting order of one participant, on one security or on the
+                  whole shard. The operator side of revocation: publish the participant's
+                  move to cancelOnly first, then send this. --participant is required.
       cluster     Run a single-node cluster host for local development. It persists the
                   archive and cluster directories unless --fresh is given, because those
                   are the shard's only resumption point.
@@ -80,7 +84,7 @@ private val USAGE = """
       --report-channel URI       --report-stream N
                                A gateway other than the one the directory advertises: the
                                participant's own, or one with operator=true for define,
-                               session, purge and image (Design.md §1).
+                               session, purge, image and cancel-all (Design.md §1).
       --timeout SECONDS        How long to wait for a directory (default 15)
 """.trimIndent()
 
@@ -103,6 +107,7 @@ fun main(argv: Array<String>) {
             "session" -> runSession(args)
             "purge" -> runPurge(args)
             "image" -> runImage(args)
+            "cancel-all" -> runCancelAll(args)
             "cluster" -> runCluster(args)
             "counters" -> runCounters(args)
             else -> {

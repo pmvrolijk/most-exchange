@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="4"
+                   package="com.engine.sbe" id="1" version="5"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -139,6 +139,16 @@
     <field name="shardFingerprint"  id="1" type="SeqNum"/>
     <field name="engineFingerprint" id="2" type="SeqNum"/>
     <field name="shardId"           id="3" type="ShardId"/>
+  </sbe:message>
+
+  <!-- Cancels every resting order of one participant (Design.md §4.8): the operator side of
+       revocation. securityId -1 means every book on the shard (0 is a legal id). An operator command like the three
+       above, so only an operator gateway forwards it. Each order it removes is reported exactly as
+       a participant's own cancel would be (a CANCELED execution report and an OrderRemoved with
+       RemoveReason.CANCELED), so no consumer sees anything new. Added in version 5. -->
+  <sbe:message name="CancelParticipantOrders" id="8" blockLength="16" sinceVersion="5">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="securityId"    id="2" type="SecurityId"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">

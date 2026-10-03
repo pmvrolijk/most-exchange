@@ -196,6 +196,18 @@ internal class Driver(
     private val requestImageLength =
         com.engine.reference.OperatorCommands.encodeRequestBookImage(requestImageBuffer)
 
+    // Per participant, encoded once for the same reason as the image request above.
+    private val bulkCancelBuffers = HashMap<Long, Pair<UnsafeBuffer, Int>>()
+
+    /** `CancelParticipantOrders` for the whole shard (Design.md §4.8), as the senders encode it. */
+    fun cancelParticipantOrders(participantId: Long) {
+        val (encoded, length) = bulkCancelBuffers.getOrPut(participantId) {
+            val b = UnsafeBuffer(ByteArray(64))
+            b to com.engine.reference.OperatorCommands.encodeCancelParticipantOrders(b, participantId)
+        }
+        service.onSessionMessage(session, 0L, encoded, 0, length, header)
+    }
+
     /** The `RequestBookImage` operator command, as the CLI and the control plane send it. */
     fun requestBookImage() {
         service.onSessionMessage(session, 0L, requestImageBuffer, 0, requestImageLength, header)

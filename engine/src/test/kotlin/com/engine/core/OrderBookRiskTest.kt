@@ -218,3 +218,58 @@ class OrderBookExpiryTest {
         assertEquals(listOf(b, d), fills.map { it.makerOrderId })
     }
 }
+
+/** Design.md §4.8: the bulk cancel walks the ladders as the purge does. */
+class OrderBookBulkCancelTest {
+
+    @Test
+    fun `only the named participant's orders are removed, on both sides`() {
+        val book = newBook()
+        val ids = Ids()
+        val bid = book.add(ids, Side.BUY, price = 99, qty = 1, participantId = 7L)
+        val otherBid = book.add(ids, Side.BUY, price = 99, qty = 1, participantId = 8L)
+        val ask = book.add(ids, Side.SELL, price = 105, qty = 1, participantId = 7L)
+        val otherAsk = book.add(ids, Side.SELL, price = 106, qty = 1, participantId = 8L)
+
+        val cancelled = mutableListOf<Long>()
+        book.cancelParticipant(7L) { node -> cancelled += book.exchangeOrderIdOf(node) }
+
+        assertContentEquals(listOf(bid, ask), cancelled)
+        assertEquals(2, book.restingOrderCount())
+        assertEquals(NULL_INDEX, book.indexOf(bid))
+        assertEquals(NULL_INDEX, book.indexOf(ask))
+        assertTrue(book.indexOf(otherBid) != NULL_INDEX)
+        assertTrue(book.indexOf(otherAsk) != NULL_INDEX)
+        assertEquals(106, book.bestAsk())
+    }
+
+    @Test
+    fun `the walk passes survivors mid queue and clears whole levels`() {
+        val book = newBook()
+        val ids = Ids()
+        val a = book.add(ids, Side.BUY, price = 100, qty = 1, participantId = 7L)
+        book.add(ids, Side.BUY, price = 100, qty = 1, participantId = 8L)
+        val c = book.add(ids, Side.BUY, price = 100, qty = 1, participantId = 7L)
+        val d = book.add(ids, Side.BUY, price = 101, qty = 1, participantId = 7L)
+
+        val cancelled = mutableListOf<Long>()
+        book.cancelParticipant(7L) { node -> cancelled += book.exchangeOrderIdOf(node) }
+
+        assertContentEquals(listOf(a, c, d), cancelled)
+        assertEquals(1, book.restingOrderCount())
+        assertEquals(100, book.bestBid())
+    }
+
+    @Test
+    fun `a participant with nothing resting removes nothing`() {
+        val book = newBook()
+        val ids = Ids()
+        book.add(ids, Side.BUY, price = 100, qty = 1, participantId = 8L)
+
+        var calls = 0
+        book.cancelParticipant(7L) { calls++ }
+
+        assertEquals(0, calls)
+        assertEquals(1, book.restingOrderCount())
+    }
+}

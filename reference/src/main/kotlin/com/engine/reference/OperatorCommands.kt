@@ -1,5 +1,6 @@
 package com.engine.reference
 
+import com.engine.sbe.CancelParticipantOrdersEncoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.Phase
 import com.engine.sbe.PurgeExpiredOrdersEncoder
@@ -10,7 +11,7 @@ import org.agrona.MutableDirectBuffer
 import java.time.LocalDate
 
 /**
- * Encoders for the three operator commands, shared by every sender.
+ * Encoders for the operator commands, shared by every sender.
  *
  * These go to the **gateway's** client inbound channel like any other message: the gateway does not
  * recognise them, so it forwards them into the cluster untouched, and they are sequenced through
@@ -27,6 +28,12 @@ import java.time.LocalDate
  * a definition (Design.md §5).
  */
 object OperatorCommands {
+
+    /**
+     * `CancelParticipantOrders.securityId` meaning every book on the shard. Negative because `0` is
+     * a legal security id, and `SecuritySpec` admits none below it (Design.md §4.8).
+     */
+    const val ALL_SECURITIES = -1
 
     /**
      * Seeds or re-seeds a security's reference prices and collar widths.
@@ -102,6 +109,26 @@ object OperatorCommands {
         RequestBookImageEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
             .requestTime(0L)
         return MessageHeaderEncoder.ENCODED_LENGTH + RequestBookImageEncoder.BLOCK_LENGTH
+    }
+
+    /**
+     * Cancels every resting order of [participantId], on [securityId] or, with [ALL_SECURITIES], on
+     * every book on the shard (Design.md §4.8). The operator side of revocation: publish the
+     * participant's move to `cancelOnly` (or its removal) **first**, then send this, or an order can
+     * land between the two -- the engine never refuses an order on who placed it.
+     *
+     * Each order removed is reported to the participant as an ordinary `CANCELED` and to the market
+     * as an ordinary `OrderRemoved`, so nothing tells an observer an operator did it.
+     */
+    fun encodeCancelParticipantOrders(
+        buffer: MutableDirectBuffer,
+        participantId: Long,
+        securityId: Int = ALL_SECURITIES,
+    ): Int {
+        CancelParticipantOrdersEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
+            .participantId(participantId)
+            .securityId(securityId)
+        return MessageHeaderEncoder.ENCODED_LENGTH + CancelParticipantOrdersEncoder.BLOCK_LENGTH
     }
 
     /**

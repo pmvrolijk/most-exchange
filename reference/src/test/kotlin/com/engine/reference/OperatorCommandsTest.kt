@@ -3,6 +3,7 @@ package com.engine.reference
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.Phase
 import com.engine.sbe.PurgeExpiredOrdersDecoder
+import com.engine.sbe.CancelParticipantOrdersDecoder
 import com.engine.sbe.SecurityDefinitionDecoder
 import com.engine.sbe.SessionTransitionDecoder
 import org.agrona.concurrent.UnsafeBuffer
@@ -85,6 +86,31 @@ class OperatorCommandsTest {
         )
         assertEquals(20260830, decoder.tradingDate())
         assertEquals(0L, decoder.purgeTime())
+    }
+
+    @Test
+    fun `a bulk cancel names the participant and the security`() {
+        val length = OperatorCommands.encodeCancelParticipantOrders(buffer, participantId = 42L, securityId = 7)
+        decodeHeader(length)
+        assertEquals(CancelParticipantOrdersDecoder.TEMPLATE_ID, header.templateId())
+
+        val decoder = CancelParticipantOrdersDecoder().wrap(
+            buffer, MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version(),
+        )
+        assertEquals(42L, decoder.participantId())
+        assertEquals(7, decoder.securityId())
+    }
+
+    @Test
+    fun `a bulk cancel with no security covers the whole shard, which is not security 0`() {
+        // Design.md §4.8: -1 means every book, because 0 is a legal security id.
+        val length = OperatorCommands.encodeCancelParticipantOrders(buffer, participantId = 42L)
+        decodeHeader(length)
+        val decoder = CancelParticipantOrdersDecoder().wrap(
+            buffer, MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version(),
+        )
+        assertEquals(-1, decoder.securityId())
+        assertEquals(OperatorCommands.ALL_SECURITIES, decoder.securityId())
     }
 
     @Test

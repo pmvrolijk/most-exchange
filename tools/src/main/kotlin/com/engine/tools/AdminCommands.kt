@@ -130,6 +130,50 @@ fun runSession(args: Args) {
     )
 }
 
+/**
+ * Cancels every resting order of one participant (Design.md §4.8): on one security with
+ * `--symbol`, or on every book of `--shard` without it.
+ *
+ * `--participant` is required here, unlike everywhere else it defaults to 1: a default would make
+ * a forgotten flag cancel somebody's whole book. The operator side of revocation -- publish the
+ * participant's move to `cancelOnly` first, then send this, or an order can land between the two.
+ */
+fun runCancelAll(args: Args) {
+    val participantId = args.requiredLong("participant")
+    val symbol = args.optional("symbol")
+    val shardId = args.int("shard", 0)
+    var securityId = OperatorCommands.ALL_SECURITIES
+    var resolvedShard = shardId
+
+    sendToShard(
+        args,
+        resolveShard = { directory ->
+            if (symbol == null) {
+                directory.shardRoute(shardId)
+            } else {
+                val security = directory.routeForSymbol(symbol)
+                if (security == null) {
+                    System.err.println("most: unknown symbol '$symbol' -- try `most securities`")
+                    null
+                } else {
+                    securityId = security.securityId
+                    resolvedShard = security.shardId
+                    directory.shardRoute(security.shardId)
+                }
+            }
+        },
+        build = { buffer ->
+            OperatorCommands.encodeCancelParticipantOrders(buffer, participantId, securityId)
+        },
+        describe = {
+            "participant $participantId: every resting order on " +
+                (if (symbol == null) "shard $resolvedShard" else "$symbol (shard $resolvedShard)") +
+                " sent for cancellation; nothing acknowledges it -- each order leaves the book as an " +
+                "ordinary cancel"
+        },
+    )
+}
+
 /** The off-session expiry sweep (Design.md §4.3), run well before PRE_OPEN. */
 /**
  * Asks the shard to republish every book as a level image.

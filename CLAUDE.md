@@ -338,9 +338,10 @@ here as well:
   members.
 - **Check a primitive collection actually exists before designing around it.** Agrona has no
   `Long2IntHashMap`; the id map is a `Long2LongHashMap` with the node index widened (Design.md §2).
-- **Four `inline` keywords are load-bearing:** `matchAggressive`, `offerToSnapshot`,
-  `publishBookEvent` and `OrderBook.forEachOccupiedLevel`. Each can be removed without a compiler
-  warning, and each is caught by the test covering its path and no other.
+- **Five `inline` keywords are load-bearing:** `matchAggressive`, `offerToSnapshot`,
+  `publishBookEvent`, `OrderBook.forEachOccupiedLevel` and `OrderBook.cancelParticipant`. Each can be
+  removed without a compiler warning, and each is caught by the test covering its path and no other
+  (`cancelParticipant`'s by `AllocationTest`'s bulk-cancel case, 8 of 8 windows).
 
 ## Performance budget
 

@@ -709,25 +709,38 @@ class OrderBook(
      * `expireDate == 0` is good-til-cancelled.
      */
     inline fun purgeExpired(currentTradingDate: Int, onExpire: (node: Int) -> Unit) {
-        purgeLadder(bids, currentTradingDate, onExpire)
-        purgeLadder(asks, currentTradingDate, onExpire)
+        removeWhere(bids, { node -> expireDateOfOrder(node) in 1 until currentTradingDate }, onExpire)
+        removeWhere(asks, { node -> expireDateOfOrder(node) in 1 until currentTradingDate }, onExpire)
     }
 
+    // ------------------------------------------------------------------ bulk cancel
+
+    /**
+     * Removes every resting order of [participantId] (§4.8), walking the ladders for the same reason
+     * the purge does. [onCancel] runs before each order is unlinked, so it can still read the order.
+     */
+    inline fun cancelParticipant(participantId: Long, onCancel: (node: Int) -> Unit) {
+        removeWhere(bids, { node -> participantIdOf(node) == participantId }, onCancel)
+        removeWhere(asks, { node -> participantIdOf(node) == participantId }, onCancel)
+    }
+
+    /**
+     * The one ladder walk that removes as it goes. The successor is read before [onRemove] and the
+     * unlink, which rewrite the links of the order being removed.
+     */
     @PublishedApi
-    internal inline fun purgeLadder(
+    internal inline fun removeWhere(
         ladder: PriceLadder,
-        currentTradingDate: Int,
-        onExpire: (node: Int) -> Unit,
+        matches: (node: Int) -> Boolean,
+        onRemove: (node: Int) -> Unit,
     ) {
         var level = ladder.lowestOccupiedAtOrAbove(0)
         while (level != NULL_LEVEL) {
             var node = ladder.head[level]
             while (node != NULL_INDEX) {
-                val base = node * OrderField.STRIDE
-                val successor = nextOf(orders[base + OrderField.LINKS])
-                val expireDate = expireDateOf(orders[base + OrderField.META])
-                if (expireDate in 1 until currentTradingDate) {
-                    onExpire(node)
+                val successor = nextOf(orders[node * OrderField.STRIDE + OrderField.LINKS])
+                if (matches(node)) {
+                    onRemove(node)
                     unlink(node)
                 }
                 node = successor

@@ -170,8 +170,11 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    has no determinism to protect. **Still open underneath it:** the client-to-gateway leg is not
    authenticated, so the check means "whoever can reach this endpoint may act for these
    participants" — per-client authentication is the upstream session gateways' job, and nothing here
-   tests one. There is **no bulk cancel** for a revoked participant, so `cancelOnly` relies on it
-   withdrawing its own orders. And the control plane cannot *verify* that the gateway it sends
+   tests one. ~~There is **no bulk cancel** for a revoked participant~~ **Built 2026-10-03** (Design.md
+   §4.8): `CancelParticipantOrders`, an operator command (schema v5, id 8), sent by `most cancel-all`,
+   `POST /api/shards/{id}/participants/{pid}/cancel-orders` and the Operations page. It is proven on a
+   real node by `run-e2e.sh` step 7a (`bulkCancelledOrders=2`). It decides nothing about the future,
+   so revocation is "publish, then bulk cancel". And the control plane cannot *verify* that the gateway it sends
    operator commands through is an operator — `control.cluster.operatorChannel.<shard>` names one,
    but a wrong one is still a silent `refusedCommands` count.
 4. **Authorisation is all-or-nothing.** One `ADMIN` role with full access. Also, a command refused
@@ -268,9 +271,8 @@ and the correctness items are. In the order I would take them, cheapest-and-most
 1. ~~**Fingerprint enforcement at boot**~~ **Done 2026-10-03** (open issue 11). The leader announces
    its configuration in the log, and a node that disagrees refuses.
 2. ~~**Refuse to publish into an existing release directory**~~ **Done 2026-10-03** (open issue 6a).
-3. **Bulk cancel of one participant's resting orders** (item 11a, open issue 3) — the operator side of
-   revocation. A new operator command through the log, so the `wire-change` skill applies; the
-   engine walks the ladders as the purge does (Design.md §4.3).
+3. ~~**Bulk cancel of one participant's resting orders**~~ **Done 2026-10-03** (open issue 3;
+   Design.md §4.8).
 4. **Archive retention** (item 5, open issue 5) — establish Aeron 1.53's post-snapshot behaviour
    before writing a policy.
 5. **Tests for `discovery`** (item 11) and **Design.md §6 against the code** (item 10) — both
@@ -373,9 +375,7 @@ The full list, in the order it was written:
 9. ~~**Fingerprint enforcement at boot**~~ **Done** (open issue 11).
 10. **Reconcile `Design.md` §6 with the code**, or cut it. Outstanding for several sessions.
 11. **Tests for the `discovery` process** itself. Also outstanding.
-11a. **Bulk cancel of one participant's resting orders** — the operator side of revocation, which
-    `cancelOnly` currently leaves to the participant (open issue 3). An operator command, so it goes
-    through the log; the engine would walk the ladders as the purge does (Design.md §4.3).
+11a. ~~**Bulk cancel of one participant's resting orders**~~ **Done** (open issue 3; Design.md §4.8).
 11b. ~~**Refuse to publish into an existing release directory**~~ **Done** (open issue 6a).
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.

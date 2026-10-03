@@ -122,7 +122,7 @@ participant.7.primary=gw-0
 | `registry.gateways` | At least one id, comma-separated |
 | `gateway.<id>.secret` | The **SHA-256 hex digest** of the shared secret, 64 lowercase hex characters |
 | `gateway.<id>.participants` | Participants that may **place and cancel** through this gateway. Required unless the gateway is an operator |
-| `gateway.<id>.cancelOnly` | Optional. Participants that may **cancel but not place** — revocation made graceful. Not also in `participants` |
+| `gateway.<id>.cancelOnly` | Optional. Participants that may **cancel but not place** — revocation made graceful. Not also in `participants`. An operator can withdraw what such a participant leaves resting with `most cancel-all` (5.3), once this is published |
 | `gateway.<id>.operator` | Optional, `true` or `false` (default). May send operator commands, and may request a snapshot through consensus. Any other value is refused |
 | `participant.<id>.primary` | Required when a participant is listed on **more than one** gateway, and refused otherwise. Names the gateway it is bound to while both are connected; that gateway must list it |
 

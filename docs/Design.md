@@ -203,10 +203,11 @@ Each gateway entry in the registry grants three things, and the gateway checks e
 * **`participants`** — may place orders and cancel them.
 * **`cancelOnly`** — may cancel, may not place. This is revocation made graceful: moving a
   participant here, and publishing, stops new business at once while leaving it able to withdraw
-  what is resting. A participant may not be in both lists of one gateway. (A bulk cancel of a
-  revoked participant's orders would make this unnecessary, and does not exist yet.)
+  what is resting. A participant may not be in both lists of one gateway. To withdraw a revoked
+  participant's orders without its cooperation, an operator sends a bulk cancel (§4.8) *after*
+  publishing the revocation.
 * **`operator`** (`true`/`false`, default `false`) — may send operator commands: session
-  transitions, purges, security definitions, book-image requests. A gateway that is not an operator
+  transitions, purges, security definitions, book-image requests, bulk cancels. A gateway that is not an operator
   consumes them and counts them; there is no client report to reject to. An **operator-only**
   identity — `operator=true` and no participants at all — is how the control plane and the CLI are
   named, and is the only kind of entry allowed to list nobody.
@@ -905,6 +906,37 @@ cross it.
    `ArrayIndexOutOfBoundsException` that, being deterministic, kills every cluster node at the same
    log position.
 
+### 4.8 Bulk Cancel of One Participant
+
+`CancelParticipantOrders` is an operator command that cancels every resting order of one
+`participantId`. It carries a `securityId`, and **`-1` means every book on the shard**. Not
+`0`, which is a legal security id. It is the
+operator side of revocation (§1, "Enforcement, at the gateway"). `cancelOnly` stops new business,
+but it leaves the withdrawal to the participant, who may be unreachable or unwilling.
+
+* **Sequenced like the purge.** It travels through the gateway and the log like every operator
+  command, and **only an operator gateway forwards it**. A participant cannot send it, even for its
+  own orders.
+* **Accepted in every phase,** including `CLOSED` and a halt, as a single cancel is.
+* **It walks the price ladders, as the purge does (§4.3).** The id map has the same removal hazard
+  here as there.
+* **Each order it removes is reported as if the participant had cancelled it.** The participant
+  gets an unsolicited `CANCELED` execution report carrying the order's own `clOrdId`, `origQty` and
+  the `cumQty` it had reached. The report is routed like any other, so it is counted and dropped if
+  the participant has no route. The book event stream gets an `OrderRemoved` with
+  `RemoveReason.CANCELED` and the order's `leavesQty`. Nothing new reaches a consumer: market data
+  and L3 see an ordinary cancel, deliberately. A distinct reason would be an enum value every
+  consumer must be rebuilt for, since SBE's generated `get()` throws on a value it does not know.
+* **It decides nothing about the future.** Orders the participant places afterwards are accepted
+  as usual. The engine never rejects on who a participant is (§1). Revocation is therefore ordered:
+  move the participant to `cancelOnly`, or remove it, and **publish first**, then bulk cancel.
+  Done the other way round, an order can land between the two.
+* **A `securityId` the shard does not host** cancels nothing and is counted
+  (`rejectedBulkCancels`). It is never thrown on.
+* **Unacknowledged**, like every operator command. The engine counts the orders it removed this way
+  (`bulkCancelledOrders`). An observer sees each one as an `OrderRemoved` on L3, which does not name
+  the participant.
+
 ---
 
 ## 5. Message Specification (Generated SBE)
@@ -928,6 +960,7 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `5` | `SecurityDefinition` | Inbound | Cluster ingress |
 | `6` | `RequestBookImage` | Inbound | Cluster ingress |
 | `7` | `ConfigurationAnnouncement` | Service message, leader's copy | Cluster log |
+| `8` | `CancelParticipantOrders` | Inbound, operator | Cluster ingress |
 | `10` | `ExecutionReport` | Outbound, private | Cluster egress |
 | `20` | `OrderAdded` | Outbound, book event | IPC 12 |
 | `21` | `OrderReduced` | Outbound, book event | IPC 12 |
@@ -1151,7 +1184,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="4"
+                   package="com.engine.sbe" id="1" version="5"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1290,6 +1323,16 @@ answers, and a consumer must not render the first when it means the second.
     <field name="shardFingerprint"  id="1" type="SeqNum"/>
     <field name="engineFingerprint" id="2" type="SeqNum"/>
     <field name="shardId"           id="3" type="ShardId"/>
+  </sbe:message>
+
+  <!-- Cancels every resting order of one participant (Design.md §4.8): the operator side of
+       revocation. securityId -1 means every book on the shard (0 is a legal id). An operator command like the three
+       above, so only an operator gateway forwards it. Each order it removes is reported exactly as
+       a participant's own cancel would be (a CANCELED execution report and an OrderRemoved with
+       RemoveReason.CANCELED), so no consumer sees anything new. Added in version 5. -->
+  <sbe:message name="CancelParticipantOrders" id="8" blockLength="16" sinceVersion="5">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="securityId"    id="2" type="SecurityId"/>
   </sbe:message>
 
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">

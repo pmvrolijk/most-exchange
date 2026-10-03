@@ -227,6 +227,112 @@ class MatchingEngineServiceTest {
         assertEquals(1, h.books[0].restingOrderCount())
     }
 
+    // Design.md §4.8 -- bulk cancel of one participant. Every expectation below is from that clause.
+
+    @Test
+    fun `a bulk cancel removes every resting order of the participant on every book`() {
+        val h = harness(1, 2)
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+        h.newOrder(participantId = 7, clOrdId = 101, securityId = 2, side = Side.SELL, price = 105, qty = 4)
+        h.newOrder(participantId = 8, clOrdId = 200, securityId = 1, side = Side.BUY, price = 98, qty = 3)
+
+        h.cancelParticipantOrders(participantId = 7)
+
+        val cancelled = h.reports.filter { it.execType == "CANCELED" }
+        // Reported as the participant's own cancel would be, carrying each order's own clOrdId.
+        assertEquals(listOf(7L to 100L, 7L to 101L), cancelled.map { it.participantId to it.clOrdId })
+        assertEquals(listOf(1, 2), cancelled.map { it.securityId })
+        assertTrue(cancelled.all { it.leavesQty == 0L && it.rejectReason == RejectReason.NONE })
+        assertEquals(listOf(10L, 4L), cancelled.map { it.origQty })
+        assertEquals(0, h.books[1].restingOrderCount())
+        assertEquals(1, h.books[0].restingOrderCount(), "participant 8 keeps its order")
+        assertEquals(2L, h.service.bulkCancelledOrders)
+    }
+
+    @Test
+    fun `a partly filled order is bulk cancelled with the quantity it had filled`() {
+        val h = harness()
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.SELL, price = 100, qty = 10)
+        h.newOrder(participantId = 8, clOrdId = 200, securityId = 1, side = Side.BUY, price = 100, qty = 3)
+
+        h.cancelParticipantOrders(participantId = 7)
+
+        val cancelled = h.reports.single { it.execType == "CANCELED" }
+        assertEquals(10L, cancelled.origQty)
+        assertEquals(3L, cancelled.cumQty, "cumQty is what filled, never origQty - leavesQty")
+        assertEquals(0L, cancelled.leavesQty)
+    }
+
+    @Test
+    fun `a bulk cancel for one security leaves the participant's other books alone`() {
+        val h = harness(1, 2)
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+        h.newOrder(participantId = 7, clOrdId = 101, securityId = 2, side = Side.BUY, price = 99, qty = 10)
+
+        h.cancelParticipantOrders(participantId = 7, securityId = 2)
+
+        assertEquals(1, h.books[0].restingOrderCount())
+        assertEquals(0, h.books[1].restingOrderCount())
+        assertEquals(1L, h.service.bulkCancelledOrders)
+    }
+
+    @Test
+    fun `security 0 is a security, not the whole shard`() {
+        val h = harness(0, 1)
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 0, side = Side.BUY, price = 99, qty = 10)
+        h.newOrder(participantId = 7, clOrdId = 101, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+
+        h.cancelParticipantOrders(participantId = 7, securityId = 0)
+
+        assertEquals(0, h.books[0].restingOrderCount())
+        assertEquals(1, h.books[1].restingOrderCount())
+    }
+
+    @Test
+    fun `a bulk cancel for a security the shard does not host cancels nothing and is counted`() {
+        val h = harness()
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+
+        h.cancelParticipantOrders(participantId = 7, securityId = 9)
+
+        assertEquals(1, h.books[0].restingOrderCount())
+        assertEquals(1L, h.service.rejectedBulkCancels)
+        assertEquals(0L, h.service.bulkCancelledOrders)
+    }
+
+    @Test
+    fun `a bulk cancel works on a halted security`() {
+        val h = harness()
+        openContinuous(h, reference = 100L, dynamic = 500)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.SELL, price = 120, qty = 2)
+        h.newOrder(participantId = 7, clOrdId = 101, securityId = 1, side = Side.BUY, price = 99, qty = 2)
+        h.newOrder(participantId = 8, clOrdId = 200, securityId = 1, side = Side.BUY, price = 120, qty = 2)
+        assertEquals(Phase.CLOSED, h.books[0].phase, "the collar breach halted the security")
+
+        h.cancelParticipantOrders(participantId = 7)
+
+        assertEquals(0, h.books[0].restingOrderCount())
+        assertEquals(2, h.reports.count { it.execType == "CANCELED" && it.participantId == 7L })
+    }
+
+    @Test
+    fun `a bulk cancel decides nothing about the participant's next order`() {
+        val h = harness()
+        openContinuous(h)
+        h.newOrder(participantId = 7, clOrdId = 100, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+        h.cancelParticipantOrders(participantId = 7)
+
+        h.newOrder(participantId = 7, clOrdId = 101, securityId = 1, side = Side.BUY, price = 99, qty = 10)
+
+        assertEquals("NEW", h.reports.last().execType)
+        assertEquals(1, h.books[0].restingOrderCount())
+    }
+
     @Test
     fun `a security definition re-seeds both references`() {
         val h = harness()

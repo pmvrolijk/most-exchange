@@ -242,6 +242,27 @@ cat "$RUN/cancel.out"
 grep -q "CANCELED" "$RUN/cancel.out" || fail "no cancel confirmation"
 
 echo
+echo "== 7a. bulk cancel one participant's resting orders (Design.md §4.8)"
+# Participant 7 rests a bid and an offer, participant 8 a bid. The bulk cancel goes through the
+# operator gateway and the log like any operator command, and must take 7's two and leave 8's.
+$MOST send --symbol AAPL --side buy  --price 99.00  --qty 5 --clordid 3001 --participant 7 \
+  --follow 1 $CONN > "$RUN/bulk-1.out" 2>&1 || fail "send bulk-1"
+$MOST send --symbol AAPL --side sell --price 101.00 --qty 5 --clordid 3002 --participant 7 \
+  --follow 1 $CONN > "$RUN/bulk-2.out" 2>&1 || fail "send bulk-2"
+$MOST send --symbol AAPL --side buy  --price 98.00  --qty 3 --clordid 3003 --participant 8 \
+  --follow 1 $CONN > "$RUN/bulk-3.out" 2>&1 || fail "send bulk-3"
+grep -q "NEW" "$RUN/bulk-3.out" || fail "participant 8's order did not rest"
+$MOST cancel-all --participant 7 --shard 0 $CONN || fail "cancel-all"
+( $MOST book --symbol AAPL --depth 5 --refresh 500 $CONN > "$RUN/book-bulk.out" 2>&1 & echo $! > "$RUN/book-bulk.pid" )
+sleep 4
+kill "$(cat "$RUN/book-bulk.pid")" 2>/dev/null
+sed -e "$STRIP" "$RUN/book-bulk.out" | tail -8
+sed -e "$STRIP" "$RUN/book-bulk.out" | grep -qE "3 \(1\) +98\.00" || fail "participant 8's bid did not survive the bulk cancel"
+sed -e "$STRIP" "$RUN/book-bulk.out" | tail -8 | grep -qE "99\.00|101\.00" \
+  && fail "participant 7's orders are still on the book after the bulk cancel"
+# The engine's own count, read at shutdown in step 9: exactly the two of participant 7's.
+
+echo
 echo "== 8. drive load through the shard and measure it"
 # Its own participant range and clOrdId base, so nothing collides with the orders above. Small
 # enough not to slow the suite, but it exercises tryClaim encoding, correlation and the drain --
@@ -271,6 +292,8 @@ grep -qE "newOrder +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no newO
 grep -qE "newOrder.admit +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no admit samples"
 grep -qE "newOrder.settle +n=[1-9]" "$LOGS/engine.log" || fail "engine recorded no settle samples"
 grep -qE "inbound +n=[1-9]" "$LOGS/gateway.log" || fail "gateway recorded no inbound samples"
+grep -q "bulkCancelledOrders=2 " "$LOGS/engine.log" \
+  || { grep -o "bulkCancelledOrders=[0-9]*" "$LOGS/engine.log" >&2; fail "the engine did not bulk-cancel exactly participant 7's two orders"; }
 [ -s "$RUN/engine-latency.hgrm" ] || fail "engine wrote no histogram file"
 [ -s "$RUN/gateway-latency.hgrm" ] || fail "gateway wrote no histogram file"
 echo "  histograms: $RUN/engine-latency.hgrm, $RUN/gateway-latency.hgrm"

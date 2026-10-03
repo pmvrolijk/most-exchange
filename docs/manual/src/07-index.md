@@ -136,6 +136,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>most session</code> <span class="ref">5.3, 6.4</span></li>
 <li><code>most purge</code> <span class="ref">5.3</span></li>
 <li><code>most image</code> <span class="ref">5.3, 6.6</span></li>
+<li><code>most cancel-all</code> <span class="ref">5.3, 6.7</span></li>
 <li><code>most cluster</code> <span class="ref">2.10, <b>4.8</b></span></li>
 <li><code>most counters</code> <span class="ref"><b>5.8</b>, 6.1</span></li>
 <li><code>most cluster snapshot</code> <span class="ref"><b>5.6</b>, 6.7</span></li>

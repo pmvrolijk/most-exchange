@@ -295,6 +295,9 @@ so a missing driver is reported by `GET /api/status` and nothing else breaks. Se
 POST /api/securities/{id}/definition   seed or re-seed reference price and collars
 POST /api/shards/{id}/session          move a shard to a phase
 POST /api/shards/{id}/purge            the off-session expiry sweep
+POST /api/shards/{id}/participants/{pid}/cancel-orders
+                                       cancel every resting order of one participant;
+                                       body {"securityId": n} narrows it to one book
 POST /api/shards/{id}/reopen           the halt-recovery runbook, as one operation
 GET  /api/status                       what the exchange is actually doing
 ```

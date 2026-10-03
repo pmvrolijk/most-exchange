@@ -180,6 +180,8 @@ fun main(args: Array<String>) {
                     "backpressureStalls=${service.backpressureStalls} " +
                     "rejectedDefinitions=${service.rejectedDefinitions} " +
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
+                    "bulkCancelledOrders=${service.bulkCancelledOrders} " +
+                    "rejectedBulkCancels=${service.rejectedBulkCancels} " +
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +
                     "undeclaredParticipantMessages=${service.undeclaredParticipantMessages} " +

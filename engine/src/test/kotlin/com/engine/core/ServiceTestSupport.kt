@@ -398,6 +398,14 @@ class Harness(
         )
     }
 
+    /** `CancelParticipantOrders`, encoded the way the CLI and the control plane encode it. */
+    fun cancelParticipantOrders(
+        participantId: Long,
+        securityId: Int = com.engine.reference.OperatorCommands.ALL_SECURITIES,
+    ) {
+        submit(com.engine.reference.OperatorCommands.encodeCancelParticipantOrders(buffer, participantId, securityId))
+    }
+
     fun purge(tradingDate: Int) {
         PurgeExpiredOrdersEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
             .purgeTime(0L)

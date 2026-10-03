@@ -165,6 +165,47 @@ class OperationsService(
     }
 
     /**
+     * Cancels every resting order of one participant on one shard, or on one of its securities
+     * (Design.md §4.8). The operator side of revocation.
+     *
+     * The participant is deliberately **not** looked up: one that has been revoked and deleted from
+     * the database may still have orders resting, and those are exactly the ones this exists for.
+     * The security is, because it is checkable before the wire: a security another shard hosts
+     * would be counted and ignored by this one, and the operator would learn nothing.
+     *
+     * Never `confirmed`. Each order leaves the book as an ordinary `OrderRemoved` on L3, which does
+     * not name the participant, so nothing on the feed says this command did it.
+     */
+    fun cancelParticipantOrders(shardId: Int, participantId: Long, securityId: Int? = null): CommandResult {
+        val securities = topology.securitiesOfShardOrThrow(shardId)
+        val scope = if (securityId == null) {
+            "shard $shardId"
+        } else {
+            val security = requireNotNull(securities.firstOrNull { it.securityId == securityId }) {
+                "security $securityId is not on shard $shardId"
+            }
+            "${security.symbol} on shard $shardId"
+        }
+        val outcome = link.send(shardId) { buffer ->
+            OperatorCommands.encodeCancelParticipantOrders(
+                buffer, participantId, securityId ?: OperatorCommands.ALL_SECURITIES,
+            )
+        }
+        return CommandResult(
+            command = "cancel orders of participant $participantId on $scope",
+            sent = outcome.sent,
+            confirmed = false,
+            detail = if (outcome.sent) {
+                "sent; each resting order leaves the book as an ordinary cancel, and nothing " +
+                    "acknowledges the command. Orders placed afterwards are still accepted: publish " +
+                    "the participant's revocation first."
+            } else {
+                outcome.detail
+            },
+        )
+    }
+
+    /**
      * Asks the shard to republish every book as a level image.
      *
      * For a market data process that restarted while the engine kept running. Depth is derived

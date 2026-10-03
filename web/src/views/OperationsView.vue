@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue'
 import Modal from '../components/Modal.vue'
 import ConfirmDialog from '../components/ConfirmDialog.vue'
 import { api } from '../api/client'
 import { useCollection, useMutation, useResource } from '../api/collection'
-import type { CommandResult, ExchangeStatus, ReopenResult, Security, Shard } from '../api/types'
+import type { CommandResult, ExchangeStatus, Participant, ReopenResult, Security, Shard } from '../api/types'
 import { at, price, parsePrice, priceInput, todayTradingDate } from '../format'
 
 /**
- * The four commands that move a market.
+ * The commands that move a market.
  *
  * They were left out of the first pass deliberately rather than forgotten. Everything else in this
  * console edits a database row; these put bytes on a replicated log that a live exchange applies
@@ -19,6 +19,7 @@ import { at, price, parsePrice, priceInput, todayTradingDate } from '../format'
  */
 const { rows: shards } = useCollection<Shard>('/shards')
 const { rows: securities } = useCollection<Security>('/securities')
+const { rows: participants } = useCollection<Participant>('/participants')
 const { value: status, reload: reloadStatus } = useResource<ExchangeStatus>('/status')
 
 const { busy, error: commandError, run } = useMutation()
@@ -104,6 +105,59 @@ async function sendPurge() {
     record([result])
   })
   if (ok) purge.value = null
+}
+
+/* ---- bulk cancel ------------------------------------------------------------------------- */
+
+/**
+ * Cancels every resting order of one participant (Design.md §4.8) — the operator side of revocation.
+ *
+ * The participant is typed, not only picked: one that was revoked and deleted from the database may
+ * still have orders resting, and those are exactly the ones this is for. The list beside it is a
+ * convenience.
+ */
+const cancelOrders = ref<{ shardId: number; participantId: string; securityId: string } | null>(null)
+
+const cancelOrdersMessage = computed(() => {
+  const c = cancelOrders.value
+  if (!c) return ''
+  const who = c.participantId.trim() === '' ? 'the participant below' : `participant ${c.participantId.trim()}`
+  const security = securitiesOf(c.shardId).find((s) => String(s.securityId) === c.securityId)
+  const where = security ? `${security.symbol} on shard ${c.shardId}` : `every book on shard ${c.shardId}`
+  return (
+    `Cancels every resting order of ${who} on ${where}. Each one is reported to the participant as ` +
+    `an ordinary CANCELED and leaves the book as an ordinary cancel; nothing acknowledges the ` +
+    `command itself. It does not stop the participant trading: orders placed afterwards are ` +
+    `accepted. Revoke first — move the participant to cancelOnly or remove it on the Gateways page ` +
+    `and publish a release — then send this, or an order can land between the two.`
+  )
+})
+
+// A refusal describes the input it was given; once the input changes it describes nothing on screen.
+watch(
+  () => (cancelOrders.value ? `${cancelOrders.value.participantId}|${cancelOrders.value.securityId}` : null),
+  (now, before) => {
+    if (now !== null && before !== null) clearError()
+  },
+)
+
+async function sendCancelOrders() {
+  const c = cancelOrders.value
+  if (!c) return
+  const participantId = Number(c.participantId.trim())
+  if (c.participantId.trim() === '' || !Number.isInteger(participantId) || participantId <= 0) {
+    commandError.value = 'invalid: a participant id is a positive whole number'
+    return
+  }
+  const ok = await run(async () => {
+    const body = c.securityId === '' ? {} : { securityId: Number(c.securityId) }
+    const result = await api.post<CommandResult>(
+      `/shards/${c.shardId}/participants/${participantId}/cancel-orders`,
+      body,
+    )
+    record([result])
+  })
+  if (ok) cancelOrders.value = null
 }
 
 /* ---- book image -------------------------------------------------------------------------- */
@@ -280,6 +334,12 @@ function outcomeClass(result: CommandResult): string {
       </button>
       <button
         class="danger small"
+        @click="clearError(); cancelOrders = { shardId: shard.shardId, participantId: '', securityId: '' }"
+      >
+        Cancel a participant's orders
+      </button>
+      <button
+        class="danger small"
         @click="clearError(); reopen = { shardId: shard.shardId, securityId: '', referencePrice: '' }"
       >
         Reopen
@@ -396,6 +456,46 @@ function outcomeClass(result: CommandResult): string {
   >
     <label for="purge-date">Trading date (YYYYMMDD)</label>
     <input id="purge-date" v-model.number="purge.tradingDate" type="number" />
+  </ConfirmDialog>
+
+  <ConfirmDialog
+    v-if="cancelOrders"
+    title="Cancel a participant's resting orders"
+    :message="cancelOrdersMessage"
+    confirm-label="Cancel their orders"
+    danger
+    :busy="busy"
+    :error="commandError"
+    @confirm="sendCancelOrders"
+    @close="cancelOrders = null"
+  >
+    <div class="form-grid">
+      <div>
+        <label for="cancel-participant">Participant id</label>
+        <input
+          id="cancel-participant"
+          v-model="cancelOrders.participantId"
+          class="mono"
+          list="cancel-participants"
+          inputmode="numeric"
+        />
+        <datalist id="cancel-participants">
+          <option v-for="p in participants" :key="p.participantId" :value="String(p.participantId)">
+            {{ p.name }}
+          </option>
+        </datalist>
+        <p class="hint">Typed, so a participant already deleted here can still be named.</p>
+      </div>
+      <div>
+        <label for="cancel-sec">On which books</label>
+        <select id="cancel-sec" v-model="cancelOrders.securityId">
+          <option value="">every book on shard {{ cancelOrders.shardId }}</option>
+          <option v-for="s in securitiesOf(cancelOrders.shardId)" :key="s.securityId" :value="String(s.securityId)">
+            {{ s.symbol }} ({{ s.securityId }})
+          </option>
+        </select>
+      </div>
+    </div>
   </ConfirmDialog>
 
   <ConfirmDialog

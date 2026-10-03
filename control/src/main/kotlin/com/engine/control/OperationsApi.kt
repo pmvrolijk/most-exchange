@@ -22,6 +22,9 @@ data class SessionRequest(val phase: String, val tradingDate: Int? = null)
 
 data class PurgeRequest(val tradingDate: Int? = null)
 
+/** Omit [securityId] to cancel on every book of the shard. */
+data class CancelOrdersRequest(val securityId: Int? = null)
+
 /** A reopen may re-seed one security's reference price on the way through. */
 data class ReopenRequest(
     val securityId: Int? = null,
@@ -134,6 +137,23 @@ class OperationsApi(
             request = http,
         )
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(result)
+    }
+
+    /**
+     * Cancels every resting order of one participant (Design.md §4.8). Under the shard because it
+     * is sent to one shard's gateway, and a participant may trade on several.
+     */
+    @PostMapping("/shards/{shardId}/participants/{participantId}/cancel-orders")
+    fun cancelOrders(
+        @PathVariable shardId: Int,
+        @PathVariable participantId: Long,
+        @RequestBody(required = false) request: CancelOrdersRequest?,
+        http: HttpServletRequest,
+    ): ResponseEntity<CommandResult> {
+        val result = operations.cancelParticipantOrders(shardId, participantId, request?.securityId)
+        val target = "shard:$shardId participant:$participantId" +
+            (request?.securityId?.let { " security:$it" } ?: "")
+        return accepted(result, "cancel-orders", target, http)
     }
 
     /**

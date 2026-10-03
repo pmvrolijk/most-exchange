@@ -69,7 +69,7 @@ cd deploy && docker compose up -d
 
 Then `node screenshots.cjs` drives a headless Chrome through the console at <http://localhost:8081>
 (`admin` / `most-dev-password`), signing in and screenshotting each route into
-`assets/ui-<route>.png` at a 1440×900 viewport and a device scale factor of 2. It waits for the DOM
+`assets/ui-<route>.png` at a 1440×900 viewport and a device scale factor of 2. Dialogs no route shows on its own are named shots after the routes (`ui-operations-cancel.png`). `ONLY=operations,operations-cancel node screenshots.cjs` retakes just those and leaves every other image as it was. It waits for the DOM
 and a fixed beat rather than for the network to go idle, because Books and Status stream and never
 do. Look at each image before rebuilding: a book captured before its first snapshot shows nothing.
 

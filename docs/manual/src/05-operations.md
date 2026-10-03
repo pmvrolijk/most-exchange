@@ -182,6 +182,28 @@ A snapshot restore also sets this pending, so both triggers use one path: public
 background work once the book-event publication is *connected*, because both ask at the moment a
 subscriber is least likely to be listening.
 
+### Cancelling one participant's orders
+
+The operator side of revocation (4.3, 6.7). It cancels every resting order of one participant on a
+shard, or on one security with `--symbol`:
+
+```
+$ most cancel-all --participant 42 --shard 0
+participant 42: every resting order on shard 0 sent for cancellation; nothing acknowledges it -- each order leaves the book as an ordinary cancel
+```
+
+`--participant` is required. Unlike every other command, there is no default, because a default
+would make a forgotten flag cancel somebody's whole book. The control plane sends the same command
+from `POST /api/shards/{id}/participants/{pid}/cancel-orders` and from the Operations page. It goes
+through an **operator** gateway like the other operator commands, in every phase, a halt included.
+
+![Cancelling one participant's orders from the Operations page. The participant id is typed rather than only picked, so a participant already deleted from the control plane can still be named. The confirmation states the scope and the order of the steps rather than asking whether you are sure.](assets/ui-operations-cancel.png)
+
+The participant receives an ordinary `CANCELED` report for each order, carrying that order's own
+`clOrdId`. The market sees ordinary cancels: L3 does not say an operator did it, and nothing
+acknowledges the command. The engine counts `bulkCancelledOrders` at shutdown. **It decides nothing
+about the future.** Orders placed afterwards are accepted, so publish the revocation first.
+
 ## 5.4 Order flow
 
 ### The order entry message

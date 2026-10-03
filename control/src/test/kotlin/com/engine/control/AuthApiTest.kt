@@ -202,4 +202,50 @@ class AuthApiTest : PostgresTest() {
             .andExpect(jsonPath("$[0].target").value("shard:0"))
             .andExpect(jsonPath("$[0].sent").value(false))
     }
+
+    @Test
+    @WithMockUser(username = "operator-one", roles = [ROLE_ADMIN])
+    fun `a bulk cancel is audited with the participant and the security it named`() {
+        mvc.perform(
+            post("/api/shards").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(shardRow(0))),
+        ).andExpect(status().isCreated)
+        mvc.perform(
+            post("/api/securities").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(securityRow(1, 0))),
+        ).andExpect(status().isCreated)
+
+        mvc.perform(
+            post("/api/shards/0/participants/42/cancel-orders").with(csrf())
+                .contentType(MediaType.APPLICATION_JSON).content("""{"securityId":1}"""),
+        )
+            .andExpect(status().isBadGateway)
+            .andExpect(jsonPath("$.command").value("cancel orders of participant 42 on AAPL on shard 0"))
+            .andExpect(jsonPath("$.confirmed").value(false))
+
+        mvc.perform(get("/api/audit"))
+            .andExpect(jsonPath("$[0].action").value("cancel-orders"))
+            .andExpect(jsonPath("$[0].target").value("shard:0 participant:42 security:1"))
+            .andExpect(jsonPath("$[0].sent").value(false))
+    }
+
+    @Test
+    @WithMockUser(username = "operator-one", roles = [ROLE_ADMIN])
+    fun `a bulk cancel naming another shard's security is a bad request and nothing is sent`() {
+        mvc.perform(
+            post("/api/shards").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(shardRow(0))),
+        ).andExpect(status().isCreated)
+        mvc.perform(
+            post("/api/securities").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(securityRow(1, 0))),
+        ).andExpect(status().isCreated)
+
+        mvc.perform(
+            post("/api/shards/0/participants/42/cancel-orders").with(csrf())
+                .contentType(MediaType.APPLICATION_JSON).content("""{"securityId":9}"""),
+        )
+            .andExpect(status().isBadRequest)
+            .andExpect(jsonPath("$.error").value("invalid"))
+    }
 }

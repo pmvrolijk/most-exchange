@@ -145,6 +145,21 @@ class AllocationTest {
      * The expiry purge walks the price ladders rather than the id map (CLAUDE.md), so it is a
      * different traversal from anything above, and it runs on every book before the market opens.
      */
+    /** Design.md §4.8: the bulk cancel shares the purge's ladder walk, and must share its cost. */
+    @Test
+    fun `a bulk cancel allocates nothing`() {
+        val driver = Driver()
+        var clOrdId = 0L
+        driver.cancelParticipantOrders(1L) // encoded once, outside the measured window
+
+        assertNoSteadyStateAllocation("a bulk cancel", opsPerRound = 11, rounds = 5_000) {
+            // Ten resting orders, all participant 1's, so the cancel takes every one.
+            repeat(10) { driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - 1, 1L) }
+            driver.cancelParticipantOrders(1L)
+        }
+        assertEquals(0, driver.book.restingOrderCount(), "the bulk cancel must clear every order")
+    }
+
     @Test
     fun `the expiry purge allocates nothing`() {
         val driver = Driver()

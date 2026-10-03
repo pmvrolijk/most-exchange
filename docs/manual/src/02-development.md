@@ -282,7 +282,7 @@ A book that is not synchronised draws no ladder at all.
 
 **Operations** is the only screen that touches a running market.
 
-![Operations. Session transitions, definition seeding, the expiry purge, a snapshot request, a book image request, and halt recovery.](assets/ui-operations.png)
+![Operations. Session transitions, definition seeding, the expiry purge, a snapshot request, a book image request, the bulk cancel of one participant's orders, and halt recovery.](assets/ui-operations.png)
 
 The remaining screens are covered where they are used: Shards, Securities, Participants, Gateways
 and Releases in section 4; Schedules, Audit and Operators in section 5.

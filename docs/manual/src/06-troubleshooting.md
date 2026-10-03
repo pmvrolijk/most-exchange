@@ -198,9 +198,12 @@ Check `registryReloadFailures` rather than assuming a silent success — a bad f
 fatal (4.3). `engine.participantRegistry.reloadMs=0`, `gateway.participantRegistry.reloadMs=0` and
 `--participants-reload-ms 0` turn the poll off if a deployment would rather restart.
 
-**Revoking a participant** is two releases. First move it from `participants` to `cancelOnly` on
-each gateway that lists it: new orders are refused at once, and it can still cancel what is resting.
-Once its orders are gone, remove it. There is no bulk cancel for it yet (1.7).
+**Revoking a participant** is two releases and, if it does not withdraw its own orders, one command.
+First move it from `participants` to `cancelOnly` on each gateway that lists it and publish: new
+orders are refused at once, and it can still cancel what is resting. To withdraw them for it, run
+`most cancel-all --participant N --shard S` (or the Operations page's *Cancel a participant's
+orders*) **after** the release is in force, on every shard it trades on (5.3). Once its orders are
+gone, remove it.
 
 ### Replacing or adding a gateway
 
@@ -284,7 +287,6 @@ market-data: stopped. gaps=0 missed=0 foreignShard=0 droppedL1=0 droppedL2=0 dro
 
 | Area | What is missing | Section |
 | --- | --- | --- |
-| Order entry | No bulk cancel of one participant's resting orders, so revoking one relies on it withdrawing them from `cancelOnly` | 1.7, 6.7 |
 | Cluster host | Member id is hardcoded to 0; no `--member-id` | 3.6 |
 | Capacity | With UDP egress a shard sustains ~350,000 orders/s aggregate on the default threading and ~500,000–550,000 with `DEDICATED`. The driver's UDP sender on egress sets that limit. With IPC egress it sustains ~1,500,000, and there the engine thread fills first. The design target of 100,000/s per security across ten is met only with IPC egress, only on one node, and IPC egress needs the gateway on the leader's media driver. Multi-node log replication over UDP is unmeasured | 4.8, 5.7 |
 | Gateway placement | Nothing keeps IPC egress working across a failover: a gateway that follows the leader is neither designed nor tested | 3.2, 4.8 |

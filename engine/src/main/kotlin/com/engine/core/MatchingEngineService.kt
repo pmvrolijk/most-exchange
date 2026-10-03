@@ -4,6 +4,7 @@ import com.engine.sbe.AuctionUncrossedEncoder
 import com.engine.sbe.BookImageBeginEncoder
 import com.engine.sbe.BookImageEndEncoder
 import com.engine.sbe.BookImageLevelEncoder
+import com.engine.sbe.CancelParticipantOrdersDecoder
 import com.engine.sbe.ConfigurationAnnouncementDecoder
 import com.engine.sbe.ConfigurationAnnouncementEncoder
 import com.engine.sbe.ExecType
@@ -31,6 +32,7 @@ import com.engine.sbe.SnapshotOrderDecoder
 import com.engine.sbe.SnapshotOrderEncoder
 import com.engine.sbe.TradeExecutedEncoder
 import com.engine.sbe.VolatilityHaltedEncoder
+import com.engine.reference.OperatorCommands
 import com.engine.reference.ParticipantRegistry
 import io.aeron.ExclusivePublication
 import io.aeron.Image
@@ -191,6 +193,7 @@ class MatchingEngineService(
     private val bookImageLevelEncoder = BookImageLevelEncoder()
     private val bookImageEndEncoder = BookImageEndEncoder()
     private val requestBookImageDecoder = RequestBookImageDecoder()
+    private val cancelParticipantDecoder = CancelParticipantOrdersDecoder()
     private val announcementEncoder = ConfigurationAnnouncementEncoder()
     private val announcementDecoder = ConfigurationAnnouncementDecoder()
 
@@ -226,6 +229,14 @@ class MatchingEngineService(
     var rejectedDefinitions = 0L
         private set
     var auctionPassLimitBreaches = 0L
+        private set
+
+    /** Resting orders removed by `CancelParticipantOrders` (Design.md §4.8). */
+    var bulkCancelledOrders = 0L
+        private set
+
+    /** `CancelParticipantOrders` naming a security this shard does not host; nothing was cancelled. */
+    var rejectedBulkCancels = 0L
         private set
 
     /**
@@ -553,6 +564,11 @@ class MatchingEngineService(
                 metrics?.securityDefinition?.record(metrics.nanoTime() - started)
             }
 
+            CancelParticipantOrdersDecoder.TEMPLATE_ID -> {
+                cancelParticipantDecoder.wrap(buffer, body, blockLength, version)
+                onCancelParticipantOrders()
+            }
+
             RequestBookImageDecoder.TEMPLATE_ID -> {
                 requestBookImageDecoder.wrap(buffer, body, blockLength, version)
                 // Deferred rather than published here: the point of the command is a market data
@@ -785,6 +801,44 @@ class MatchingEngineService(
             RemoveReason.CANCELED,
         )
         book.unlink(cancelOutcome.nodeIndex)
+    }
+
+    /**
+     * Cancels every resting order of one participant, on one book or on all of them (Design.md
+     * §4.8). Each removal is reported exactly as the participant's own cancel would be, except
+     * that the report carries the order's own `clOrdId`, since no request named one.
+     */
+    private fun onCancelParticipantOrders() {
+        val participantId = cancelParticipantDecoder.participantId()
+        val securityId = cancelParticipantDecoder.securityId()
+        if (securityId == OperatorCommands.ALL_SECURITIES) {
+            for (book in books) cancelParticipant(book, participantId)
+            return
+        }
+        val bookIndex = indexOfSecurity(securityId)
+        if (bookIndex < 0) {
+            rejectedBulkCancels++
+            return
+        }
+        cancelParticipant(books[bookIndex], participantId)
+    }
+
+    private fun cancelParticipant(book: OrderBook, participantId: Long) {
+        val securityId = book.securityId
+        book.cancelParticipant(participantId) { node ->
+            val orderId = book.exchangeOrderIdOf(node)
+            val price = book.orderPrice(node)
+            val side = book.sideOfOrder(node)
+            val leavesQty = book.leavesQtyOf(node)
+            val origQty = book.origQtyOf(node)
+            sendExecutionReport(
+                participantId, book.clOrdIdOf(node), orderId, securityId, ExecType.CANCELED, side,
+                price = price, lastQty = 0L, leavesQty = 0L, rejectReason = RejectReason.NONE,
+                origQty = origQty, cumQty = cumQtyOf(origQty, leavesQty),
+            )
+            publishOrderRemoved(securityId, orderId, price, leavesQty, side, RemoveReason.CANCELED)
+            bulkCancelledOrders++
+        }
     }
 
     private fun onSessionTransition() {

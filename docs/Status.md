@@ -4,7 +4,11 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03 (late): **an order mass status** (schema v7, Design.md §5 "Order mass status";
+Last updated 2026-10-03 (close). **[`Adapters.md`](Adapters.md)** now states what an order entry
+adapter must do: connect, switch gateways, track `reportSeq`, fence with a resend, reconcile with a mass
+status, and what it keeps. It is the brief for the adapter framework (§3).
+
+Before that, the same evening: **an order mass status** (schema v7, Design.md §5 "Order mass status";
 Handover §2o). A participant asks for every open order and gets one `ORDER_STATUS` report each plus
 `nextSeq`, which reconciles at the open and closes a `TRUNCATED` resend for every order still open
 (Measurements.md F5). `most status` is the CLI, and `run-e2e.sh` step 6a checks it on a real node.
@@ -88,6 +92,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
+| Adapters | [`Adapters.md`](Adapters.md) — the contract an order entry adapter must meet; the brief for the adapter framework |
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
@@ -329,7 +334,8 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 ## 3. To do next
 
 ~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: archive
-retention (item 4 below)**, then the remaining correctness items, then the
+retention (item 4 below)**. **In one of the sessions after it: the adapter framework** (item 13
+below), to [`Adapters.md`](Adapters.md). Then then the remaining correctness items, then the
 throughput follow-ups. Multi-node now runs on one machine, which makes retention checkable across
 members too (does a follower truncate when the leader snapshots?). The next multi-node step needs
 machines: three members across hosts, and a sweep with followers (item 3(b)). That is billed, so it
@@ -455,6 +461,15 @@ The full list, in the order it was written:
 11. **Tests for the `discovery` process** itself. Also outstanding.
 11a. ~~**Bulk cancel of one participant's resting orders**~~ **Done** (open issue 3; Design.md §4.8).
 11b. ~~**Refuse to publish into an existing release directory**~~ **Done** (open issue 6a).
+13. **Adapter framework** (decided 2026-10-03 to come in one of the next sessions). Order entry adapters,
+    FIX first, built to [`Adapters.md`](Adapters.md). The exchange side they need is in place: the report
+    sequence, resend fence and mass status (Design.md §5), and `ParticipantRequests`. `most load` is the
+    reference behaviour. To decide when it starts:
+    - where the framework lives (a module here, or its own repository);
+    - which FIX engine;
+    - how an adapter persists its order and sequence state (Adapters.md §5);
+    - whether the exchange gains a drop copy first, since it is the one gap an adapter cannot close
+      (Adapters.md §6).
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.
 

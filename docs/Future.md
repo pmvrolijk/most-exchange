@@ -37,6 +37,9 @@
       (`e2e/run-cluster3.sh`); the gateway runs independent on UDP or co-located on IPC per node,
       by configuration, with clients moving on a failover (docs/Design.md §7 "Gateway placement",
       docs/Handover.md §2n). Not yet across machines
+- [ ] Adapter framework — order entry adapters (FIX first) built to docs/Adapters.md: endpoints and
+      failover, report sequence and resend fence, mass status at the open, persisted order and
+      sequence state
 - [ ] Store TimescaleDB ticks from trades, integrate with market-data, buckets, queries
 - [ ] Persisted full TradeReports; each matched trade needs to be reliably persisted with deal and participant data. Either two sided or central counterparty.
 - [x] Admin frontend for backend control plane, Vue

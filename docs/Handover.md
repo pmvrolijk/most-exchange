@@ -10,7 +10,8 @@ so they are never renumbered. §1, §4, §5 and §7 moved to `Status.md` and the
 below as pointers.
 
 **The chronology this file records**, most recent first: the session that made every order end with
-an outcome across a failover: report sequence, retention ring and a client resend fence (§2o).
+an outcome across a failover: report sequence, retention ring, a client resend fence, an order mass
+status, and `Adapters.md`, the contract for upstream adapters (§2o).
 Before that, the session that ran three members for the first time, found that followers never numbered book events, and made the gateway's placement a key:
 independent on UDP, or co-located on IPC with clients moving on a failover (§2n). Before that, the
 session that closed three integrity items: configuration enforced through the log, releases that refuse an existing directory, and a

@@ -88,7 +88,9 @@ The gateway in this project is **protocol-agnostic**. It speaks the binary SBE m
 both legs and knows nothing about FIX. Protocol translation — FIX, or any proprietary session
 protocol — happens in **separate upstream gateways outside this project**, which map their own wire
 format to these SBE messages before anything reaches order entry. Adding a new client protocol
-therefore means adding a protocol gateway, not changing this one.
+therefore means adding a protocol gateway, not changing this one. What such an adapter must do
+(connecting, failover, report sequence and resend, mass status, what it keeps) is
+[`Adapters.md`](Adapters.md).
 
 Its responsibilities:
 

@@ -9,7 +9,8 @@ cited as → R§n. Do not change a rule without reading its section there.
 | **Where things stand, what to do next** | [`docs/Status.md`](docs/Status.md) — the session entry point |
 | **Normative behaviour** | [`docs/Design.md`](docs/Design.md) — authoritative. §8 is the open list |
 | **Why a rule exists** | [`docs/Rationale.md`](docs/Rationale.md) |
-| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2j |
+| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2o |
+| **What an order entry adapter must do** | [`docs/Adapters.md`](docs/Adapters.md) — connecting, failover, resend, status, state |
 
 `docs/Design.md` is the specification — read it before implementing anything, and update it in the
 same commit when the design changes.

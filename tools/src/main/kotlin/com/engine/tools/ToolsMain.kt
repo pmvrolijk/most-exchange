@@ -18,6 +18,7 @@ private val USAGE = """
       most purge  [--trading-date YYYYMMDD] [--shard N]
       most image  [--shard N]
       most cancel-all --participant ID [--symbol SYM | --shard N]
+      most status --participant ID [--symbol SYM | --shard N]
       most cluster [--dir DIR] [--fresh] [--member-id N --members SPEC] [--ipc-ingress]
       most cluster snapshot [--ingress 0=HOST:PORT [--identity ID --secret-file F] | --dir DIR]
       most cluster shutdown [--dir DIR]
@@ -37,6 +38,10 @@ private val USAGE = """
       cancel-all  Cancel every resting order of one participant, on one security or on the
                   whole shard. The operator side of revocation: publish the participant's
                   move to cancelOnly first, then send this. --participant is required.
+      status      Every open order of one participant, as the engine holds it now, and where
+                  its report sequence stands: the reconciliation at the open, or after a
+                  resend answered TRUNCATED (Design.md §5). Sent through the participant's
+                  own gateway; answered, unlike cancel-all.
       cluster     Run a cluster host: media driver, archive and consensus module. Alone it
                   is a single-node cluster; for several, pass every node the same --members
                   (id,ingress,consensus,log,catchup,archive|...) and each its own
@@ -115,6 +120,7 @@ fun main(argv: Array<String>) {
             "purge" -> runPurge(args)
             "image" -> runImage(args)
             "cancel-all" -> runCancelAll(args)
+            "status" -> runStatus(args)
             "cluster" -> runCluster(args)
             "counters" -> runCounters(args)
             else -> {

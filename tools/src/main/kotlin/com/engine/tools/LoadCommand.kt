@@ -1,5 +1,7 @@
 package com.engine.tools
 
+import com.engine.reference.OperatorCommands
+import com.engine.reference.ParticipantRequests
 import com.engine.reference.PriceCodec
 import com.engine.reference.RoutedSecurity
 import com.engine.sbe.ClientExecutionReportDecoder
@@ -7,10 +9,11 @@ import com.engine.sbe.ExecType
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleEncoder
+import com.engine.sbe.OrderMassStatusCompleteDecoder
 import com.engine.sbe.RejectReason
 import com.engine.sbe.ReportResendCompleteDecoder
 import com.engine.sbe.ReportResendRequestEncoder
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import io.aeron.Aeron
@@ -155,12 +158,15 @@ private fun execute(
     if (!run.aborted) {
         var fencedOn = run.activeGateway
         sendFence(orders, run, ordersBefore = spec.count)
-        while (System.nanoTime() < drainDeadline + spec.drainMs * 1_000_000L && run.pendingCompletions > 0) {
+        while (System.nanoTime() < drainDeadline + spec.drainMs * 1_000_000L &&
+            (run.pendingCompletions > 0 || run.statusPending > 0 || run.statusOwed())
+        ) {
             // Refused by a standby: the receiver has moved on, so fence again where it went.
             if (run.activeGateway != fencedOn) {
                 fencedOn = run.activeGateway
                 sendFence(orders, run, ordersBefore = spec.count)
             }
+            if (run.statusOwed()) sendStatusRequests(orders, run)
             Thread.onSpinWait()
         }
     }
@@ -199,10 +205,13 @@ private fun send(gateways: List<Publication>, spec: LoadSpec, pool: OrderPool, r
             run.fenceWanted = false
             sendFence(gateways, run, ordersBefore = i)
         }
+        // A resend came back TRUNCATED: the reports it could not send are gone, so ask what is open.
+        if (run.statusOwed()) sendStatusRequests(gateways, run)
         val dueNs = startNs + i * spec.delayNs
         if (spec.delayNs > 0L) awaitDue(dueNs)
 
         val slot = pool.slotFor(i)
+        run.participantOfOrder[i] = (pool.participantId[slot] - spec.participantBase).toInt()
         val sentNs = System.nanoTime()
         // Written before the claim is committed, so the release store in commit() publishes it.
         // The receiver reads it only after acquiring the report that this send caused, and every
@@ -320,7 +329,7 @@ private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: I
     val header = MessageHeaderEncoder()
     val encoder = ReportResendRequestEncoder()
     val claim = BufferClaim()
-    val length = MessageHeaderEncoder.ENCODED_LENGTH + ReportResendRequestEncoder.BLOCK_LENGTH
+    val length = ParticipantRequests.RESEND_REQUEST_LENGTH
     val generation = run.fenceGeneration + 1
     run.fenceOrders[generation.toInt() and FENCE_SLOTS_MASK] = ordersBefore
     run.pendingCompletions = run.spec.participantCount
@@ -331,10 +340,11 @@ private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: I
         while (true) {
             val result = gateways[run.activeGateway].tryClaim(length, claim)
             if (result > 0L) {
-                encoder.wrapAndApplyHeader(claim.buffer(), claim.offset(), header)
-                    .participantId(run.ledger.participantId(p))
-                    .requestId(generation)
-                    .fromSeq(run.ledger.firstMissing(p))
+                // A plain publication: encode at claim.offset(), with no cluster session header.
+                ParticipantRequests.encodeReportResendRequest(
+                    claim.buffer(), claim.offset(), run.ledger.participantId(p), generation,
+                    run.ledger.firstMissing(p), encoder, header,
+                )
                 claim.commit()
                 break
             }
@@ -347,6 +357,39 @@ private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: I
                 System.err.println("most: could not send a resend request (${describeOfferResult(result)})")
                 run.pendingCompletions = 0
                 return
+            }
+            Thread.onSpinWait()
+        }
+    }
+}
+
+/**
+ * An `OrderMassStatusRequest` for each participant whose resend came back `TRUNCATED` (Design.md §5,
+ * "Order mass status"): every one of its open orders is then stated, and its report sequence resumes
+ * from the completion. Sent after the fence on the same path, so the status is at least as new.
+ */
+private fun sendStatusRequests(gateways: List<Publication>, run: LoadRun) {
+    val claim = BufferClaim()
+    for (p in 0..<run.spec.participantCount) {
+        if (run.statusWanted.getAndSet(p, 0) == 0) continue
+        var attempts = 0
+        while (true) {
+            val result = gateways[run.activeGateway].tryClaim(ParticipantRequests.MASS_STATUS_REQUEST_LENGTH, claim)
+            if (result > 0L) {
+                ParticipantRequests.encodeOrderMassStatusRequest(
+                    claim.buffer(), claim.offset(), run.ledger.participantId(p), run.fenceGeneration,
+                    OperatorCommands.ALL_SECURITIES,
+                )
+                claim.commit()
+                run.statusPending++
+                run.statusRequests++
+                break
+            }
+            if (result != Publication.BACK_PRESSURED && result != Publication.ADMIN_ACTION ||
+                ++attempts >= BACKPRESSURE_RETRY_LIMIT
+            ) {
+                System.err.println("most: could not send a mass status request (${describeOfferResult(result)})")
+                break
             }
             Thread.onSpinWait()
         }
@@ -384,6 +427,7 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
     var polling = 0
 
     val completion = ReportResendCompleteDecoder()
+    val statusCompletion = OrderMassStatusCompleteDecoder()
     val assembler = FragmentAssembler { buffer, offset, length, _ ->
         if (length >= MessageHeaderDecoder.ENCODED_LENGTH) {
             header.wrap(buffer, offset)
@@ -394,12 +438,18 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
                 )
                 run.onCompletion(completion)
                 // A standby refusing the fence moves the run on, exactly as it would an order.
-                if (completion.status() == ResendStatus.GATEWAY_UNAVAILABLE &&
+                if (completion.status() == RequestStatus.GATEWAY_UNAVAILABLE &&
                     polling == run.activeGateway && subscriptions.size > 1
                 ) {
                     run.activeGateway = (polling + 1) % subscriptions.size
                     run.rejectSwitches++
                 }
+            } else if (header.templateId() == OrderMassStatusCompleteDecoder.TEMPLATE_ID) {
+                statusCompletion.wrap(
+                    buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH,
+                    header.blockLength(), header.version(),
+                )
+                run.onStatusCompletion(statusCompletion)
             } else if (header.templateId() == ClientExecutionReportDecoder.TEMPLATE_ID) {
                 decoder.wrap(
                     buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH,
@@ -409,6 +459,10 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
                 val gapsBefore = run.ledger.gapsOpened
                 if (!run.ledger.accept(decoder.participantId(), decoder.reportSeq())) return@FragmentAssembler
                 if (run.ledger.gapsOpened != gapsBefore) run.fenceWanted = true
+                if (decoder.execType() == ExecType.ORDER_STATUS) {
+                    run.onOrderStatus(decoder, System.nanoTime())
+                    return@FragmentAssembler
+                }
                 run.onReport(decoder, System.nanoTime())
                 // A co-located gateway on a node that does not lead refuses every order this way.
                 // Move on from it once -- the rejects still in flight from it must not move again.
@@ -479,13 +533,60 @@ private class LoadRun(val spec: LoadSpec) {
     var refusedFences = 0L
     var missingAfterComplete = 0L
 
+    /** Which participant sent each order, as an index into the run's participants. Sender thread. */
+    val participantOfOrder = IntArray(spec.count)
+
+    // Mass status after a truncated resend (Design.md §5, "Order mass status").
+    val statusWanted = java.util.concurrent.atomic.AtomicIntegerArray(spec.participantCount)
+    val truncatedParticipant = BooleanArray(spec.participantCount)
+    @Volatile var statusPending = 0
+    var statusRequests = 0L
+    var foundOpenByStatus = 0L
+    var lostReports = 0L
+    var statusReportsSeen = 0L
+
+    fun statusOwed(): Boolean {
+        for (p in 0..<spec.participantCount) if (statusWanted.get(p) != 0) return true
+        return false
+    }
+
+    fun onStatusCompletion(decoder: OrderMassStatusCompleteDecoder) {
+        val p = (decoder.participantId() - spec.participantBase).toInt()
+        if (p !in 0..<spec.participantCount) return
+        if (decoder.status() == RequestStatus.COMPLETE) ledger.resumeFrom(p, decoder.nextSeq())
+        statusPending--
+    }
+
+    /**
+     * An open order stated by a mass status. If the run never heard of it, this is its answer: it was
+     * sequenced and it rests. Not a round trip, so not timed.
+     */
+    fun onOrderStatus(decoder: ClientExecutionReportDecoder, nowNs: Long) {
+        statusReportsSeen++
+        val index = decoder.clOrdId() - spec.clOrdIdBase
+        if (index < 0L || index >= spec.count) return
+        val i = index.toInt()
+        if (sendNs[i] == 0L || ackNs[i] != 0L) return
+        ackNs[i] = nowNs
+        answered++
+        foundOpenByStatus++
+    }
+
     fun onCompletion(decoder: ReportResendCompleteDecoder) {
         if (decoder.requestId() != fenceGeneration) return // an older fence, superseded by a switch
         val p = (decoder.participantId() - spec.participantBase).toInt()
         when (decoder.status()) {
-            ResendStatus.COMPLETE, ResendStatus.TRUNCATED -> {
+            RequestStatus.COMPLETE, RequestStatus.TRUNCATED -> {
                 replayed += decoder.replayedCount()
-                if (decoder.status() == ResendStatus.TRUNCATED) truncated++
+                if (decoder.status() == RequestStatus.TRUNCATED && p in 0..<spec.participantCount) {
+                    truncated++
+                    // Every sequenced order has at least one report, so no more orders than this
+                    // can hide in the window the ring no longer reaches.
+                    lostReports += (decoder.oldestRetainedSeq() - decoder.fromSeq()).coerceAtLeast(0L)
+                    // Reports are gone that no resend can bring back; ask what is still open.
+                    truncatedParticipant[p] = true
+                    statusWanted.set(p, 1)
+                }
                 else if (p in 0..<spec.participantCount) missingAfterComplete += ledger.missingBelow(p, decoder.nextSeq())
                 if (--pendingCompletions == 0) {
                     settledBefore = fenceOrders[decoder.requestId().toInt() and FENCE_SLOTS_MASK]
@@ -644,17 +745,40 @@ private fun printSummary(
         )
     }
 
+    if (run.statusRequests > 0L) {
+        println(
+            "  status         %,d mass status requests after a truncated resend: %,d open orders stated, %,d of them otherwise unanswered".format(
+                Locale.ROOT, run.statusRequests, run.statusReportsSeen, run.foundOpenByStatus,
+            )
+        )
+    }
+
     val unanswered = run.sent - run.answered
     println("  unanswered     %,d orders never saw a report".format(Locale.ROOT, unanswered.coerceAtLeast(0)))
     if (unanswered > 0) {
         // Settled by a fence: sequenced orders have their reports by now, so these never were.
         var neverSequenced = 0
         var unknown = 0
+        var finishedOrNeverSent = 0
         for (i in 0..<spec.count) {
             if (run.sendNs[i] == 0L || run.ackNs[i] != 0L) continue
-            if (i < run.settledBefore) neverSequenced++ else unknown++
+            when {
+                i >= run.settledBefore -> unknown++
+                // Its participant's resend was TRUNCATED, and the mass status did not find it open:
+                // it either never reached the log or finished in the window no resend reaches back to.
+                run.truncatedParticipant[run.participantOfOrder[i]] -> finishedOrNeverSent++
+                else -> neverSequenced++
+            }
         }
         println("  never sent     %,d of them never sequenced, proven by a completed resend fence".format(Locale.ROOT, neverSequenced))
+        if (finishedOrNeverSent > 0) {
+            println(
+                (
+                    "  ambiguous      %,d not open, after a TRUNCATED resend: never sequenced, or finished in the " +
+                        "lost window -- at most %,d of them, the reports lost"
+                    ).format(Locale.ROOT, finishedOrNeverSent, run.lostReports)
+            )
+        }
         println("  unknown        %,d orders whose fate no fence settled".format(Locale.ROOT, unknown))
     }
     if (run.foreignReports > 0L) {

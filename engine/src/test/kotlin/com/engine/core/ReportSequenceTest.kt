@@ -1,6 +1,6 @@
 package com.engine.core
 
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import io.aeron.cluster.service.Cluster
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -86,7 +86,7 @@ class ReportSequenceTest {
         assertEquals(listOf(2L, 3L), replayed.map { it.reportSeq })
         assertEquals(listOf(200L, 201L), replayed.map { it.clOrdId }, "the original reports, not new ones")
         assertEquals(
-            ResendCompletion(MAKER, 41L, 2L, nextSeq = 4L, oldestRetainedSeq = 1L, replayedCount = 2, status = ResendStatus.COMPLETE),
+            ResendCompletion(MAKER, 41L, 2L, nextSeq = 4L, oldestRetainedSeq = 1L, replayedCount = 2, status = RequestStatus.COMPLETE),
             harness.session.completions.single(),
         )
     }
@@ -114,7 +114,7 @@ class ReportSequenceTest {
 
         assertEquals(2, harness.reportsOf(MAKER).size)
         assertEquals(
-            ResendCompletion(MAKER, 5L, 9L, nextSeq = 3L, oldestRetainedSeq = 1L, replayedCount = 0, status = ResendStatus.COMPLETE),
+            ResendCompletion(MAKER, 5L, 9L, nextSeq = 3L, oldestRetainedSeq = 1L, replayedCount = 0, status = RequestStatus.COMPLETE),
             harness.session.completions.single(),
         )
     }
@@ -124,7 +124,7 @@ class ReportSequenceTest {
         val harness = continuous()
         harness.reportResendRequest(MAKER, fromSeq = 1L)
         assertEquals(
-            ResendCompletion(MAKER, 1L, 1L, nextSeq = 1L, oldestRetainedSeq = 1L, replayedCount = 0, status = ResendStatus.COMPLETE),
+            ResendCompletion(MAKER, 1L, 1L, nextSeq = 1L, oldestRetainedSeq = 1L, replayedCount = 0, status = RequestStatus.COMPLETE),
             harness.session.completions.single(),
         )
     }
@@ -139,7 +139,7 @@ class ReportSequenceTest {
 
         assertEquals(listOf(3L, 4L, 5L, 6L), harness.reportsOf(MAKER).drop(6).map { it.reportSeq })
         assertEquals(
-            ResendCompletion(MAKER, 1L, 1L, nextSeq = 7L, oldestRetainedSeq = 3L, replayedCount = 4, status = ResendStatus.TRUNCATED),
+            ResendCompletion(MAKER, 1L, 1L, nextSeq = 7L, oldestRetainedSeq = 3L, replayedCount = 4, status = RequestStatus.TRUNCATED),
             harness.session.completions.single(),
         )
     }
@@ -155,7 +155,7 @@ class ReportSequenceTest {
 
         assertEquals(listOf(3L), harness.reportsOf(MAKER).drop(3).map { it.reportSeq })
         val answer = harness.session.completions.single()
-        assertEquals(ResendStatus.TRUNCATED, answer.status)
+        assertEquals(RequestStatus.TRUNCATED, answer.status)
         assertEquals(3L, answer.oldestRetainedSeq)
         assertEquals(3L, harness.service.lastReportSeq(TAKER), "a resend for one participant numbers nothing for another")
     }
@@ -173,7 +173,7 @@ class ReportSequenceTest {
         node.reportResendRequest(MAKER, fromSeq = 1L)
 
         assertEquals(listOf(1L, 2L), node.reportsOf(MAKER).map { it.reportSeq })
-        assertEquals(ResendStatus.COMPLETE, node.session.completions.single().status)
+        assertEquals(RequestStatus.COMPLETE, node.session.completions.single().status)
     }
 
     @Test

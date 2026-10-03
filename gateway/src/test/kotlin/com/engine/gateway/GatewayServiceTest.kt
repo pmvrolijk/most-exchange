@@ -10,7 +10,7 @@ import com.engine.sbe.NewOrderSingleEncoder
 import com.engine.sbe.OrderCancelRequestEncoder
 import com.engine.sbe.RejectReason
 import com.engine.sbe.ReportResendCompleteDecoder
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import org.agrona.DirectBuffer
@@ -34,6 +34,16 @@ data class ClientReport(
     val reportSeq: Long = 0L,
 )
 
+/** An OrderMassStatusComplete as the client received it. */
+data class StatusCompletion(
+    val participantId: Long,
+    val requestId: Long,
+    val nextSeq: Long,
+    val orderCount: Int,
+    val securityId: Int,
+    val status: RequestStatus,
+)
+
 /** A ReportResendComplete as the client received it. */
 data class ResendCompletion(
     val participantId: Long,
@@ -42,13 +52,15 @@ data class ResendCompletion(
     val nextSeq: Long,
     val oldestRetainedSeq: Long,
     val replayedCount: Int,
-    val status: ResendStatus,
+    val status: RequestStatus,
 )
 
 class RecordingSink : GatewaySink {
     val toCluster = mutableListOf<Int>()
     val toClient = mutableListOf<ClientReport>()
     val resends = mutableListOf<ResendCompletion>()
+    val statuses = mutableListOf<StatusCompletion>()
+    private val statusCompletion = com.engine.sbe.OrderMassStatusCompleteDecoder()
 
     /** What the next offer to the cluster should pretend to be. */
     var clusterOffer = ClusterOffer.SENT
@@ -64,6 +76,12 @@ class RecordingSink : GatewaySink {
 
     override fun toClient(buffer: DirectBuffer, offset: Int, length: Int) {
         header.wrap(buffer, offset)
+        if (header.templateId() == com.engine.sbe.OrderMassStatusCompleteDecoder.TEMPLATE_ID) {
+            val d = statusCompletion
+            d.wrap(buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version())
+            statuses += StatusCompletion(d.participantId(), d.requestId(), d.nextSeq(), d.orderCount(), d.securityId(), d.status())
+            return
+        }
         if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID) {
             completion.wrap(buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version())
             resends += ResendCompletion(

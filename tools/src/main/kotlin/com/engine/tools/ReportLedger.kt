@@ -46,6 +46,18 @@ class ReportLedger(private val participantBase: Long, participantCount: Int) {
         return true
     }
 
+    /**
+     * A mass status answered at [nextSeq] (Design.md §5, "Order mass status"): it states every open
+     * order as of every report below [nextSeq], so those reports are no longer owed. Used when a resend
+     * came back `TRUNCATED` and the reports it could not send are gone.
+     */
+    fun resumeFrom(participantIndex: Int, nextSeq: Long) {
+        if (nextSeq <= 1L) return
+        seen[participantIndex].set(0, (nextSeq - 1).toInt())
+        if (highest[participantIndex] < nextSeq - 1) highest[participantIndex] = nextSeq - 1
+        firstMissing[participantIndex] = seen[participantIndex].nextClearBit(0).toLong() + 1
+    }
+
     /** Where a resend for this participant should start. */
     fun firstMissing(participantIndex: Int): Long = firstMissing[participantIndex]
 

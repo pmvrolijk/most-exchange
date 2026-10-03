@@ -15,7 +15,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 same commit when the design changes.
 
 Eight modules — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`,
-`control` — all implemented, 633 tests passing. See `docs/Status.md` §1 for what is real.
+`control` — all implemented, 668 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -172,6 +172,9 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   engine cannot wait for a gateway it learns of only through the log it would be blocked on. → R§16
 - **`ClientSession.MOCKED_OFFER` is `1`: check for it before `result > 0`**, and never let a test fake
   return 1 for a real claim. → R§16
+- **An `ORDER_STATUS` report is state, not an event** — `reportSeq` 0, never numbered, never put in
+  the ring, never replayed. Its completion's `nextSeq` is where a client resumes its sequence; that
+  is how a `TRUNCATED` resend is closed (Design.md §5, "Order mass status").
 - **Feed sequences are namespaced by shard**, each numbering from 1. `FeedSequenceTracker` in
   `reference` distinguishes a gap from a replay.
 

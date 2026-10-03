@@ -9,7 +9,7 @@ import com.engine.sbe.NewOrderSingleEncoder
 import com.engine.sbe.RejectReason
 import com.engine.sbe.ReportResendCompleteEncoder
 import com.engine.sbe.ReportResendRequestEncoder
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import com.engine.sbe.Side
 import com.engine.sbe.SmpStrategy
 import org.agrona.concurrent.UnsafeBuffer
@@ -116,7 +116,7 @@ class GatewayResendTest {
         assertTrue(sink.toCluster.isEmpty())
         assertEquals(
             ResendCompletion(14L, 77L, 5L, nextSeq = 0L, oldestRetainedSeq = 0L, replayedCount = 0,
-                status = ResendStatus.UNAUTHORIZED_PARTICIPANT),
+                status = RequestStatus.UNAUTHORIZED_PARTICIPANT),
             sink.resends.single(),
         )
         assertEquals(1L, service.unauthorizedRejects)
@@ -128,7 +128,7 @@ class GatewayResendTest {
         assertEquals(ClientMessageAction.CONSUME, resendRequest(7L, requestId = 78L))
 
         val answer = sink.resends.single()
-        assertEquals(ResendStatus.GATEWAY_UNAVAILABLE, answer.status)
+        assertEquals(RequestStatus.GATEWAY_UNAVAILABLE, answer.status)
         assertEquals(78L, answer.requestId)
         assertEquals(0, answer.replayedCount)
     }
@@ -148,10 +148,10 @@ class GatewayResendTest {
         val b = UnsafeBuffer(ByteArray(512))
         ReportResendCompleteEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
             .participantId(7).requestId(55).fromSeq(12).nextSeq(30).oldestRetainedSeq(3)
-            .replayedCount(18).status(ResendStatus.COMPLETE)
+            .replayedCount(18).status(RequestStatus.COMPLETE)
         service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ReportResendCompleteEncoder.BLOCK_LENGTH)
 
-        assertEquals(ResendCompletion(7L, 55L, 12L, 30L, 3L, 18, ResendStatus.COMPLETE), sink.resends.single())
+        assertEquals(ResendCompletion(7L, 55L, 12L, 30L, 3L, 18, RequestStatus.COMPLETE), sink.resends.single())
         assertTrue(sink.toClient.isEmpty(), "a completion is not an execution report")
     }
 

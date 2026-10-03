@@ -185,6 +185,28 @@ class AllocationTest {
         assertTrue(driver.service.replayedReports >= 10L * 5_000, "the replay must actually have run")
     }
 
+    /**
+     * Design.md §5, "Order mass status": the status walks the ladders and encodes one report per open
+     * order straight into a claim. It is the reconciliation every participant runs at the open, so it
+     * must cost the walk and the reports and nothing more.
+     */
+    @Test
+    fun `an order mass status allocates nothing`() {
+        val driver = Driver()
+        var clOrdId = 0L
+        driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - 1, 1L)
+        driver.orderMassStatus(1L)
+        driver.cancelParticipantOrders(1L)
+
+        assertNoSteadyStateAllocation("an order mass status", opsPerRound = 12, rounds = 5_000) {
+            // Ten open orders, a status stating all ten and its completion, then the book cleared.
+            repeat(10) { driver.newOrder(1L, clOrdId++, Side.BUY, Alloc.PRICE - 1, 1L) }
+            driver.orderMassStatus(1L)
+            driver.cancelParticipantOrders(1L)
+        }
+        assertTrue(driver.service.statusReports >= 10L * 5_000, "the status must actually have stated the orders")
+    }
+
     @Test
     fun `the expiry purge allocates nothing`() {
         val driver = Driver()

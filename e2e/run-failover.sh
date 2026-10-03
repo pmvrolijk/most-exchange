@@ -30,6 +30,9 @@ RATE="${RATE:-2000}"            # orders per second through the second failover
 LOAD_SECONDS="${LOAD_SECONDS:-20}"
 STOP_AFTER="${STOP_AFTER:-5}"   # seconds into the load before the leader is stopped
 EGRESS_CHANNEL="${EGRESS_CHANNEL:-aeron:udp?endpoint=localhost:0}"   # independent only
+# Reports each node retains for a resend. Set it small (e.g. 256) to force the fence TRUNCATED and
+# exercise the mass status that reconciles it (Design.md §5, "Order mass status").
+REPORT_RETENTION="${REPORT_RETENTION:-}"
 
 rm -rf "$RUN"; mkdir -p "$LOGS"
 
@@ -110,6 +113,7 @@ engine.aeronDir=$RUN/node$n/driver
 engine.clusterDir=$RUN/node$n/cluster
 engine.bookEvent.channel=aeron:ipc
 engine.bookEvent.streamId=12
+${REPORT_RETENTION:+engine.reportRetention=$REPORT_RETENTION}
 EOF
 done
 
@@ -342,6 +346,14 @@ grep -q "STILL MISSING" "$RUN/load.out" && fail "a complete resend left reports 
 UNKNOWN=$(grep -oE "unknown +[0-9,]+" "$RUN/load.out" | grep -oE "[0-9,]+" | tr -d , || true)
 [ "${UNKNOWN:-0}" = 0 ] || fail "$UNKNOWN orders were left with no outcome after the failover"
 grep -q "recovery " "$RUN/load.out" || fail "no resend fence was sent across the failover"
-pass "every order the load sent was answered, or proven never sequenced by a resend fence"
+if [ -n "$REPORT_RETENTION" ] && grep -qE "recovery .* [1-9][0-9,]* truncated" "$RUN/load.out"; then
+  # The ring did not reach back: the reports it lost are gone, and a mass status must have stated
+  # every order still open. What it cannot settle -- finished in the lost window, or never sent -- is
+  # printed as ambiguous rather than passed off as either.
+  grep -q "status .*mass status requests after a truncated resend" "$RUN/load.out" \
+    || fail "a TRUNCATED resend was not followed by a mass status"
+  pass "a TRUNCATED resend was reconciled by a mass status"
+fi
+pass "every order the load sent was answered, or settled by a resend fence"
 echo
 echo "PASS ($PLACEMENT): two failovers, routes followed the active gateway, and no order was left unknown"

@@ -971,6 +971,8 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `9` | `ReportResendRequest` | Inbound, participant | Cluster ingress |
 | `10` | `ExecutionReport` | Outbound, private | Cluster egress |
 | `11` | `ReportResendComplete` | Outbound, private; forwarded to the client unchanged | Cluster egress, then the gateway's client stream |
+| `12` | `OrderMassStatusRequest` | Inbound, participant | Cluster ingress |
+| `13` | `OrderMassStatusComplete` | Outbound, private; forwarded to the client unchanged | Cluster egress, then the gateway's client stream |
 | `20` | `OrderAdded` | Outbound, book event | IPC 12 |
 | `21` | `OrderReduced` | Outbound, book event | IPC 12 |
 | `22` | `OrderRemoved` | Outbound, book event | IPC 12 |
@@ -1146,6 +1148,41 @@ deferred: the client fence is needed for the never-sequenced orders either way.
   `participantSeqCount` on `SnapshotEngineState`. The ring is not snapshotted.
 - `engine.reportRetention` is in the engine fingerprint.
 
+#### Order mass status
+
+**A participant can ask for the state of every open order it has** (decided 2026-10-03; FIX's
+OrderMassStatusRequest; schema v7). It serves two purposes. It reconciles at the open. And it closes
+a resend that came back `TRUNCATED`, for every order that is still open.
+
+* **`OrderMassStatusRequest(participantId, requestId, securityId)`**, where `securityId` -1 means
+  every book on the shard, as for `CancelParticipantOrders`. The gateway checks it as it checks a
+  cancel and refuses with an `OrderMassStatusComplete` of status `UNAUTHORIZED_PARTICIPANT` or
+  `GATEWAY_UNAVAILABLE`. The engine sequences it like an order, so the answer is the state at one log
+  position.
+* **One `ExecutionReport` with ExecType `ORDER_STATUS` per open order**, on the requesting session,
+  stating `origQty`, `cumQty` and `leavesQty`, with `lastQty` 0. **A status is state, not an event:**
+  it carries `reportSeq` 0, consumes no number, is not retained and is never replayed.
+* **Then `OrderMassStatusComplete(orderCount, nextSeq, securityId, status)`.** `nextSeq` is the
+  participant's next `reportSeq` at the request's position, so the status describes the participant
+  as of every report below it. **A client resumes its report sequence from `nextSeq`**, which is what
+  closes a truncated resend: the reports below it that the ring no longer held are covered by the
+  status. Status is `UNKNOWN_SECURITY`, with nothing stated, for a security the shard does not host.
+* **Cost:** one walk of the shard's resting orders per request (`OrderBook.forEachRestingOrder`), the
+  same walk as a bulk cancel and as a snapshot, whoever's orders they are. Allocation-free
+  (`AllocationTest`). Not measured at depth.
+
+**What it does not recover.** An order that *finished* inside a truncated window (filled, cancelled
+or expired) is no longer in the book, so the status cannot state it. The client learns that it is
+not open, but not whether it was never sequenced or finished, nor, for a fill, at what price and
+quantity. The completions bound it: no more of a participant's orders can hide there than
+`oldestRetainedSeq − fromSeq`, the reports lost. Measured with a deliberately tiny ring (F5): at most
+139 of 9,709 unanswered orders. Closing that needs a durable record of trades, a drop copy, which is
+§8's open item.
+
+`most status --participant N [--symbol SYM | --shard N]` is the CLI. `most load` sends one after any
+`TRUNCATED` resend and prints what it settled. `run-e2e.sh` step 6a checks a partially filled order's
+quantities on a real node.
+
 #### Feed Transport
 
 The feeds are published **in SBE form over Aeron UDP multicast**, with unicast channels as a fallback
@@ -1262,7 +1299,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="com.engine.sbe" id="1" version="6"
+                   package="com.engine.sbe" id="1" version="7"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1314,6 +1351,10 @@ answers, and a consumer must not render the first when it means the second.
       <validValue name="CANCELED">2</validValue>
       <validValue name="EXPIRED">3</validValue>
       <validValue name="REJECTED">4</validValue>
+      <!-- Not an event: the state of one open order, sent in answer to an OrderMassStatusRequest
+           (FIX ExecType I). Carries reportSeq 0, is not retained and is never replayed. Added in
+           version 7. -->
+      <validValue name="ORDER_STATUS">5</validValue>
     </enum>
     <enum name="Phase" encodingType="int8">
       <validValue name="CLOSED">0</validValue>
@@ -1346,15 +1387,17 @@ answers, and a consumer must not render the first when it means the second.
            never emits it, since a message it never saw cannot be rejected by it. -->
       <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
     </enum>
-    <!-- How a ReportResendRequest ended. COMPLETE: every report from fromSeq up to nextSeq has been
-         sent again. TRUNCATED: the reports from fromSeq up to oldestRetainedSeq were no longer
-         retained and cannot be sent again; the rest were. The two refusals are the gateway's, for the
-         same reasons it refuses an order, and mean nothing was replayed. -->
-    <enum name="ResendStatus" encodingType="int8">
+    <!-- How a participant's request ended: a ReportResendRequest or an OrderMassStatusRequest.
+         COMPLETE: everything asked for was sent. TRUNCATED (resend only): the reports from fromSeq
+         up to oldestRetainedSeq were no longer retained and cannot be sent again; the rest were.
+         UNKNOWN_SECURITY (status only): the shard does not host the security named. The two refusals
+         are the gateway's, for the same reasons it refuses an order, and mean nothing was sent. -->
+    <enum name="RequestStatus" encodingType="int8">
       <validValue name="COMPLETE">0</validValue>
       <validValue name="TRUNCATED">1</validValue>
       <validValue name="UNAUTHORIZED_PARTICIPANT">2</validValue>
       <validValue name="GATEWAY_UNAVAILABLE">3</validValue>
+      <validValue name="UNKNOWN_SECURITY">4</validValue>
     </enum>
   </types>
 
@@ -1435,6 +1478,18 @@ answers, and a consumer must not render the first when it means the second.
     <field name="fromSeq"       id="3" type="SeqNum"/>
   </sbe:message>
 
+  <!-- A participant asking for the state of all its open orders (Design.md §5, "Order mass
+       status"), FIX's OrderMassStatusRequest: to reconcile at the open, or after a resend answered
+       TRUNCATED. securityId -1 means every book on the shard, as for CancelParticipantOrders. The
+       gateway checks it as it checks a cancel. Sequenced like an order, so the answer is the state at
+       one log position: an ExecutionReport with ExecType ORDER_STATUS per open order, then
+       OrderMassStatusComplete. Added in version 7. -->
+  <sbe:message name="OrderMassStatusRequest" id="12" blockLength="24" sinceVersion="7">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="securityId"    id="3" type="SecurityId"/>
+  </sbe:message>
+
   <sbe:message name="SecurityDefinition" id="5" blockLength="40">
     <field name="referencePrice"    id="1" type="Price"/>
     <field name="priceFloor"        id="2" type="Price"/>
@@ -1487,7 +1542,22 @@ answers, and a consumer must not render the first when it means the second.
     <field name="nextSeq"           id="4" type="SeqNum"/>
     <field name="oldestRetainedSeq" id="5" type="SeqNum"/>
     <field name="replayedCount"     id="6" type="OrderCount"/>
-    <field name="status"            id="7" type="ResendStatus"/>
+    <field name="status"            id="7" type="RequestStatus"/>
+  </sbe:message>
+
+  <!-- The end of a mass status: orderCount ORDER_STATUS reports were sent before it. nextSeq is the
+       participant's next reportSeq at the request's log position, so the status is the state as of
+       every report below it; a client resumes its report sequence from there, which closes a
+       TRUNCATED resend for every order still open. The engine emits it on the requesting session; the
+       gateway forwards it unchanged, and emits one itself, with nothing sent, when it refuses the
+       request. Added in version 7. -->
+  <sbe:message name="OrderMassStatusComplete" id="13" blockLength="40" sinceVersion="7">
+    <field name="participantId" id="1" type="ParticipantId"/>
+    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="nextSeq"       id="3" type="SeqNum"/>
+    <field name="orderCount"    id="4" type="OrderCount"/>
+    <field name="securityId"    id="5" type="SecurityId"/>
+    <field name="status"        id="6" type="RequestStatus"/>
   </sbe:message>
 
   <!-- =================== Outbound: book events ======================= -->
@@ -3318,8 +3388,11 @@ It found three defects that unit tests could not:
 
   Still open:
   - a request older than the ring (after a full-cluster restart, or a ring sized below the failover
-    window). It is answered `TRUNCATED` with `oldestRetainedSeq`, and the client reconciles by bulk
-    cancel (§4.8);
+    window). It is answered `TRUNCATED` with `oldestRetainedSeq`. ~~and the client reconciles by bulk
+    cancel (§4.8)~~ **The client reconciles with an order mass status** (§5, "Order mass status"),
+    which states every order still open and resumes the sequence. **Open underneath it:** an order
+    that finished inside the truncated window, which nothing can state. The bound on how many is
+    printed, and closing it needs a durable trade record (a drop copy);
   - a client that has lost its own record of what it sent;
   - a participant whose *last* report was dropped learns of it only at its next report or its next
     request;

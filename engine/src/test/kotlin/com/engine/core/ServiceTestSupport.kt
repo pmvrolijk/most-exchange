@@ -43,6 +43,16 @@ data class Report(
     val reportSeq: Long = 0L,
 )
 
+/** An `OrderMassStatusComplete`, captured off a fake session's egress. */
+data class MassStatusCompletion(
+    val participantId: Long,
+    val requestId: Long,
+    val nextSeq: Long,
+    val orderCount: Int,
+    val securityId: Int,
+    val status: com.engine.sbe.RequestStatus,
+)
+
 /** A `ReportResendComplete`, captured off a fake session's egress. */
 data class ResendCompletion(
     val participantId: Long,
@@ -51,7 +61,7 @@ data class ResendCompletion(
     val nextSeq: Long,
     val oldestRetainedSeq: Long,
     val replayedCount: Int,
-    val status: com.engine.sbe.ResendStatus,
+    val status: com.engine.sbe.RequestStatus,
 )
 
 /**
@@ -88,6 +98,8 @@ class FakeSession(
 
     val reports: List<Report> get() = sink
     val completions = mutableListOf<ResendCompletion>()
+    val statusCompletions = mutableListOf<MassStatusCompletion>()
+    private val statusCompletionDecoder = com.engine.sbe.OrderMassStatusCompleteDecoder()
 
     /**
      * What a real session answers off the leader: Aeron mocks a follower's egress and reports the
@@ -144,6 +156,14 @@ class FakeSession(
                     completionDecoder.participantId(), completionDecoder.requestId(), completionDecoder.fromSeq(),
                     completionDecoder.nextSeq(), completionDecoder.oldestRetainedSeq(),
                     completionDecoder.replayedCount(), completionDecoder.status(),
+                )
+                continue
+            }
+            if (header.templateId() == com.engine.sbe.OrderMassStatusCompleteDecoder.TEMPLATE_ID) {
+                val d = statusCompletionDecoder
+                d.wrap(buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH, header.blockLength(), header.version())
+                statusCompletions += MassStatusCompletion(
+                    d.participantId(), d.requestId(), d.nextSeq(), d.orderCount(), d.securityId(), d.status(),
                 )
                 continue
             }
@@ -465,6 +485,15 @@ class Harness(
             .requestId(requestId)
             .fromSeq(fromSeq)
         submit(MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.ReportResendRequestEncoder.BLOCK_LENGTH)
+    }
+
+    /** `OrderMassStatusRequest`: every open order of [participantId], or of it on one security. */
+    fun orderMassStatus(participantId: Long, securityId: Int = -1, requestId: Long = 1L) {
+        com.engine.sbe.OrderMassStatusRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(participantId)
+            .requestId(requestId)
+            .securityId(securityId)
+        submit(MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.OrderMassStatusRequestEncoder.BLOCK_LENGTH)
     }
 
     fun purge(tradingDate: Int) {

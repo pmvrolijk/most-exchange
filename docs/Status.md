@@ -4,8 +4,15 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2m),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03 (evening), in the session that made **every order end with an outcome across
-a failover** (Handover §2o). A per-participant `reportSeq` on every execution report, a ring of
+Last updated 2026-10-03 (late): **an order mass status** (schema v7, Design.md §5 "Order mass status";
+Handover §2o). A participant asks for every open order and gets one `ORDER_STATUS` report each plus
+`nextSeq`, which reconciles at the open and closes a `TRUNCATED` resend for every order still open
+(Measurements.md F5). `most status` is the CLI, and `run-e2e.sh` step 6a checks it on a real node.
+Orders that *finished* inside a truncated window stay ambiguous, with a printed bound; closing that
+needs a trade record.
+
+Earlier that evening, the session that made **every order end with an outcome across a failover**
+(Handover §2o). A per-participant `reportSeq` on every execution report, a ring of
 recent reports on every node, and a client `ReportResendRequest` that acts as a fence (schema v6,
 Design.md §5 "Report sequence and resend"). Through a leader's crash, ~65–95 reports per failover
 belonged to orders a node had **sequenced and never reported**. They are now recovered, every other
@@ -69,7 +76,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Modules | 8 — `sbe`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control` |
 | Kotlin | ~28,200 lines — 15,450 main across 71 files, 12,740 test across 63 |
 | Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 653, all passing |
+| Tests | 668, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -84,7 +91,7 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
 
 ```sh
-./gradlew clean build                        # 653 tests (control's need Docker)
+./gradlew clean build                        # 668 tests (control's need Docker)
 ./gradlew installDist && ./e2e/run-e2e.sh    # every process, a real trade, a load run
 ./e2e/run-restart.sh                         # does the shard come back with its book?
 ./e2e/run-cluster3.sh                        # three members: election, two failovers, a rejoin
@@ -227,10 +234,12 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    tell "never sequenced" from "resting", and a sequenced order's reports, a maker's fills included,
    can be dropped silently while the new leader takes over. Today's recourse is a bulk cancel and
    re-entry. **Decided 2026-10-03 (user): a per-participant report sequence, a retained-report ring
-   on every node, and a resend request that acts as a fence** (Design.md §8). **Built.** Still open
-   (Design.md §8): a resend older than the ring answers `TRUNCATED` and leaves a bulk cancel; resending
-   never-sequenced orders is the client's choice, and `most load` only counts them; pushed redelivery
-   was deferred.
+   on every node, and a resend request that acts as a fence** (Design.md §8). **Built.** A resend older
+   than the ring answers `TRUNCATED`, and ~~leaves a bulk cancel~~ **an order mass status now settles
+   every order still open** (schema v7). Still open (Design.md §8): an order that finished inside a
+   truncated window, which needs a durable trade record (the roadmap's "persisted TradeReports");
+   resending never-sequenced orders, which is the client's choice and which `most load` only counts;
+   pushed redelivery, deferred.
 4. **Authorisation is all-or-nothing.** One `ADMIN` role with full access. Also, a command refused
    locally before the send attempt is not audited, because the audit is written on the way out of
    the REST layer.

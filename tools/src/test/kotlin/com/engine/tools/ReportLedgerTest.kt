@@ -53,6 +53,19 @@ class ReportLedgerTest {
     }
 
     @Test
+    fun `a mass status resumes the sequence past reports a truncated resend could not send`() {
+        ledger.accept(20L, 1L)
+        ledger.accept(20L, 9L)          // 2 to 8 lost, and the ring no longer holds them
+        assertEquals(2L, ledger.firstMissing(0))
+
+        ledger.resumeFrom(0, nextSeq = 10L)
+
+        assertEquals(10L, ledger.firstMissing(0))
+        assertEquals(0L, ledger.missingBelow(0, nextSeq = 10L), "the status stands in for them")
+        assertTrue(ledger.accept(20L, 10L), "and the sequence carries on from there")
+    }
+
+    @Test
     fun `a participant outside the run is not tracked`() {
         assertTrue(ledger.accept(99L, 1L))
         assertTrue(ledger.accept(99L, 1L))

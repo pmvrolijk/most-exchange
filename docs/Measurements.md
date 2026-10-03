@@ -1015,6 +1015,19 @@ not idle, load average ~6.5–7).
 | F3 | 2026-10-03 | colocated | 40,000 | 9,674 | 94 reports | 9,674 | **0** | 4 (1 gap seen) | 4.87 s |
 | F4 | 2026-10-03 | independent | 40,000 | 6,463 | 66 reports | 6,463 | **0** | 2 (4 gaps seen) | 3.27 s |
 
+F5 forces the other case: `REPORT_RETENTION=16`, a ring far smaller than a failover's lost reports, so
+the fences come back `TRUNCATED`, and `most load` follows each with an order mass status (Design.md §5,
+"Order mass status"). Co-located, otherwise as F3.
+
+| run | date | placement | retention | truncated fences | open orders stated | unanswered found open | ambiguous | of which at most sequenced | **unknown** |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| F5 | 2026-10-03 | colocated | 16 | 8 | 5,298 | 9 | 9,709 | 139 | **0** |
+
+**What F5 says.** The mass status settles every order still open, 9 of which the client would otherwise
+never have heard of. What it cannot settle is an order that finished inside the lost window. It is
+printed as ambiguous, bounded by the reports lost: at most 139 of the 9,709 can have been sequenced
+at all. With the default ring (F3–F4) nothing was truncated.
+
 **What F3–F4 say.** The case the resend exists for is real: ~65–95 reports per failover belonged to
 orders a node had sequenced and never reported. Without the resend those orders rested or filled
 with no one told. With it, every order the load sent ends answered or proven never sequenced. The

@@ -235,6 +235,17 @@ sed -e "$STRIP" "$RUN/book.out" | grep -qE "100\.00 +6 " || fail "expected 6 rem
 sed -e "$STRIP" "$RUN/book.out" | grep -q "last 100.00 x 4" || fail "last trade not shown"
 
 echo
+echo "== 6a. the participant's own view: a mass status (Design.md §5, \"Order mass status\")"
+# Participant 7's one open order is the sell of 10 that traded 4. The status states it as the engine
+# holds it, and the completion says where 7's report sequence stands: NEW and the maker TRADE, so 2.
+$MOST status --participant 7 --shard 0 $CONN > "$RUN/status.out" 2>&1 || fail "status"
+cat "$RUN/status.out"
+grep -q "ORDER_STATUS .*clOrdId=1001 .*leaves 6 cum 4 of 10" "$RUN/status.out" \
+  || fail "the status did not state the partially filled sell as leaves 6, cum 4 of 10"
+grep -q "COMPLETE -- 1 open orders, as of reportSeq 2" "$RUN/status.out" \
+  || fail "the status completion did not say 1 open order as of reportSeq 2"
+
+echo
 echo "== 7. cancel the remainder"
 $MOST cancel --symbol AAPL --side sell --order-id 1 --orig-clordid 1001 --participant 7 \
   --follow 3 $CONN > "$RUN/cancel.out" 2>&1 || fail "cancel"
@@ -261,6 +272,9 @@ sed -e "$STRIP" "$RUN/book-bulk.out" | grep -qE "3 \(1\) +98\.00" || fail "parti
 sed -e "$STRIP" "$RUN/book-bulk.out" | tail -8 | grep -qE "99\.00|101\.00" \
   && fail "participant 7's orders are still on the book after the bulk cancel"
 # The engine's own count, read at shutdown in step 9: exactly the two of participant 7's.
+$MOST status --participant 7 --shard 0 $CONN > "$RUN/status-after.out" 2>&1 || fail "status after the bulk cancel"
+grep -q "COMPLETE -- 0 open orders" "$RUN/status-after.out" \
+  || { cat "$RUN/status-after.out"; fail "participant 7 still has open orders after the bulk cancel"; }
 
 echo
 echo "== 8. drive load through the shard and measure it"

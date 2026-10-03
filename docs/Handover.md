@@ -1348,9 +1348,29 @@ with nobody told. A maker could too.
 - Epsilon soak: 0.0000 bytes per order.
 - Attribution A11–A12: +0.04 µs a new order.
 
+**Then, the same evening: an order mass status** (the user's addition; schema v7, Design.md §5).
+The user proposed it to reconcile at the open and to recover from a `TRUNCATED` resend. Shape, by
+`decision-fork`: FIX's own, with an `ExecutionReport` of ExecType `ORDER_STATUS` per open order and an
+`OrderMassStatusComplete` carrying `nextSeq`, scoped like the bulk cancel. Status reports are outside
+the sequence.
+- **The engine** walks the ladders as the bulk cancel does.
+- **`ResendStatus` became `RequestStatus`**, shared by both completions, with `UNKNOWN_SECURITY`
+  added. It was free to rename because v6 had not shipped.
+- **`ParticipantRequests` in `reference`** encodes both requests, beside `OperatorCommands`, which is
+  only for unacknowledged operator commands.
+- **`most status`** is the CLI. `most load` follows a `TRUNCATED` resend with a status and resumes
+  the sequence from it.
+- **What it settles:** every order still open, with exact quantities.
+- **What it cannot settle:** an order that finished inside the lost window. It is printed as
+  ambiguous with a bound (F5: at most 139 of 9,709), and closing it needs a trade record.
+- **The checks:** `OrderMassStatusTest` (8 cases, from the clause), `GatewayMassStatusTest` (5), an
+  allocation case, `run-e2e.sh` step 6a on a real node, and `run-failover.sh REPORT_RETENTION=16`.
+  668 tests.
+
 **Not done.**
 - A drop of a participant's last report is still found only at its next report.
 - Resending never-sequenced orders, in `most load` or anywhere.
+- A trade record for orders that finished in a truncated window.
 - Multi-machine.
 
 ## 3. Decisions that are load-bearing

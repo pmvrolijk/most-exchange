@@ -183,6 +183,7 @@ fun main(args: Array<String>) {
                     "auctionPassLimitBreaches=${service.auctionPassLimitBreaches} " +
                     "bulkCancelledOrders=${service.bulkCancelledOrders} " +
                     "resendRequests=${service.resendRequests} replayedReports=${service.replayedReports} " +
+                    "massStatusRequests=${service.massStatusRequests} statusReports=${service.statusReports} " +
                     "rejectedBulkCancels=${service.rejectedBulkCancels} " +
                     "declaredBindings=${service.declaredBindings} " +
                     "unknownPrincipals=${service.unknownPrincipals} " +

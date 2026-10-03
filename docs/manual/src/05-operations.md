@@ -328,8 +328,36 @@ that participant's orders and every gateway. A client recovers like this:
 
 A completion with status `TRUNCATED` means the reports below `oldestRetainedSeq` are no longer
 retained. `engine.reportRetention` was smaller than the failover's traffic, or the shard was
-restarted since. Reconcile that participant with a cancel-all (5.3) and re-entry. `most load`
-implements all of this, and `e2e/run-failover.sh` requires that no order is left unknown.
+restarted since. Then:
+
+4. **Send an order mass status** for that participant. It states every open order (original,
+   cumulative and remaining quantity) and ends with `nextSeq`. Resume the participant's report
+   sequence from there; the status stands in for the reports that were lost.
+5. An order you sent that is neither answered nor open finished in the lost window, or never
+   reached the log, and nothing can tell which. At most `oldestRetainedSeq − fromSeq` of them were
+   sequenced. For fills, consult your trade records.
+
+`most load` implements all of this, and `e2e/run-failover.sh` requires that no order is left unknown.
+
+### Order mass status
+
+The state of every open order of one participant, as the engine holds it now: the reconciliation to
+run at the open, and after a truncated resend.
+
+```sh
+most status --participant 7 --shard 0
+```
+
+```
+status: participant 7, every book on shard 0
+  ORDER_STATUS  AAPL  orderId=1 clOrdId=1001  leaves 6 cum 4 of 10
+status: COMPLETE -- 1 open orders, as of reportSeq 2 (next report is 3)
+```
+
+`--symbol SYM` narrows it to one security. It goes through the participant's own gateway, which
+checks it as it checks a cancel, and **it is answered**, unlike the operator commands of 5.3. A status
+report is not an event: it carries no `reportSeq` and is never replayed. The request costs one walk of
+the shard's resting orders, as a cancel-all does.
 
 ## 5.5 Market data operations
 

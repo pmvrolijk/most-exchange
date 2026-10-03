@@ -12,6 +12,8 @@ import com.engine.sbe.ExecutionReportEncoder
 import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleDecoder
+import com.engine.sbe.OrderMassStatusCompleteEncoder
+import com.engine.sbe.OrderMassStatusRequestDecoder
 import com.engine.sbe.OrderAddedEncoder
 import com.engine.sbe.OrderCancelRequestDecoder
 import com.engine.sbe.OrderReducedEncoder
@@ -20,7 +22,7 @@ import com.engine.sbe.PurgeExpiredOrdersDecoder
 import com.engine.sbe.RemoveReason
 import com.engine.sbe.ReportResendCompleteEncoder
 import com.engine.sbe.ReportResendRequestDecoder
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import com.engine.sbe.RequestBookImageDecoder
 import com.engine.sbe.SecurityDefinitionDecoder
 import com.engine.sbe.SessionChangedEncoder
@@ -217,6 +219,8 @@ class MatchingEngineService(
     private val cancelParticipantDecoder = CancelParticipantOrdersDecoder()
     private val resendRequestDecoder = ReportResendRequestDecoder()
     private val resendCompleteEncoder = ReportResendCompleteEncoder()
+    private val massStatusDecoder = OrderMassStatusRequestDecoder()
+    private val massStatusCompleteEncoder = OrderMassStatusCompleteEncoder()
     private val announcementEncoder = ConfigurationAnnouncementEncoder()
     private val announcementDecoder = ConfigurationAnnouncementDecoder()
 
@@ -267,6 +271,12 @@ class MatchingEngineService(
     var resendRequests = 0L
         private set
     var replayedReports = 0L
+        private set
+
+    /** `OrderMassStatusRequest`s answered, and the open orders they stated. */
+    var massStatusRequests = 0L
+        private set
+    var statusReports = 0L
         private set
 
     /** [participantId]'s last report sequence, 0 before its first report. */
@@ -606,6 +616,11 @@ class MatchingEngineService(
             CancelParticipantOrdersDecoder.TEMPLATE_ID -> {
                 cancelParticipantDecoder.wrap(buffer, body, blockLength, version)
                 onCancelParticipantOrders()
+            }
+
+            OrderMassStatusRequestDecoder.TEMPLATE_ID -> {
+                massStatusDecoder.wrap(buffer, body, blockLength, version)
+                onOrderMassStatusRequest(session)
             }
 
             ReportResendRequestDecoder.TEMPLATE_ID -> {
@@ -1585,6 +1600,112 @@ class MatchingEngineService(
     }
 
     /**
+     * A participant asking for the state of its open orders (Design.md §5, "Order mass status"):
+     * one `ORDER_STATUS` report per open order, then the completion with `nextSeq`. Sequenced like an
+     * order, so the answer is the state at this log position and `nextSeq` is where the participant's
+     * report sequence stands at it. A status is not an event: it is neither numbered nor retained.
+     * Walks the ladders, as the bulk cancel does, so it costs the shard's resting orders, not this
+     * participant's. Replies on the session that asked, and moves the route there.
+     */
+    private fun onOrderMassStatusRequest(session: ClientSession) {
+        val participantId = massStatusDecoder.participantId()
+        val securityId = massStatusDecoder.securityId()
+        countIfUndeclared(session, participantId)
+        participantToSession.put(participantId, session.id())
+        massStatusRequests++
+
+        var stated = 0
+        var status = RequestStatus.COMPLETE
+        if (securityId == OperatorCommands.ALL_SECURITIES) {
+            for (book in books) stated += stateOpenOrders(session, book, participantId)
+        } else {
+            val bookIndex = indexOfSecurity(securityId)
+            if (bookIndex < 0) status = RequestStatus.UNKNOWN_SECURITY
+            else stated = stateOpenOrders(session, books[bookIndex], participantId)
+        }
+        statusReports += stated
+
+        val length = MessageHeaderEncoder.ENCODED_LENGTH + OrderMassStatusCompleteEncoder.BLOCK_LENGTH
+        var attempts = 0
+        while (true) {
+            val result = session.tryClaim(length, claim)
+            if (result == ClientSession.MOCKED_OFFER) return
+            if (result > 0) {
+                massStatusCompleteEncoder.wrapAndApplyHeader(
+                    claim.buffer(), claim.offset() + AeronCluster.SESSION_HEADER_LENGTH, headerEncoder,
+                )
+                    .participantId(participantId)
+                    .requestId(massStatusDecoder.requestId())
+                    .nextSeq(lastReportSeq.get(participantId) + 1)
+                    .orderCount(stated)
+                    .securityId(securityId)
+                    .status(status)
+                claim.commit()
+                return
+            }
+            if (result == Publication.CLOSED || result == Publication.NOT_CONNECTED ||
+                result == Publication.MAX_POSITION_EXCEEDED
+            ) {
+                return
+            }
+            if (++attempts >= backpressureAlertThreshold) {
+                backpressureStalls++
+                attempts = 0
+            }
+        }
+    }
+
+    /** States each of [participantId]'s orders resting in [book]; how many reached the session. */
+    private fun stateOpenOrders(session: ClientSession, book: OrderBook, participantId: Long): Int {
+        var stated = 0
+        book.forEachRestingOrder { node ->
+            if (book.participantIdOf(node) == participantId && sendOrderStatus(session, book, node)) stated++
+        }
+        return stated
+    }
+
+    private fun sendOrderStatus(session: ClientSession, book: OrderBook, node: Int): Boolean {
+        val length = MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH
+        var attempts = 0
+        while (true) {
+            val result = session.tryClaim(length, claim)
+            if (result == ClientSession.MOCKED_OFFER) return true
+            if (result > 0) {
+                val origQty = book.origQtyOf(node)
+                val leavesQty = book.leavesQtyOf(node)
+                execReportEncoder.wrapAndApplyHeader(
+                    claim.buffer(), claim.offset() + AeronCluster.SESSION_HEADER_LENGTH, headerEncoder,
+                )
+                    .participantId(book.participantIdOf(node))
+                    .clOrdId(book.clOrdIdOf(node))
+                    .exchangeOrderId(book.exchangeOrderIdOf(node))
+                    .price(book.orderPrice(node))
+                    .lastQty(0L)
+                    .leavesQty(leavesQty)
+                    .securityId(book.securityId)
+                    .rejectReason(SbeRejectReason.NONE)
+                    .execType(ExecType.ORDER_STATUS)
+                    .side(SbeSide.get(book.sideOfOrder(node)))
+                    .origQty(origQty)
+                    .cumQty(cumQtyOf(origQty, leavesQty))
+                    // State, not an event: outside the participant's report sequence.
+                    .reportSeq(0L)
+                claim.commit()
+                return true
+            }
+            if (result == Publication.CLOSED || result == Publication.NOT_CONNECTED ||
+                result == Publication.MAX_POSITION_EXCEEDED
+            ) {
+                return false
+            }
+            if (++attempts >= backpressureAlertThreshold) {
+                backpressureStalls++
+                attempts = 0
+            }
+        }
+    }
+
+    /**
      * A participant asking for its reports again from `fromSeq` (Design.md §5, "Report sequence and
      * resend"). Sequenced like an order, so it is a fence: every report generated before it is in
      * the ring or reported as gone. Replies on the session that asked, and moves the participant's
@@ -1627,7 +1748,7 @@ class MatchingEngineService(
                     .nextSeq(lastSeq + 1)
                     .oldestRetainedSeq(oldest)
                     .replayedCount(replayed)
-                    .status(if (fromSeq < oldest && fromSeq <= lastSeq) ResendStatus.TRUNCATED else ResendStatus.COMPLETE)
+                    .status(if (fromSeq < oldest && fromSeq <= lastSeq) RequestStatus.TRUNCATED else RequestStatus.COMPLETE)
                 claim.commit()
                 return
             }

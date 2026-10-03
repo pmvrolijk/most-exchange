@@ -243,6 +243,20 @@ internal class Driver(
         service.onSessionMessage(session, 0L, resendBuffer, 0, resendLength, header)
     }
 
+    private val statusBuffer = UnsafeBuffer(ByteArray(64))
+    private val statusEncoder = com.engine.sbe.OrderMassStatusRequestEncoder()
+    private val statusLength =
+        MessageHeaderEncoder.ENCODED_LENGTH + com.engine.sbe.OrderMassStatusRequestEncoder.BLOCK_LENGTH
+
+    /** `OrderMassStatusRequest` for every book (Design.md §5, "Order mass status"). */
+    fun orderMassStatus(participantId: Long) {
+        statusEncoder.wrapAndApplyHeader(statusBuffer, 0, headerEncoder)
+            .participantId(participantId)
+            .requestId(1L)
+            .securityId(com.engine.reference.OperatorCommands.ALL_SECURITIES)
+        service.onSessionMessage(session, 0L, statusBuffer, 0, statusLength, header)
+    }
+
     fun sessionTransition(phase: Byte) {
         sessionEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .transitionTime(0L)

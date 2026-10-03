@@ -8,11 +8,14 @@ import com.engine.sbe.MessageHeaderDecoder
 import com.engine.sbe.MessageHeaderEncoder
 import com.engine.sbe.NewOrderSingleDecoder
 import com.engine.sbe.OrderCancelRequestDecoder
+import com.engine.sbe.OrderMassStatusCompleteDecoder
+import com.engine.sbe.OrderMassStatusCompleteEncoder
+import com.engine.sbe.OrderMassStatusRequestDecoder
 import com.engine.sbe.RejectReason
 import com.engine.sbe.ReportResendCompleteDecoder
 import com.engine.sbe.ReportResendCompleteEncoder
 import com.engine.sbe.ReportResendRequestDecoder
-import com.engine.sbe.ResendStatus
+import com.engine.sbe.RequestStatus
 import com.engine.sbe.Side
 import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
@@ -92,6 +95,8 @@ class GatewayService(
     private val clientReport = ClientExecutionReportEncoder()
     private val resendRequest = ReportResendRequestDecoder()
     private val resendComplete = ReportResendCompleteEncoder()
+    private val massStatusRequest = OrderMassStatusRequestDecoder()
+    private val massStatusComplete = OrderMassStatusCompleteEncoder()
     private val outbound: MutableDirectBuffer = UnsafeBuffer(ByteArray(512))
 
     var rejectedLocally = 0L
@@ -157,6 +162,11 @@ class GatewayService(
             ReportResendRequestDecoder.TEMPLATE_ID -> {
                 resendRequest.wrap(buffer, body, blockLength, version)
                 onResendRequest(buffer, offset, length)
+            }
+
+            OrderMassStatusRequestDecoder.TEMPLATE_ID -> {
+                massStatusRequest.wrap(buffer, body, blockLength, version)
+                onMassStatusRequest(buffer, offset, length)
             }
 
             // Session transitions, purges, security definitions and image requests are operator
@@ -266,7 +276,7 @@ class GatewayService(
     /**
      * A participant asking for its reports again (Design.md §5, "Report sequence and resend").
      * Checked as a cancel is: a cancel-only participant still has fills to learn about. Refused with
-     * a [ResendStatus] where an order would be refused with a [RejectReason], so the client always
+     * a [RequestStatus] where an order would be refused with a [RejectReason], so the client always
      * gets an answer and never waits on a request that went nowhere.
      */
     private fun onResendRequest(
@@ -277,7 +287,7 @@ class GatewayService(
         val participantId = resendRequest.participantId()
         if (!access.mayCancel(participantId)) {
             unauthorizedRejects++
-            refuseResend(ResendStatus.UNAUTHORIZED_PARTICIPANT)
+            refuseResend(RequestStatus.UNAUTHORIZED_PARTICIPANT)
             return ClientMessageAction.CONSUME
         }
         return when (sink.toCluster(buffer, offset, length)) {
@@ -285,14 +295,54 @@ class GatewayService(
             ClusterOffer.RETRY -> ClientMessageAction.RETRY
             ClusterOffer.FAILED -> {
                 unreachableRejects++
-                refuseResend(ResendStatus.GATEWAY_UNAVAILABLE)
+                refuseResend(RequestStatus.GATEWAY_UNAVAILABLE)
                 ClientMessageAction.CONSUME
             }
         }
     }
 
+    /**
+     * A participant asking for the state of its open orders (Design.md §5, "Order mass status").
+     * Checked and refused exactly as a resend request is: a cancel-only participant still has open
+     * orders to reconcile, and a refusal is answered so the client never waits on nothing.
+     */
+    private fun onMassStatusRequest(
+        buffer: DirectBuffer,
+        offset: Int,
+        length: Int,
+    ): ClientMessageAction {
+        if (!access.mayCancel(massStatusRequest.participantId())) {
+            unauthorizedRejects++
+            refuseMassStatus(RequestStatus.UNAUTHORIZED_PARTICIPANT)
+            return ClientMessageAction.CONSUME
+        }
+        return when (sink.toCluster(buffer, offset, length)) {
+            ClusterOffer.SENT -> ClientMessageAction.CONSUME
+            ClusterOffer.RETRY -> ClientMessageAction.RETRY
+            ClusterOffer.FAILED -> {
+                unreachableRejects++
+                refuseMassStatus(RequestStatus.GATEWAY_UNAVAILABLE)
+                ClientMessageAction.CONSUME
+            }
+        }
+    }
+
+    private fun refuseMassStatus(status: RequestStatus) {
+        massStatusComplete.wrapAndApplyHeader(outbound, 0, headerEncoder)
+            .participantId(massStatusRequest.participantId())
+            .requestId(massStatusRequest.requestId())
+            .nextSeq(0L)
+            .orderCount(0)
+            .securityId(massStatusRequest.securityId())
+            .status(status)
+        sink.toClient(
+            outbound, 0,
+            MessageHeaderEncoder.ENCODED_LENGTH + OrderMassStatusCompleteEncoder.BLOCK_LENGTH,
+        )
+    }
+
     /** The completion for a request that never reached the engine: nothing replayed, nothing known. */
-    private fun refuseResend(status: ResendStatus) {
+    private fun refuseResend(status: RequestStatus) {
         resendComplete.wrapAndApplyHeader(outbound, 0, headerEncoder)
             .participantId(resendRequest.participantId())
             .requestId(resendRequest.requestId())
@@ -322,14 +372,17 @@ class GatewayService(
     // ------------------------------------------------------------ outbound
 
     /**
-     * Cluster to client. An execution report is translated into the client's shape; the end of a
-     * resend is the same message on both legs and goes across unchanged. Anything else from the
+     * Cluster to client. An execution report -- an order status among them -- is translated into the
+     * client's shape; the end of a resend or a mass status is the same message on both legs and goes
+     * across unchanged. Anything else from the
      * cluster is not for a client.
      */
     fun onExecutionReport(buffer: DirectBuffer, offset: Int, length: Int) {
         if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
         header.wrap(buffer, offset)
-        if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID) {
+        if (header.templateId() == ReportResendCompleteDecoder.TEMPLATE_ID ||
+            header.templateId() == OrderMassStatusCompleteDecoder.TEMPLATE_ID
+        ) {
             sink.toClient(buffer, offset, length)
             return
         }

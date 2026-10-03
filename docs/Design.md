@@ -2594,7 +2594,12 @@ picture. The split is deliberate and is the design's, not a convenience:
   order, which is the one class of misconfiguration consensus cannot catch.
 * **A release is immutable.** Publishing writes a numbered directory and records the fingerprint per
   shard; republishing allocates the next version rather than rewriting one, so a directory a running
-  process was pointed at never changes underneath it. Rendering is deterministic — ordered, no
+  process was pointed at never changes underneath it. **A version whose directory already exists is
+  refused**, not written into. Numbers repeat only after the database was restored or reset, and
+  the directory found there may be what a running process booted from. The publisher claims the
+  directory atomically by creating it, records nothing when it cannot, and removes a directory it
+  created itself if a later write fails, so a release directory never holds a partial release.
+  Rendering is deterministic — ordered, no
   timestamp — so identical content publishes to identical bytes and two releases can be diffed.
 * **The control plane reimplements no rule.** It constructs the real `SecuritySpec`, `ShardSpec`,
   `ShardRoute` and `Universe` from its rows, so ISIN check digits, the wire-derived length limits,

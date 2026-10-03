@@ -219,7 +219,12 @@ publishing, so one call answers both "can I publish?" and "what is stopping me?"
 validation — then writes a numbered directory and records the fingerprint per shard.
 
 A release is **immutable**. Republishing allocates the next version rather than rewriting one, so a
-directory a running process was pointed at never changes underneath it. The rendered files are
+directory a running process was pointed at never changes underneath it. That holds even when the
+numbering does not: after a database restore or reset, release numbers repeat, and **a version whose
+directory already exists is refused** with `409 conflict` rather than written into. No release row is
+recorded. Move the old directories aside, or point `control.releaseDir` somewhere empty. Each refused
+attempt still uses up a version number, because a Postgres identity value is not returned on
+rollback. The rendered files are
 deterministic: ordered by id, no timestamp, so two publishes of identical content produce identical
 bytes and diffing two releases tells an operator something.
 

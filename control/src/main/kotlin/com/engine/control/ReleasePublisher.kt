@@ -1,5 +1,6 @@
 package com.engine.control
 
+import com.engine.reference.ShardSpec
 import com.engine.reference.Universe
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.jdbc.core.RowMapper
@@ -8,6 +9,7 @@ import org.springframework.jdbc.support.GeneratedKeyHolder
 import org.springframework.jdbc.core.namedparam.MapSqlParameterSource
 import org.springframework.stereotype.Service
 import org.springframework.transaction.annotation.Transactional
+import java.nio.file.FileAlreadyExistsException
 import java.nio.file.Files
 import java.nio.file.Path
 
@@ -21,7 +23,9 @@ import java.nio.file.Path
  * consensus cannot catch (Design.md §7).
  *
  * A release is immutable. Republishing allocates the next version rather than rewriting one, so a
- * directory a running process was pointed at never changes underneath it.
+ * directory a running process was pointed at never changes underneath it -- and a version whose
+ * directory already exists is refused rather than written into, because numbering alone does not
+ * guarantee that: release numbers repeat after a database restore (Design.md §7).
  */
 @Service
 class ReleasePublisher(
@@ -38,12 +42,47 @@ class ReleasePublisher(
     @Transactional
     fun publish(note: String?): ReleaseRow {
         val universe = topology.universe()
+        // Built before anything is allocated or written: this is the validation, and an
+        // unsatisfiable topology must be refused with nothing on disk.
         val specs = universe.shardSpecs()
 
         val version = insertRelease(universe.version, note)
-        val directory = Path.of(releaseRoot).resolve(directoryName(version)).toAbsolutePath()
-        Files.createDirectories(directory)
+        val directory = claimDirectory(version)
+        try {
+            return write(version, directory, universe, specs, note)
+        } catch (e: Throwable) {
+            // This call created the directory, so nothing can have booted from it. Leaving it would
+            // put a partial release where a later publish -- after a restore -- would find it.
+            directory.toFile().deleteRecursively()
+            throw e
+        }
+    }
 
+    /**
+     * Creates the version's directory, atomically and only if it is absent. `createDirectory` is
+     * the claim: unlike `createDirectories`, it fails on a directory that already exists, which may
+     * be what a running process booted from.
+     */
+    private fun claimDirectory(version: Long): Path {
+        val root = Path.of(releaseRoot).toAbsolutePath()
+        Files.createDirectories(root)
+        val directory = root.resolve(directoryName(version))
+        try {
+            Files.createDirectory(directory)
+        } catch (e: FileAlreadyExistsException) {
+            // Thrown inside the transaction, so the release row allocated above is rolled back.
+            throw ReleaseDirectoryExists(version, directory)
+        }
+        return directory
+    }
+
+    private fun write(
+        version: Long,
+        directory: Path,
+        universe: Universe,
+        specs: List<ShardSpec>,
+        note: String?,
+    ): ReleaseRow {
         // Absolute paths, because discovery reads this registry from wherever it happens to be
         // started and must find the shard files regardless of its working directory.
         val securitiesFile = { shardId: Int -> directory.resolve(shardFileName(shardId)).toString() }
@@ -233,3 +272,15 @@ class ReleasePublisher(
         }
     }
 }
+
+/**
+ * A release version whose directory already exists. Release numbers repeat only after the database
+ * was restored or reset, and the directory found may be what a running process booted from, so it is
+ * never written into (Design.md §7).
+ */
+class ReleaseDirectoryExists(version: Long, directory: Path) : RuntimeException(
+    "release $version: $directory already exists. Release numbers repeat after a database restore " +
+        "or reset, and that directory may be what a running process booted from, so it is not " +
+        "written into. Move it aside, or point control.releaseDir at an empty location; the next " +
+        "publish takes the next version.",
+)

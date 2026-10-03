@@ -85,6 +85,27 @@ class ControlApiTest : PostgresTest() {
     }
 
     @Test
+    fun `publishing over an existing release directory is a conflict`() {
+        // ControlPlane.md §5: refused with 409, not written into.
+        mvc.perform(
+            post("/api/shards").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(shardRow(0))),
+        ).andExpect(status().isCreated)
+        mvc.perform(
+            post("/api/securities").with(csrf()).contentType(MediaType.APPLICATION_JSON)
+                .content(json.writeValueAsString(securityRow(1, 0))),
+        ).andExpect(status().isCreated)
+        java.nio.file.Files.createDirectories(
+            java.nio.file.Path.of(releaseDir).resolve(ReleasePublisher.directoryName(1)),
+        )
+
+        mvc.perform(post("/api/releases").with(csrf()))
+            .andExpect(status().isConflict)
+            .andExpect(jsonPath("$.error").value("conflict"))
+            .andExpect(content().string(org.hamcrest.Matchers.containsString("already exists")))
+    }
+
+    @Test
     fun `something absent is a 404 rather than an empty 200`() {
         mvc.perform(get("/api/shards/9")).andExpect(status().isNotFound)
         mvc.perform(get("/api/securities/9")).andExpect(status().isNotFound)

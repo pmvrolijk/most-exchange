@@ -56,9 +56,9 @@ abstract class PostgresTest {
         // The Spring context is shared across test classes, so observed feed state outlives a
         // truncate. A halt left behind by one test would make the next one skip.
         clusterLink.state.clear()
-        // RESTART IDENTITY numbers releases from 1 again, so a directory an earlier test published
-        // would otherwise be written into a second time -- and a file that test wrote and this one
-        // did not (a participants file, say) would still be there to be found.
+        // RESTART IDENTITY numbers releases from 1 again -- a database reset, exactly -- so a
+        // directory an earlier test published would otherwise be found, and the publisher now
+        // refuses it (ReleaseDirectoryExists) rather than writing into it.
         Path.of(releaseDir).toFile().listFiles()?.forEach { it.deleteRecursively() }
     }
 

@@ -98,6 +98,43 @@ class ReleasePublisherTest : PostgresTest() {
         )
     }
 
+    // Design.md §7, "Where Reference Data Is Authored": a version whose directory already exists is
+    // refused, not written into, and nothing is recorded. Numbers repeat after a database restore;
+    // RESTART IDENTITY in the fixture is exactly that.
+
+    @Test
+    fun `a version whose directory already exists is refused and the directory is left as it was`() {
+        seedTwoShards()
+        val existing = Path.of(releaseDir).resolve(ReleasePublisher.directoryName(1))
+        Files.createDirectories(existing)
+        val booted = existing.resolve(ReleasePublisher.shardFileName(0))
+        Files.writeString(booted, "what a running engine booted from\n")
+
+        val e = assertFailsWith<ReleaseDirectoryExists> { publisher.publish("after a restore") }
+
+        assertContains(e.message.orEmpty(), existing.toAbsolutePath().toString())
+        assertEquals("what a running engine booted from\n", Files.readString(booted))
+        assertEquals(listOf(booted.fileName.toString()), Files.list(existing).use { s -> s.map { it.fileName.toString() }.toList() })
+        assertTrue(publisher.releases().isEmpty(), "a refused publish must not leave a release row")
+    }
+
+    @Test
+    fun `a refused version is not reused, so the next publish takes the one after it`() {
+        // A Postgres identity value is not handed back on rollback (ControlPlane.md §5).
+        seedTwoShards()
+        Files.createDirectories(Path.of(releaseDir).resolve(ReleasePublisher.directoryName(1)))
+        assertFailsWith<ReleaseDirectoryExists> { publisher.publish(null) }
+
+        val release = publisher.publish(null)
+
+        assertEquals(2L, release.version)
+        assertEquals(
+            Path.of(releaseDir).resolve(ReleasePublisher.directoryName(2)).toAbsolutePath().toString(),
+            release.directory,
+        )
+        assertEquals(listOf(2L), publisher.releases().map { it.version })
+    }
+
     @Test
     fun `publishing an unsatisfiable topology is refused before anything is written`() {
         topology.createShard(shardRow(0))

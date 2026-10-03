@@ -36,6 +36,11 @@ class ApiErrorHandler {
     fun invalid(e: RuntimeException): ResponseEntity<ApiError> =
         ResponseEntity.badRequest().body(ApiError("invalid", e.message))
 
+    /** A release version whose directory is already on disk; see [ReleaseDirectoryExists]. */
+    @ExceptionHandler(ReleaseDirectoryExists::class)
+    fun releaseExists(e: ReleaseDirectoryExists): ResponseEntity<ApiError> =
+        ResponseEntity.status(HttpStatus.CONFLICT).body(ApiError("conflict", e.message))
+
     /** A unique symbol or ISIN already taken, or a shard still referenced by a security. */
     @ExceptionHandler(DataIntegrityViolationException::class)
     fun conflict(e: DataIntegrityViolationException): ResponseEntity<ApiError> =

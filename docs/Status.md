@@ -189,11 +189,13 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
    as member connectivity usually works, and the CLI takes `--order-entry-channel` to reach one the
    directory does not name. The throughput case is **closed**: a second gateway raises nothing (R8–R11) and the one gateway is
    ~19% busy at the knee (A5). What remains is convenience, not capacity.
-6a. **The release publisher writes into an existing directory.** `Files.createDirectories` does not
-   fail on one, while its own KDoc promises a directory a running process points at never changes.
-   Latent in production (release numbers repeat only after a database restore); it bit the control
-   tests, whose fixture now clears the release directory. Refusing to publish into an existing
-   directory would make the promise true.
+6a. ~~**The release publisher writes into an existing directory.**~~ **Fixed 2026-10-03.** The publisher
+   claims a version's directory with `Files.createDirectory`, which fails if it already exists. It
+   refuses with `ReleaseDirectoryExists` (`409 conflict` from the API), records no row, and removes a
+   directory it created itself if a later write fails. A refused attempt still uses up its version
+   number. Not covered: the transaction committing *after* the files are written can still fail and
+   leave a complete directory with no row. The cleanup path has no test, because nothing can make a
+   write fail between the claim and the commit.
 7. **No per-order L3 recovery.** The book image is deliberately level-aggregated, so an MBO consumer
    that joins or reconnects after a restart has nothing to rebuild per-order state from. Nothing
    needs it today; a FIX market data adapter carrying order-level detail would.
@@ -265,8 +267,7 @@ and the correctness items are. In the order I would take them, cheapest-and-most
 
 1. ~~**Fingerprint enforcement at boot**~~ **Done 2026-10-03** (open issue 11). The leader announces
    its configuration in the log, and a node that disagrees refuses.
-2. **Refuse to publish into an existing release directory** (item 11b, open issue 6a) — small, and
-   makes a KDoc promise true.
+2. ~~**Refuse to publish into an existing release directory**~~ **Done 2026-10-03** (open issue 6a).
 3. **Bulk cancel of one participant's resting orders** (item 11a, open issue 3) — the operator side of
    revocation. A new operator command through the log, so the `wire-change` skill applies; the
    engine walks the ladders as the purge does (Design.md §4.3).
@@ -375,7 +376,7 @@ The full list, in the order it was written:
 11a. **Bulk cancel of one participant's resting orders** — the operator side of revocation, which
     `cancelOnly` currently leaves to the participant (open issue 3). An operator command, so it goes
     through the log; the engine would walk the ladders as the purge does (Design.md §4.3).
-11b. **Refuse to publish into an existing release directory** (open issue 6a).
+11b. ~~**Refuse to publish into an existing release directory**~~ **Done** (open issue 6a).
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.
 

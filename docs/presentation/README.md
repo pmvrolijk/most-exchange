@@ -1,6 +1,6 @@
 # Presentations
 
-Three five-minute decks, made on 26 September 2026. The `.html` files here are standalone exports,
+Three five-minute decks, made on 26 September 2026 and updated on 4 October. The `.html` files here are standalone exports,
 and each has a Markdown file of speaker notes beside it. The editable source of each deck is a
 claude.ai Slides artifact, private to its owner; the links are kept out of this public repository.
 
@@ -48,6 +48,9 @@ has a source here (below), and those documents move.
   | Blue | `#6AA8F0` | the gateways, and the phases before continuous trading |
   | Orange | `#F2A052` | outside the project or off the normal path: the FIX tier, asks, the halt path |
 
+- **Icons are drawn by hand as inline SVG**, a few strokes each, in the slide's accent colour. Never
+  use the Slides runtime's `<x-icon>`: its glyphs come from a third-party icon font that the export
+  embeds and the AGPL does not cover.
 - **Colour never carries a meaning alone.** Text says it too: the production diagram's footer
   reads "Orange: FIX tier, outside this project", and every box and step is labelled.
 - **A stat row uses fixed-width flex cells, not a `1fr` grid.** In the Slides renderer the grid
@@ -70,9 +73,12 @@ has a source here (below), and those documents move.
 - **The production topology comes from `ProdDeployment.md` §2 and has not been run.** The deck
   does not claim it has.
 - **Figures follow the `perf-claim` rules.** Every rate states its conditions in the footer:
-  single node, Apple M4 Pro, JVM 21, ten securities, and the driver threading mode. The ~550k/s
-  ceiling (DEDICATED) is given next to ~350k/s (SHARED). The missed 1M/s target is on the slide
-  as an open question, not left out.
+  single node, Apple M4 Pro, JVM 21, ten securities, and the driver threading mode. The 1M/s figure
+  is given with its egress channel (IPC), all three latencies including the 44 ms p99, and the
+  ~550k/s that UDP egress reaches (Measurements.md K1, E1–E14). What IPC egress costs, a gateway per
+  node, and what is unmeasured, three machines, are on the slide, not left out.
+- **The failover claim is a measurement.** "0 of 40,000 orders left unknown" is F3–F4: three members
+  on one machine, 2,000 orders/s, 2 s heartbeat.
 - **UI images are the Operator's Manual screenshots** from `docs/manual/assets/`. The dev stack
   was not driven for them. The books screenshot shows AAPL halted.
 
@@ -86,14 +92,19 @@ has a source here (below), and those documents move.
   the user declined in the retrospective, automatic commits, is shown as declined.
 - **Figures for the first nine days are the retrospective's and were not recounted:** 36
   questions, 2,017 shell commands against 92 file operations, 12 transcripts. The counts for the
-  whole project come from the repository on 26 September: 41 commits, ~25,600 lines of Kotlin,
-  ~3,500 of Vue, 463 tests, document sizes.
+  whole project come from the repository on 4 October: 64 commits, ~31,700 lines of Kotlin,
+  ~3,600 of Vue, 681 tests, document sizes. Fourteen days with sessions: the ten the 26 September
+  deck counted, plus 27 and 29 September and 3 and 4 October from the transcripts.
+- **The recent-sessions slide shows 29 September and 3 October.** Its quotes are verbatim
+  fragments; the steps come from Handover §2l and §2o.
 
 ### Content: Inside the Code
 
 - **Every extract is quoted from the source, never written for the slide.** Where one is shortened
   the footer says "condensed" and the cuts are marked `…`. Two renamings were made for width only:
-  the feed sinks' parameters read `b, o, n`, and the matching loop reads `BUY` for `Side.BUY`.
+  the feed sinks' parameters read `b, o, n`, and the matching loop reads `BUY` for `Side.BUY`. The
+  egress slide joins `.cumQty(cumQty)` and `.reportSeq(reportSeq)` on one line and cuts the
+  arguments it does not discuss with `…`.
 - **Each extract was chosen for a design decision, not for being central.** The field layout rather
   than the order-book class; `COMMIT` against `CONTINUE` rather than the gateway's main loop; the
   sequence number read before the first snapshot level rather than the whole snapshot cycle.
@@ -113,4 +124,9 @@ has a source here (below), and those documents move.
 
 ## Note
 
-The exported HTML contains third-party assets the AGPL doesn't cover.
+Like the rest of `docs/`, the decks are licensed under CC BY 4.0 (`../LICENSE`), not the AGPL.
+The exported HTML also contains third-party assets that the licence does not cover: the Slides viewer's own
+stylesheet and script, which the export inlines. Since 4 October it no longer embeds the runtime's
+icon font; the decks' icons are inline SVG drawn for them. The export embeds subsets of the two
+typefaces, IBM Plex Sans and JetBrains Mono, both under the SIL Open Font License 1.1, which permits
+embedding in documents. No other font is embedded.

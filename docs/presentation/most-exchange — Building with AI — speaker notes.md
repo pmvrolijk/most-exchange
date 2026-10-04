@@ -7,11 +7,11 @@ the artifact's slides: regenerate it after changing a slide, never edit it by ha
 
 ## 1. Building most-exchange with AI
 
-The companion to the architecture tour. That one covered what most-exchange is; this one covers how it was built. The whole exchange was built in conversation with Claude Code, over about ten days of sessions. The prompts on the right are real ones from the transcripts. What made that work was not any single prompt but a method: start from a design, keep the state written down, and run every session through the same cycle.
+The companion to the architecture tour. That one covered what most-exchange is; this one covers how it was built. The whole exchange was built in conversation with Claude Code, over fourteen days of sessions between late August and early October. The prompts on the right are real ones from the transcripts. What made that work was not any single prompt but a method: start from a design, keep the state written down, and run every session through the same cycle.
 
-## 2. What ten days of sessions produced
+## 2. What fourteen days of sessions produced
 
-First, the scale. Ten days with sessions. About twenty-five thousand lines of Kotlin across eight modules, a Vue console, and 463 tests. Forty-one commits, every one of them made at the human's decision. The number I find most telling is the tool mix: in the first nine days, over two thousand shell commands against fewer than a hundred file reads and writes. The system was run constantly — compiled, started, loaded, measured — not written and hoped over. And seven project skills now describe how a session runs.
+First, the scale. Fourteen days with sessions. About thirty-two thousand lines of Kotlin across nine modules, a Vue console, and 681 tests. Sixty-four commits, every one of them made at the human's decision. The number I find most telling is the tool mix: in the first nine days, over two thousand shell commands against fewer than a hundred file reads and writes. The system was run constantly — compiled, started, loaded, measured — not written and hoped over. And seven project skills now describe how a session runs.
 
 ## 3. It started with a design, not with code
 
@@ -39,15 +39,15 @@ The method lives in seven project skills, checked into the repository. Claude lo
 
 ## 9. Five habits that keep the claims honest
 
-The failure mode of AI-assisted development is an agent that looks productive while the ground truth drifts away from the story. Five habits guard against that. Run the real system — the end-to-end script caught five defects that unit tests missed. Treat warnings as errors everywhere. Write test expectations from the specification, because a test written after the code once asserted the bug. Give every number its conditions, which is how a knee measured with a desktop open was caught as 15% low. And state claims at the precision they were earned: sent is not applied, builds is not runs.
+The failure mode of AI-assisted development is an agent that looks productive while the ground truth drifts away from the story. Five habits guard against that. Run the real system — the end-to-end script caught five defects that unit tests missed, and the first run with three cluster members found a determinism defect that no single-node test could: followers never advanced the book-event sequence. Treat warnings as errors everywhere. Write test expectations from the specification, because a test written after the code once asserted the bug. Give every number its conditions, which is how a knee measured with a desktop open was caught as 15% low. And state claims at the precision they were earned: sent is not applied, builds is not runs.
 
 ## 10. The method was analysed, then improved
 
 After nine days the build was going well, and the question was why. On 6 September Claude analysed all twelve session transcripts and the git history, and produced a retrospective. It named the seven-step method that had been running from memory, and ranked the gaps. Most recommendations were adopted the same evening: CLAUDE.md split into rules and rationale, a short Status.md as the entry point, the seven skills, a measurements table, and a CI pipeline on GitLab. One was declined — the human kept control of commits. And the analysis prompt itself became a user-level skill that can be run on other projects.
 
-## 11. The last two sessions, step by step
+## 11. Two recent sessions, step by step
 
-Here is the method in the two most recent sessions. On 25 September the question was where time goes at high load. Each step was a measurement that ruled something in or out: attribution showed the exchange's own code is one to two percent of a round trip; a RAM-disk run ruled out storage; Aeron's counters pointed at the media driver's shared thread; and dedicated driver threads bought 1.6 times the throughput. On 26 September the first CI pipeline was fixed through the GitLab connection, then a design change proposed by the human went in as seven committed steps, was tested live on the Docker stack — which found missing seed data — and the manual's screenshots were retaken by driving Chrome.
+Here is the method in two recent sessions. On 29 September the question was where the shard really stops. A 16-core cloud host was provisioned by cloud-init, and the first reading said the engine thread binds. Then a brainstorm on why it would fill up so suddenly, and the counters showed the real limit: the media driver's UDP sender, with the engine back-pressured behind it. The first reading was recorded as reversed, not quietly rewritten. Moving egress to shared memory held a million orders a second at an 83 microsecond median. On 3 October the human set the requirement for a failover in one sentence: rejecting is acceptable, resting or filling without a response is not. That became a report sequence and a resend, a wire change. Mid-way the human asked to pause and consider another angle, engine back-pressure, which was weighed and rejected for a reason now written in the rationale. The failover runs then left no order unknown, and the human added an order mass status to settle what a resend cannot.
 
 ## 12. The model writes the code. The method is written down.
 

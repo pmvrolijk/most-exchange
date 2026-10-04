@@ -1490,6 +1490,62 @@ replaces `aeron-client` with `aeron-all` inside this build. The published POM st
 - No native binary was run through e2e.
 - The Operator's Manual PDF was not rebuilt. One sentence in `05-operations.md` changed.
 
+### 2q. A public GitHub mirror, its CI, and the SDK published
+
+2026-10-04, commits `868c6c4`–`1107460`, plus a close that is uncommitted. Infrastructure only:
+nothing on the wire, in the engine or in replicated state changed.
+
+**The mirror.** `origin` has two push URLs, the home GitLab and the **public**
+`github.com/pmvrolijk/most-exchange`, so every push publishes. Fetching is still from GitLab. The
+GitHub repository already held an older `master` (`3d6fb06`), which fast-forwarded. This repository's
+commits now carry the GitHub noreply address (`git config --local user.email`); older commits keep
+the addresses they had.
+
+**Scrubbed before the first push:** the four claude.ai artifact links in `docs/presentation/` (dead to
+anyone else; the regeneration note now says to name the source without its link), the CI runner's
+host name in Status.md, and the SDK POM's project URL, which pointed at the internal GitLab and now
+points at GitHub. Commit `47a9997` still carries the old URL in history. A scan of every tracked file
+found no keys or tokens; the dev-stack secrets in `deploy/config/` are deliberate and say so.
+
+**GitHub Actions** (`.github/workflows/ci.yml`) mirrors `.gitlab-ci.yml` job for job: `build`,
+`test-core` (where the allocation proofs run), `test-control`, `test-web`, `e2e`, `e2e-restart`,
+`native-engine`, and the two measurement jobs, which run only from a manual dispatch. The
+differences are deliberate and listed at the top of the file: distributions travel as a tarball
+because artifact upload drops the executable bit, `test-control` needs no dind, and the native
+build is skipped on pull requests.
+
+**The SDK on GitHub Packages.** `publish-sdk` runs only from a manual dispatch with `publish` ticked,
+on `master` or a tag, after `build` and `test-core`. `build.gradle.kts` gained a `github` repository
+that exists only when `GITHUB_REPOSITORY` and `GITHUB_TOKEN` are set, next to the `gitlab` one.
+GitHub's Maven registry needs a token to **read**, even for a public package, which Adapters.md §0
+now says. Maven Central was weighed and deferred until someone outside needs the SDK: it wants
+namespace verification and signing, and a release there cannot be withdrawn.
+
+**Checks at the end:**
+- GitHub run 37192585732 (push, `bb7bfe6`): every job green, `e2e-restart` included, so the
+  allocation proofs, the wire check and durability all hold on a hosted runner as well;
+- GitHub run 37197135866 (dispatch, `publish`): green, and `nl.lamia.most.exchange.sbe` and
+  `.client` are listed at `0.1.0-SNAPSHOT`; an unauthenticated read of the registry answers 401, as
+  documented;
+- 681 tests locally, with Docker.
+
+**Not done:**
+- GitLab's `publish:sdk` has still never run.
+- NOTICE files for distributed binaries, and the SPA's "source" link (§2k).
+
+**The decks, later the same day.** All three were updated in their artifacts and re-exported. Every
+`<x-icon>` (eight, on three slides) became an inline SVG drawn for the deck, so no export embeds the
+runtime's icon font any more (`mc-anthropicons`: 0 in each). The new exports embed subsets of IBM
+Plex Sans and JetBrains Mono (OFL) instead of linking them. Content brought to 4 October: nine modules
+and the `client` SDK, the report ring and resend, the order mass status, the three-member and
+failover scripts, 1M/s on IPC egress (K1) with its p99, 0 unknown across a failover (F3–F4), and
+the build figures. Every code extract was re-checked against the source. The speaker notes files
+were regenerated from the slides; only the changed slides differ. `docs/` is licensed under CC BY 4.0,
+not the AGPL: the official legal code in `docs/LICENSE`, the notice in the README's licence section,
+and the exports' third-party assets marked as not covered. The Operator's Manual carries the notice
+on its cover (`docs/manual/cover.html`), and the PDF was rebuilt, which also picks up the §5 sentence
+§2p changed.
+
 ## 3. Decisions that are load-bearing
 
 Change any of these and something breaks in a way that is hard to trace back.

@@ -41,7 +41,7 @@ there.
 | `discovery` | Publishes the tradable universe — every security and the shard serving it — so adapters can route. |
 | `engine` | `MatchingEngineService` — the single-threaded deterministic state machine. Builds to a native binary. |
 | `market-data` | Consumes the Book Event Stream, derives L1 / L2 / L3 and publishes them as SBE over multicast. Separate process so feed fan-out never touches the matching thread. |
-| `gateway` | Order entry: `securityId` validation, per-order state for the outbound leg (`cumQty` reconstruction), outbound mapping. |
+| `gateway` | Order entry: authenticates participants against the registry, validates `securityId`, translates execution reports outbound. Stateless — it holds nothing per order; the engine states `cumQty`. |
 | `tools` | The `most` operator CLI: browse the universe, send orders, inspect books. |
 | `control` | The control plane: Postgres-backed reference data and shard topology, an authenticated REST API, and the published specs every process boots from. Never on a boot path — see [docs/ControlPlane.md](docs/ControlPlane.md). |
 
@@ -104,18 +104,18 @@ Two build knobs, both in `gradle.properties` and both deliberate (Design.md §7)
   when the build host differs from production. Left unset for local builds.
 - **`engine.useEpsilonGc`** — off by default. Epsilon is the eventual target, but it turns a slow
   allocation leak into a hard crash, and because the engine is deterministic that crash takes every
-  cluster node at the same log position. Ship on Serial GC, prove zero steady-state allocation under
-  load, add the CI allocation assertion, then switch this on.
+  cluster node at the same log position. Ship on Serial GC. The allocation tests now run in CI
+  (GitLab's `test:core`, GitHub's `test-core`); what is left before switching this on is an
+  hours-long soak.
 
 ## Status
 
-Implemented: the packed order-pool layout, the price ladder, and `OrderBook` — booking, cancel
-validation, continuous matching with the dynamic-collar and SMP gates, the opening auction (price
-selection, the SMP fixed-point loop, allocation), and the off-session expiry purge; and
-`MatchingEngineService` — the full `ClusteredService`, message dispatch, execution-report egress,
-book-event publication, and snapshot/restore. 76 tests.
-
-All eight modules are implemented. 314 tests, plus an end-to-end script.
+All nine modules are implemented, with 681 tests. On top of those, the `e2e/` scripts run real
+processes: a trade end to end (`run-e2e.sh`), a restart that must come back with its book
+(`run-restart.sh`), a three-member cluster through elections and failovers (`run-cluster3.sh`,
+`run-failover.sh`), and the measurement scripts. Both CIs run the tests, `run-e2e.sh`,
+`run-restart.sh` and a native engine build. [`docs/Status.md`](docs/Status.md) says what is real and
+what is still open; every throughput figure to date is from one node.
 
 ## Allocation and the Epsilon soak
 
@@ -142,9 +142,10 @@ cannot admit a rate while still absorbing the late JIT blip that lands in one or
 twice at different order counts and reports the **slope**, so the ~95MB of pools allocated at startup
 cancels instead of swamping the figure. It currently reports **0 bytes per order across 1.9M orders**.
 
-All three are validated by mutation, not trust. Removing `inline` from `OrderBook.matchAggressive`,
-`offerToSnapshot` or `publishBookEvent` compiles cleanly and silently boxes a callback's captured
-state; each is caught by the test covering its path and by no other.
+All three are validated by mutation, not trust. Removing `inline` from any of the five load-bearing
+functions — `matchAggressive`, `offerToSnapshot`, `publishBookEvent`, `OrderBook.forEachOccupiedLevel`
+and `OrderBook.cancelParticipant` — compiles cleanly and silently boxes a callback's captured state;
+each is caught by the test covering its path and by no other.
 
 ## Where the latency goes
 
@@ -156,19 +157,22 @@ own hot paths (Design.md §7), and one script drives the load and does the subtr
 ```
 
 ```
-  client round trip            55.4 us
-  gateway inbound               0.2 us
-  engine (whole message)        0.4 us
-  gateway outbound              0.2 us
+  client round trip            58.7 us
+  gateway inbound               0.1 us
+  engine (whole message)        0.5 us
+  gateway outbound              0.1 us
   ------------------------------------
-  in this shard's processes      0.8 us  (1.4%)
-  everything else              54.6 us  (98.6%)
+  in this shard's processes      0.7 us  (1.2%)
+  everything else              58.0 us  (98.8%)
 ```
 
-The exchange's own code is 1.4% of the round trip; the rest is Raft consensus, the archive's disk
-write and the IPC hops — the cost of being a replicated log. The engine's whole-message p50 of
-0.42 µs is inside the 0.5 µs estimate Design.md §2 has carried unverified since the beginning, and
-`engine.metrics.stages=true` splits it further into admit / match / settle.
+Medians from run A12 in [`docs/Measurements.md`](docs/Measurements.md): one node on an Apple M4 Pro
+laptop, ten securities, 250k orders/s aggregate. These are medians only; the same run's client p99
+is 1.49 ms and its p99.9 17.2 ms, and Measurements.md has both. The exchange's own code is about 1% of
+the round trip, and has been in every attribution run so far (0.9–2.0% on the laptop). The rest is
+Raft consensus, the archive's disk write and the IPC hops — the cost of being a replicated log. The
+engine's whole-message p50 of 0.4–0.5 µs is within the 0.5 µs estimate Design.md §2 has carried since
+the beginning, and `engine.metrics.stages=true` splits it further into admit / match / settle.
 
 It is off by default and on in the dev stack. The engine reading a clock at all is a deliberate
 exception to the determinism rules, bounded by one invariant — enabling metrics on one node and not
@@ -243,8 +247,9 @@ seam, why one media driver means one network identity, and what is dev-only.
 
 The core services are built JVM by default. The native target (`CORE_TARGET=native`) now builds —
 a `linux/amd64` image with all four binaries at `-march=x86-64-v3` — and stays opt-in because it
-costs minutes per build where copying a host `installDist` costs seconds. It has not yet traded on
-an x86-64 host; `deploy/README.md` says why and what is left.
+costs minutes per build where copying a host `installDist` costs seconds. The native binaries have
+passed `run-e2e.sh` on a real x86-64 host; the native *containers* have not yet traded on one, and
+`deploy/README.md` says why and what is left.
 
 ## Control plane and admin UI, without Docker
 
@@ -308,9 +313,10 @@ npm install
 npm run dev          # http://localhost:5173
 ```
 
-Sign in with the operator above. The first slice is read-only: shards, securities, participants,
-releases, live exchange status, and the audit of who asked for what. Anything that *changes*
-something is still done over REST.
+Sign in with the operator above. It reads and edits the draft topology (shards, securities,
+participants), publishes releases, authors the trading calendar, manages operator accounts, shows
+live exchange status and books with the audit of who asked for what, and drives the commands that
+move a market — see [`web/README.md`](web/README.md).
 
 The dev server proxies `/api` to `:8080` so the browser sees **one origin**. That is not
 convenience — the session is a cookie and the CSRF defence is a cookie copied into a header, and
@@ -352,7 +358,7 @@ construction throws `IllegalAccessError`.
 **Except two modules, which are Apache-2.0:** `sbe` (the wire schema and its generated codecs) and
 `client` (the adapter SDK). Adapters and other clients link them, and are not bound by the AGPL
 for doing so. Each module carries its own `LICENSE`. Everything else, including `reference`, is
-AGPL-3.0-or-later as above.
+AGPL-3.0-or-later as above — except `docs/`.
 
     Copyright (C) 2026  P.M.Vrolijk
 
@@ -367,3 +373,15 @@ AGPL-3.0-or-later as above.
     WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
     See the License for the specific language governing permissions and
     limitations under the License.
+
+**The `docs/` folder is licensed under [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)**, not
+the AGPL: the specification, the rules and their rationale, the Operator's Manual and the
+presentation decks may be shared and adapted with attribution. The full text is
+[`docs/LICENSE`](docs/LICENSE). Not covered: the third-party assets inside the exported decks, which
+keep their own terms ([`docs/presentation/README.md`](docs/presentation/README.md)).
+
+    Copyright (C) 2026  P.M.Vrolijk
+
+    The contents of docs/ are licensed under the Creative Commons
+    Attribution 4.0 International License. To view a copy of this
+    license, visit https://creativecommons.org/licenses/by/4.0/

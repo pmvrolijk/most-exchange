@@ -9,7 +9,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 | **Where things stand, what to do next** | [`docs/Status.md`](docs/Status.md) — the session entry point |
 | **Normative behaviour** | [`docs/Design.md`](docs/Design.md) — authoritative. §8 is the open list |
 | **Why a rule exists** | [`docs/Rationale.md`](docs/Rationale.md) |
-| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2p |
+| **How a change happened** | [`docs/Handover.md`](docs/Handover.md) — archive, §2a–§2q |
 | **What an order entry adapter must do** | [`docs/Adapters.md`](docs/Adapters.md) — connecting, failover, resend, status, state |
 
 `docs/Design.md` is the specification — read it before implementing anything, and update it in the
@@ -457,6 +457,9 @@ IPC egress needs the gateway on the leader's media driver.
 
 `.claude/skills/` holds the procedures this project runs on: `session-open`, `session-close`,
 `wire-change`, `perf-claim`, `spec-first-test`, `decision-fork`, `verify-for-real`.
+
+**Every push publishes.** `origin` pushes to the home GitLab and to a public GitHub mirror, so keep
+claude.ai links, internal host names and real secrets out of tracked files (Handover §2q).
 
 **Commits are the user's call.** Do not run `git commit`, `git add` or `git push` unless asked in
 that turn — propose the message instead.

@@ -17,9 +17,9 @@ Before anything else: what a shard is. A shard is one Aeron Cluster — three ma
 
 Everything that follows is a consequence of four rules. Determinism is the big one: because every cluster node runs the same single-threaded engine over the same replicated log, they all end up byte-identical — which is what makes failover free. The flip side is that a crash is replicated too, so the engine validates defensively and rejects rather than throws. No wall-clock reads, no allocation on the hot path, and zero-copy publishing keep it both deterministic and fast.
 
-## 4. Eight modules, four processes on the hot path
+## 4. Nine modules, four processes on the hot path
 
-Eight Gradle modules. Four of them are the processes an order or a price actually passes through: the engine, the gateway, market-data and discovery. The engine runs inside Aeron Cluster, which provides Raft consensus, global sequencing and the archive that records the log. Every message on the wire is SBE, generated from a single schema, so no one hand-writes a byte offset. The control plane is the only part with a database and a web stack, and it is deliberately never on a boot path.
+Nine Gradle modules. Four of them are the processes an order or a price actually passes through: the engine, the gateway, market-data and discovery, and all four also build as native binaries. The engine runs inside Aeron Cluster, which provides Raft consensus, global sequencing and the archive that records the log. Every message on the wire is SBE, generated from a single schema, so no one hand-writes a byte offset. Two modules, sbe and client, are the adapter SDK: adapters live in their own repository and build on them, and they are published under Apache-2.0 while the exchange itself is AGPL. The control plane is the only part with a database and a web stack, and it is deliberately never on a boot path.
 
 ## 5. One order, one cache line
 
@@ -35,7 +35,7 @@ Here is a full production shard. Participants speak FIX. FIX order-entry adapter
 
 ## 8. The life of one order
 
-Follow one order. The participant's FIX engine sends a NewOrderSingle; the adapter translates it to SBE and passes it to the gateway. The gateway checks the security is on this shard, the participant is allowed on this gateway and may do this — any refusal happens here, before the log. The order then enters the cluster: Raft gives it a position in the log on a majority of nodes and the archive records it. Every node's engine applies it identically. The leader's execution report goes back the same way and arrives as a FIX ExecutionReport. In parallel the leader publishes a book event to market-data, which updates the L1, L2 and L3 feeds everyone sees. Most of the round-trip time is consensus and the wire — the exchange's own code is one to two percent of it.
+Follow one order. The participant's FIX engine sends a NewOrderSingle; the adapter translates it to SBE and passes it to the gateway. The gateway checks the security is on this shard, the participant is allowed on this gateway and may do this — any refusal happens here, before the log. The order then enters the cluster: Raft gives it a position in the log on a majority of nodes and the archive records it. Every node's engine applies it identically. Every node numbers the execution report and keeps it, so it can be sent again after a failover; the leader's copy goes back the same way and arrives as a FIX ExecutionReport. In parallel the leader publishes a book event to market-data, which updates the L1, L2 and L3 feeds everyone sees. Most of the round-trip time is consensus and the wire — the exchange's own code is one to two percent of it.
 
 ## 9. Each phase is a step on a path
 
@@ -49,13 +49,13 @@ This is the central limit order book as a participant sees it — here the contr
 
 Operators run the exchange from the control plane. It authors reference data — securities, shards, participants, gateways — in Postgres and publishes it as files that each process boots from, so the database is never needed for a node to start. Its calendar walks each session through the day. The Status page shows what the exchange is actually doing, read from the L3 feed, and the Operations page sends session transitions, purges, snapshots and reopenings. Commands are not acknowledged, so the console records that they were sent and then watches the feed for the result.
 
-## 12. Losing a machine loses no orders
+## 12. Losing a machine leaves no order unanswered
 
-Because every node is identical, losing one costs nothing: the survivors elect a new leader, which already holds the same books and simply starts talking. Gateways are stateless, so an adapter reconnects to another one. A full restart replays from the latest snapshot, and the engine republishes its books so market-data subscribers resynchronise. And a restart into a configuration that would lose an order refuses to start, loudly. That is also why the three core machines are run by systemd, not Kubernetes — their archive directory is the shard's resumption point.
+Because every node is identical, losing one costs no state: the survivors elect a new leader, which already holds the same books and simply starts talking. That is now run with three members — an election, two failovers, and a member rejoining from a snapshot. The harder question is the orders in flight when the leader dies. Every execution report is numbered per participant and kept in a ring on every node, so after a failover a client asks for a resend from its last number and gets what it missed; an order mass status settles anything older. In the failover runs, every one of 40,000 orders ended answered or proven never sequenced, with the gateway either independent or on each node. A full restart replays from the latest snapshot and republishes the books, and a node refuses to start — loudly — on a configuration that differs from the leader's or that would lose an order. That is also why the three core machines are run by systemd, not Kubernetes: their archive directory is the shard's resumption point.
 
-## 13. Matching is fast; the shared path sets the ceiling
+## 13. One node carries 1M orders/s — with IPC egress
 
-The engine itself is fast: under half a microsecond for a whole new order, with no allocation. The shard's throughput ceiling, though, is around 550 thousand orders a second across ten books with a dedicated media driver — the same aggregate one book reached, which shows the bottleneck is the path every order shares, not matching. That is below the 1 million per second target, and finding what binds there is the next piece of work. All of these are single-node figures on a development machine.
+The engine itself is fast: under half a microsecond for a whole new order, with no allocation. For a while the shard's ceiling was around 550 thousand orders a second across ten books, and the counters eventually showed why: execution reports outgrow one UDP datagram per duty cycle, so the media driver's UDP sender fills and the engine is back-pressured behind it. Put the gateway on the leader's node and egress on shared memory, and one node holds a million orders a second for eight seconds at an 83 microsecond median — the original target — and knees around 1.5 million. Two honest caveats. That placement means a gateway per node, which the failover slide covers. And the tail at a million per second is 44 milliseconds at the 99th percentile, still unexplained. All of these are single-node figures on a development machine; three separate machines are the next measurement.
 
 ## 14. One thread, one log, every node the same.
 

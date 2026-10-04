@@ -94,7 +94,7 @@ therefore means adding a protocol gateway, not changing this one. What such an a
 
 **Adapters are built on the `client` module** (decided 2026-10-03; Adapters.md §0). They live in a
 repository of their own. This project publishes `sbe` and `client`, under Apache-2.0 where
-everything else is AGPL, as the adapter SDK.
+the other modules are AGPL, as the adapter SDK.
 
 `client` holds what every adapter needs and nothing exchange-internal:
 - the directory client;

@@ -1,11 +1,23 @@
 # Status
 
 Where the project stands, what is open, and what to do next. **This is the session entry point** —
-read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2p),
+read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2q),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-03 (late close). **The adapter framework has started** (Handover §2p;
-Adapters.md §0):
+Last updated 2026-10-04. **The repository is public** (Handover §2q):
+- **Every push goes to the home GitLab and to `github.com/pmvrolijk/most-exchange`**, which is
+  public. Keep claude.ai links, internal host names and real secrets out of tracked files.
+- **GitHub Actions mirrors the GitLab pipeline** job for job (`.github/workflows/ci.yml`), and its
+  first run was green end to end, `e2e-restart` included.
+- **The SDK is published:** `sbe` and `client` at `0.1.0-SNAPSHOT` on GitHub Packages, by a manual
+  `publish-sdk` dispatch. Reading it needs a GitHub token, even though it is public (Adapters.md §0).
+- **The decks were updated and re-exported** with October's figures and features. Their icons are now
+  inline SVG drawn for them, so no export embeds the runtime's third-party icon font any more.
+  `docs/` is licensed under CC BY 4.0 (`docs/LICENSE`), not the AGPL.
+- The README's figures were brought up to date: nine modules, 681 tests, a stateless gateway, an
+  editable SPA, and attribution run A12 with its tail.
+
+On 2026-10-03 (late close), **the adapter framework started** (Handover §2p; Adapters.md §0):
 - **Adapters live in their own repository**, built on an **adapter SDK** this project publishes:
   `sbe` and a new **`client`** module, under Apache-2.0, where the exchange stays AGPL.
 - **FIX comes first, on Artio.** One session layer serves an order entry backend and a market data
@@ -87,7 +99,7 @@ disagree with the kernel, `backpressureStalls` cannot see back-pressure, and an 
 
 Before that (2026-09-27): a second gateway does not raise the ceiling (R8–R11, A5); every thread on the
 order path reports a duty cycle (Handover §2k). The participant-enforcement work (Handover §2j) is
-merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-or-later (`LICENSE.md`).
+merged to `master` and green in CI (pipelines 35–37). The project's code is AGPL-3.0-or-later (`LICENSE.md`); `docs/` is CC BY 4.0.
 
 ---
 
@@ -95,10 +107,10 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 
 | | |
 | --- | --- |
-| Branch | `master` at `aab4e01`, with this session's work **uncommitted** on top (the user commits it) |
+| Branch | `master` at `1107460`, with this session's close **uncommitted** on top (the user commits it). Pushed to GitLab and to the public GitHub mirror |
 | Modules | 9 — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`. Packages `nl.lamia.most.exchange.*` |
 | Kotlin | ~31,700 lines — 17,280 main across 80 files, 14,380 test across 70 |
-| Frontend | ~3,500 lines of TypeScript and Vue across 25 files, outside the Gradle build |
+| Frontend | ~3,600 lines of TypeScript and Vue across 25 files, outside the Gradle build |
 | Tests | 681, all passing |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
@@ -108,11 +120,11 @@ merged to `master` and green in CI (pipelines 35–37). The project is AGPL-3.0-
 | Local setup | [`LocalTesting.md`](LocalTesting.md) — §9 benchmarks, §9a attributes by stage |
 | Measurements | [`Measurements.md`](Measurements.md) — every figure with its machine, load and rate |
 | Baselines | [`baselines/`](baselines/) — the `.hgrm` histograms to diff a core change against |
-| CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34 |
+| CI | [`../.gitlab-ci.yml`](../.gitlab-ci.yml) — build, tests, e2e, native check; green on a self-hosted runner since pipeline 34. [`../.github/workflows/ci.yml`](../.github/workflows/ci.yml) — the same jobs on GitHub's hosted runners, plus `publish-sdk`; green since its first run |
 | Docker | [`../deploy/README.md`](../deploy/README.md) — full dev stack, one command |
 | Production | [`ProdDeployment.md`](ProdDeployment.md) — three dedicated machines plus k8s for the rest |
 | Adapters | [`Adapters.md`](Adapters.md) — §0 the framework (the SDK, Artio, what each adapter type waits on); §1–§6 the contract, which `client`'s `OrderEntrySession` implements |
-| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6) |
+| Operators | [`OperatorManual.pdf`](OperatorManual.pdf) — built from [`manual/`](manual/); §4.3 is the registry and what the gateway enforces, §4.8 and §5.7 the threading and capacity. Screenshots and transcripts regenerated from the dev stack this session. **Rebuilt 2026-09-30:** §4.8 now covers the egress channel and names IPC egress as the highest-throughput setting, with the placement it needs (gateway on the leader's driver; `todo` in §3.2); §5.7–5.8 and §6 corrected for the reversal. **Rebuilt 2026-10-03:** geometry changes need a snapshot at the end of the log (§4.2), the bulk cancel (§5.3, Figure 5.2, §6.7), and the corrected rule against stopping the engine alone (§5.6). **Rebuilt 2026-10-04:** the cover carries the CC BY 4.0 notice, and §5 picks up the sentence §2p changed |
 
 ```sh
 ./gradlew clean build                        # 681 tests (control's need Docker)
@@ -129,7 +141,7 @@ cd web && npm install && npm run dev         # the admin SPA on :5173
 
 ### What is real
 
-All eight modules are implemented. A single shard runs end to end: orders in through a gateway,
+All nine modules are implemented. A single shard runs end to end: orders in through a gateway,
 consensus, matching, execution reports out, L1/L2/L3 derived by a separate process, a control plane
 that authors reference data and drives the market over REST, and a console that shows live books.
 
@@ -394,8 +406,11 @@ order I would take them, cheapest-and-most-dangerous first:
    `enabled` is not read. Both have been wrong since the enforcement work (Handover §2j).
 
 Also cheap and outstanding: regenerate the manual's §5.8 `/api/status` transcript and the screenshots
-from a running dev stack (item 4). Before the repository goes public: strip or annotate the embedded
-icon font in the exported presentation decks, and plan NOTICE files for distributed binaries (§2k).
+from a running dev stack (item 4). The repository went public on 2026-10-04 (Handover §2k, §2q).
+~~The exported decks embed a third-party icon font~~ **Done 2026-10-04**: the icons are inline SVG, and
+the re-exports embed only the two OFL typefaces. The exports still inline the Slides viewer's
+stylesheet and script, which `docs/presentation/README.md` says. **Still overdue:** NOTICE files must
+travel with any distributed binary, and the SPA's footer "source" link was deferred to this move.
 
 The full list, in the order it was written:
 
@@ -510,12 +525,14 @@ The full list, in the order it was written:
       e2e is the first test of `OrderEntrySession` through a real failover;
     - (b) the market data backend: L1/L2 from `DepthFeedAssembler`, a `SecurityList` from the
       directory;
-    - (c) **publishing the SDK**, which needs a go (`publish:sdk`, manual);
+    - ~~(c) **publishing the SDK**~~ **Done 2026-10-04 on GitHub Packages** (`0.1.0-SNAPSHOT`, the
+      manual `publish-sdk` dispatch; Handover §2q). **Still open:** GitLab's `publish:sdk` has never
+      run, and a release version waits for a go, because neither registry takes one twice;
     - (d) 35=G (cancel/replace), decided in the FIX repository.
 
     MBO, trade capture and history each wait on the exchange (Adapters.md §0). Also open: open issues
-    18 and 19; `most send`/`cancel` are not on the session (Handover §2p); and the Operator's Manual
-    PDF needs rebuilding for one changed sentence in §5.
+    18 and 19; `most send`/`cancel` are not on the session (Handover §2p). ~~The Operator's Manual
+    PDF needs rebuilding for one changed sentence in §5~~ **Done 2026-10-04.**
 12. Roadmap remainder: TimescaleDB ticks; a read-only role now that there is a role column to put it
     in; serving the built SPA from the control jar rather than a dev proxy.
 

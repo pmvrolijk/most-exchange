@@ -1,7 +1,22 @@
 # most-exchange
 
+[![CI](https://github.com/pmvrolijk/most-exchange/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/pmvrolijk/most-exchange/actions/workflows/ci.yml?query=branch%3Amaster)
+
 A low-latency deterministic matching engine. Kotlin on GraalVM Native Image, Aeron Cluster for
 replication and sequencing, generated SBE codecs on the wire.
+
+Started as a proof of concept to see how far we can push a Kotlin stack in creating a fast, low latency,
+high throughput engine. Taking lessons learned when developing a FIX adapter using Artio and Aeron. 
+The project uses AI extensively as well; it is an attempt to see how I can build a complex system and keep it on track 
+using Claude and design driven development. The processes and skills are documented in the docs/ folder. In addition
+a full Operator Manual is maintained and kept to test automatic documentation using Claude.
+
+This is essentially a toy or demo project, no part of this is meant to be used in production or is in any way meant to be a 
+"real" project. The main goal is learning and trying out things. Concepts and technologies in it are however useful and
+can be applied to actual services. I am also still aiming for production grade quality, regarding resiliency,
+correctness, and auditability.
+
+In short, a fun exercise in building complex systems using Claude. No implied usefulness or guarantees. 
 
 **[`docs/Design.md`](docs/Design.md) is the authoritative specification.** Read it before changing
 anything; §8 tracks the open questions.

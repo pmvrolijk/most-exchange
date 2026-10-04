@@ -403,7 +403,7 @@ The full list, in the order it was written:
    (pipelines 35–37, `e2e:restart` included). Re-seed any long-lived dev stack
    (`docker compose down -v && up`) if it predates the merge: V6 changes the gateway tables.
 1. ~~**Get a GitLab runner onto the pipeline.**~~ **Done.** A self-hosted Docker-executor runner
-   (`clytemnestra`, privileged for `docker:dind`) runs [`.gitlab-ci.yml`](../.gitlab-ci.yml), and
+   (privileged for `docker:dind`) runs [`.gitlab-ci.yml`](../.gitlab-ci.yml), and
    pipeline 34 on `d198ad6` is green end to end: build, `test:core` — so the allocation proofs now
    hold on a machine that is not this laptop, and a noisy one — `test:control`, `test:web`, `e2e`,
    `e2e:restart` and `native:engine` (3 `jdk.internal.misc.Unsafe` references in the image).

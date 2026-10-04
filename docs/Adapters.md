@@ -31,8 +31,12 @@ not the participant registry, gateway authentication or operator commands. `refe
 exchange's own reference data, builds on it.
 
 **Depending on it.**
-- **Released:** from the GitLab package registry of `trading/most-exchange`. The manual
-  `publish:sdk` CI job publishes it, at `sdk.version` in `gradle.properties`.
+- **Released:** from the GitLab package registry of `trading/most-exchange`, published by the manual
+  `publish:sdk` CI job, or from GitHub Packages at `https://maven.pkg.github.com/pmvrolijk/most-exchange`,
+  published by the manual `publish-sdk` job of the GitHub workflow (a dispatch with `publish`
+  ticked). Both publish `sdk.version` from `gradle.properties`. **GitHub Packages needs credentials
+  to read, even for a public package**: a GitHub username and a token with `read:packages`, in the
+  repository's `credentials { }` block.
 - **Developing both repositories at once:** a composite build in the adapter repository,
   `includeBuild("../most-exchange")`. Gradle substitutes the project for the published coordinates,
   with no publish.

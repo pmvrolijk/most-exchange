@@ -123,8 +123,9 @@ subprojects {
 // The two Apache-2.0 modules an adapter links (docs/Adapters.md §0) are the only things this build
 // publishes. Everything else is the exchange, not a library, and keeps its unversioned jars.
 //
-// The repository is the GitLab project's package registry, reached only from CI with the job's own
-// token (the manual `publish:sdk` job). Locally, `publishToMavenLocal` -- or, better, a composite
+// The repositories are the GitLab project's package registry and the GitHub mirror's, each reached
+// only from its own CI with the job's own token (the manual `publish:sdk` and `publish-sdk` jobs,
+// one per host; each only sees its own). Locally, `publishToMavenLocal` -- or, better, a composite
 // build from the adapter repository (`includeBuild("../most-exchange")`), which needs no publish.
 val sdkSchema = Regex("""package="[^"]+"\s+id="(\d+)"\s+version="(\d+)"""")
     .find(file("sbe/src/main/resources/message-schema.xml").readText())
@@ -154,7 +155,7 @@ configure(listOf(project(":sbe"), project(":client"))) {
             from(components["java"])
             pom {
                 name.set("most-exchange ${project.name}")
-                url.set("https://gitlab.fritz.box/trading/most-exchange")
+                url.set("https://github.com/pmvrolijk/most-exchange")
                 licenses {
                     license {
                         name.set("Apache-2.0")
@@ -175,6 +176,20 @@ configure(listOf(project(":sbe"), project(":client"))) {
                         value = providers.environmentVariable("CI_JOB_TOKEN").orNull
                     }
                     authentication { create<HttpHeaderAuthentication>("header") }
+                }
+            }
+            // The GitHub mirror's package registry, from the workflow's own token (the manual
+            // `publish-sdk` job). Reading from it needs a token too, even for a public package.
+            val githubRepository = providers.environmentVariable("GITHUB_REPOSITORY").orNull
+            val githubToken = providers.environmentVariable("GITHUB_TOKEN").orNull
+            if (githubRepository != null && githubToken != null) {
+                maven {
+                    name = "github"
+                    url = uri("https://maven.pkg.github.com/$githubRepository")
+                    credentials {
+                        username = providers.environmentVariable("GITHUB_ACTOR").orNull
+                        password = githubToken
+                    }
                 }
             }
         }

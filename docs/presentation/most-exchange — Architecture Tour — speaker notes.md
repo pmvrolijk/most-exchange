@@ -1,6 +1,6 @@
 # most-exchange — Architecture Tour — speaker notes
 
-Source artifact: https://claude.ai/artifact/9b3UrvxHuQ8yurQJCRKUDZ
+Source: a private claude.ai Slides artifact (README.md).
 
 The HTML export drops speaker notes, so they are kept here. This file is generated from
 the artifact's slides: regenerate it after changing a slide, never edit it by hand.

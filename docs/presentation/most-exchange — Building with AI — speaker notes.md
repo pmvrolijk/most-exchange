@@ -1,6 +1,6 @@
 # most-exchange — Building with AI — speaker notes
 
-Source artifact: https://claude.ai/artifact/3iCccCmksZuR3fFwpz8bSr
+Source: a private claude.ai Slides artifact (README.md).
 
 The HTML export drops speaker notes, so they are kept here. This file is generated from
 the artifact's slides: regenerate it after changing a slide, never edit it by hand.

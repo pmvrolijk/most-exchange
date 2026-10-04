@@ -2,19 +2,16 @@
 
 Three five-minute decks, made on 26 September 2026. The `.html` files here are standalone exports,
 and each has a Markdown file of speaker notes beside it. The editable source of each deck is a
-claude.ai Slides artifact.
+claude.ai Slides artifact, private to its owner; the links are kept out of this public repository.
 
-| Deck | Slides | Export | Speaker notes | Source artifact |
-| --- | --- | --- | --- | --- |
-| **Architecture Tour** — what the exchange is, how it runs in production, what has been measured | 14 | [`most-exchange — Architecture Tour.html`](most-exchange%20—%20Architecture%20Tour.html) | [notes](most-exchange%20—%20Architecture%20Tour%20—%20speaker%20notes.md) | https://claude.ai/artifact/9b3UrvxHuQ8yurQJCRKUDZ |
-| **Building with AI** — how it was built with Claude Code: design first, written state, the session cycle | 12 | [`most-exchange — Building with AI.html`](most-exchange%20—%20Building%20with%20AI.html) | [notes](most-exchange%20—%20Building%20with%20AI%20—%20speaker%20notes.md) | https://claude.ai/artifact/3iCccCmksZuR3fFwpz8bSr |
-| **Inside the Code** — the module layout, then short code extracts from the core processes, the Docker stack, the e2e scripts and the build | 13 | [`most-exchange — Inside the Code.html`](most-exchange%20—%20Inside%20the%20Code.html) | [notes](most-exchange%20—%20Inside%20the%20Code%20—%20speaker%20notes.md) | https://claude.ai/artifact/2ChRmiw7ktcktJ93EGgArJ |
+| Deck | Slides | Export | Speaker notes |
+| --- | --- | --- | --- |
+| **Architecture Tour** — what the exchange is, how it runs in production, what has been measured | 14 | [`most-exchange — Architecture Tour.html`](most-exchange%20—%20Architecture%20Tour.html) | [notes](most-exchange%20—%20Architecture%20Tour%20—%20speaker%20notes.md) |
+| **Building with AI** — how it was built with Claude Code: design first, written state, the session cycle | 12 | [`most-exchange — Building with AI.html`](most-exchange%20—%20Building%20with%20AI.html) | [notes](most-exchange%20—%20Building%20with%20AI%20—%20speaker%20notes.md) |
+| **Inside the Code** — the module layout, then short code extracts from the core processes, the Docker stack, the e2e scripts and the build | 13 | [`most-exchange — Inside the Code.html`](most-exchange%20—%20Inside%20the%20Code.html) | [notes](most-exchange%20—%20Inside%20the%20Code%20—%20speaker%20notes.md) |
 
-The second deck builds on the 6 September retrospective, *Why This Build Stayed Steady*:
-https://claude.ai/artifact/7D23zbak98bxKhtsVVtqGk.
-
-The artifacts are private to their owner until they are shared from the page's Share menu. The
-exports need no access.
+The second deck builds on the 6 September retrospective, *Why This Build Stayed Steady*, also a
+private artifact. The exports need no access.
 
 ## Changing a deck
 
@@ -27,7 +24,8 @@ artifact's slide files, slide by slide under each slide's title. After changing 
 notes in the artifact, export, and regenerate the notes file. Never edit the notes file by hand:
 like the export, it is output. Only a Claude session can read an artifact's slide files, so ask one
 to regenerate it. The file takes each slide's `<h1>`/`<h2>` as the heading and its `<aside>` as the
-text, in the order `project/deck.json` gives.
+text, in the order `project/deck.json` gives. Its third line names the source as a private
+artifact, never by its link: this repository is public.
 
 **Update the figures from the documents they came from, not from memory.** Each number in a deck
 has a source here (below), and those documents move.

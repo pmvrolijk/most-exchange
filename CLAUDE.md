@@ -104,8 +104,9 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 - **`OrderEntrySession` is tested against `ExchangeModel`**, a model written from Design.md §5 and
   never from the session. Each expectation cites its clause, and ten mutations of the session are
   each caught by some test. When the spec changes, change the model first.
-- **Only `sbe` and `client` are published**, by the manual `publish:sdk` job, at `sdk.version`. A
-  publish is a release decision, and it waits for a go.
+- **Only `sbe` and `client` are published**, by the manual `publish:sdk` job (GitLab) or
+  `publish-sdk` (GitHub Actions, GitHub Packages), at `sdk.version`. A publish is a release decision,
+  and it waits for a go.
 
 ## Cluster lifecycle
 

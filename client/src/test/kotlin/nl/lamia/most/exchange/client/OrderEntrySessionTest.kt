@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.client
 
+import io.aeron.logbuffer.ControlledFragmentHandler
 import nl.lamia.most.exchange.sbe.ClientExecutionReportDecoder
 import nl.lamia.most.exchange.sbe.ExecType
 import nl.lamia.most.exchange.sbe.NewOrderSingleDecoder
@@ -10,6 +11,7 @@ import nl.lamia.most.exchange.sbe.Side
 import org.agrona.concurrent.NanoClock
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -86,6 +88,53 @@ class OrderEntrySessionTest {
         session.pump()
         assertEquals(1, exchange.sequenced.count { it == NewOrderSingleDecoder.TEMPLATE_ID })
         assertEquals(listOf(1L), seen.reports.map { it.clOrdId })
+    }
+
+    // ------------------------------------------------------------------------- reports the adapter refuses
+
+    @Test
+    fun `a refused report is delivered again, in order, and counted only once it is taken`() {
+        // Adapters.md §2: an aborted report stays on its stream and counts nothing; nothing behind it
+        // overtakes it.
+        val store = SessionStore.InMemory()
+        val session = session(store = store).opened()
+        seen.refuse = true
+        session.buy(1); session.buy(2) // seq 1 and 2, both refused
+        session.pump()
+        assertTrue(seen.reports.isEmpty())
+        assertTrue(seen.refused > 1, "offered again on every doWork")
+        assertEquals(1L, store.firstMissing(p), "the report sequence did not move")
+
+        seen.refuse = false
+        session.pump()
+        assertEquals(listOf(Report(1L, ExecType.NEW, 1L), Report(2L, ExecType.NEW, 2L)), seen.reports)
+        assertEquals(3L, store.firstMissing(p))
+        assertEquals(0L, session.duplicateReports)
+        assertEquals(0L, session.fencesSent, "a refused report opens no gap")
+        assertTrue(seen.settled.isEmpty())
+    }
+
+    @Test
+    fun `a fence's completion is not read past a replayed report the adapter refused`() {
+        // Adapters.md §2 and §4: a completion is never read before the replayed reports ahead of it.
+        // Read past a refused replay, a COMPLETE fence would settle a sequenced order NEVER_SEQUENCED:
+        // a reject to the client for an order resting in the book.
+        val session = session().opened()
+        a.dropReports = true
+        session.buy(1) // sequenced, its report lost
+        a.dropReports = false
+        a.mode = ModelGateway.Mode.STANDBY
+        seen.refuse = true
+        session.buy(2) // refused by the standby: a switch to b, whose fence replays seq 1, then completes
+        session.pump()
+        assertEquals(b.endpoint, session.activeGateway)
+        assertEquals(ReportResendRequestDecoder.TEMPLATE_ID, b.received.first())
+        assertEquals(mapOf(2L to OrderFate.NEVER_SEQUENCED), seen.settled, "only the standby's refusal")
+
+        seen.refuse = false
+        session.pump()
+        assertEquals(listOf(Report(1L, ExecType.NEW, 1L)), seen.reports)
+        assertEquals(mapOf(2L to OrderFate.NEVER_SEQUENCED), seen.settled, "order 1 was answered, not settled")
     }
 
     // ------------------------------------------------------------------------- gaps and replays
@@ -270,6 +319,57 @@ class OrderEntrySessionTest {
     }
 
     @Test
+    fun `requests restored at a restart are fenced even with nothing stored -- answered by a replay, or never sequenced`() {
+        // Adapters.md §5 "Requests in flight at a restart": sent before anything the new process sends,
+        // a fence owed whatever the stored sequence says, then settled by §4's rules.
+        exchange.sequence(a, order(clOrdId = 300L)) // seq 1: the previous run sent 300 and died before its report
+        a.drain()
+        val session = session()
+        session.restoreInFlight(p, 300L)
+        session.restoreInFlight(p, 301L) // the previous run's last request, which never reached the log
+        session.opened()
+
+        assertEquals(
+            listOf(ReportResendRequestDecoder.TEMPLATE_ID, OrderMassStatusRequestDecoder.TEMPLATE_ID),
+            a.received,
+            "the fence goes before the opening mass status",
+        )
+        assertEquals(1L, a.lastRequest<ReportResendRequestDecoder>().fromSeq())
+        assertEquals(Report(300L, ExecType.NEW, 1L), seen.reports.first())
+        assertEquals(mapOf(301L to OrderFate.NEVER_SEQUENCED), seen.settled)
+    }
+
+    @Test
+    fun `a restored request that a truncated resend and the mass status cannot account for is ambiguous, never rejected`() {
+        // Adapters.md §5 with §4 on TRUNCATED: neither replayed nor stated open.
+        val small = ExchangeModel(retention = 1)
+        val sa = ModelGateway(small, "a")
+        small.sequence(sa, order(clOrdId = 400L)) // seq 1
+        small.fill(sa, p, 400L, 10_00000000L) // seq 2: 400 finishes
+        small.sequence(sa, order(clOrdId = 401L)) // seq 3, open; the ring holds only this one
+        sa.drain()
+        val session = OrderEntrySession(listOf(sa), longArrayOf(p), seen, OrderEntrySession.Config(requestIdBase = 1_000L), clock = clock)
+        for (clOrdId in longArrayOf(400L, 401L, 402L)) session.restoreInFlight(p, clOrdId)
+        session.opened()
+
+        assertEquals(Report(401L, ExecType.NEW, 3L), seen.reports.first(), "what the ring still held is replayed")
+        assertEquals(
+            mapOf(400L to OrderFate.AMBIGUOUS, 402L to OrderFate.AMBIGUOUS),
+            seen.settled,
+            "400 finished in the lost window and 402 never arrived: the two cannot be told apart",
+        )
+    }
+
+    @Test
+    fun `a request is restored only before the session starts, and only for its own participants`() {
+        // Adapters.md §5: before the first doWork.
+        val session = session()
+        assertFailsWith<IllegalArgumentException> { session.restoreInFlight(99L, 1L) }
+        session.doWork()
+        assertFailsWith<IllegalStateException> { session.restoreInFlight(p, 1L) }
+    }
+
+    @Test
     fun `reports for participants the session does not act for are not delivered`() {
         val session = session().opened()
         exchange.sequence(a, order(participantId = 99L, clOrdId = 1L))
@@ -293,7 +393,7 @@ class OrderEntrySessionTest {
 
     private fun ModelGateway.drain() {
         do {
-            val drained = poll({ _, _, _, _ -> }, 100)
+            val drained = controlledPoll({ _, _, _, _ -> ControlledFragmentHandler.Action.CONTINUE }, 100)
         } while (drained > 0)
     }
 
@@ -307,8 +407,17 @@ class OrderEntrySessionTest {
         val statuses = mutableListOf<Pair<RequestStatus, Long>>()
         var ready = 0
 
-        override fun onReport(report: ClientExecutionReportDecoder) {
+        /** While true, every report is refused, as a back-pressured FIX session refuses it. */
+        var refuse = false
+        var refused = 0
+
+        override fun onReport(report: ClientExecutionReportDecoder): ReportAction {
+            if (refuse) {
+                refused++
+                return ReportAction.ABORT
+            }
             reports += Report(report.clOrdId(), report.execType(), report.reportSeq())
+            return ReportAction.CONSUMED
         }
 
         override fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate) {

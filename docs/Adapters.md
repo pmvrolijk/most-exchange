@@ -24,7 +24,7 @@ two modules under **Apache-2.0** (the exchange itself is AGPL-3.0-or-later):
 | Artifact | What it holds |
 | --- | --- |
 | `nl.lamia.most.exchange:sbe` | The wire schema and its generated codecs. The jar's manifest names the schema id and version (`Most-Sbe-Schema-Version`) |
-| `nl.lamia.most.exchange:client` | `DirectoryClient` and `ShardRoute`: which shard serves a security, and its gateway's endpoints. `DepthFeedAssembler`, `DepthFeedDecoder`, `AggregatedBook`, `FeedSequenceTracker`: a trusted L2 book from the feeds. `OrderRequests` and `ParticipantRequests`: the order, cancel, resend and status encoders. `ReportLedger`: which reports arrived. `OrderEntrySession`, `GatewayLink`/`AeronGatewayLink` and `SessionStore`: §1–§4. `PriceCodec`: fixed-point prices |
+| `nl.lamia.most.exchange:client` | `DirectoryClient` and `ShardRoute`: which shard serves a security, and its gateway's endpoints. `DepthFeedAssembler`, `DepthFeedDecoder`, `AggregatedBook`, `FeedSequenceTracker`: a trusted L2 book from the feeds. `OrderRequests` and `ParticipantRequests`: the order, cancel, resend and status encoders. `ReportLedger`: which reports arrived. `OrderEntrySession`, `OrderEntryListener`/`ReportAction`, `GatewayLink`/`AeronGatewayLink` and `SessionStore`: §1–§5. `PriceCodec`: fixed-point prices and quantities, from text or a FIX decimal |
 
 `client` depends on `sbe`, `aeron-client` and `agrona` only. Nothing exchange-internal goes into it:
 not the participant registry, gateway authentication or operator commands. `reference`, the
@@ -95,10 +95,20 @@ backends:
 - **Keep `exchangeOrderId`** from the first report. A cancel names both `exchangeOrderId` and
   `origClOrdId`.
 - **Prices and quantities are fixed-point `int64` with 8 implied decimals** (`PriceCodec`). Never pass
-  a floating-point value through.
+  a floating-point value through. A FIX decimal arrives as a mantissa and a scale (Artio's
+  `DecimalFloat`): `PriceCodec.fromDecimal(mantissa, scale)` converts it without allocating, and
+  answers `PriceCodec.INVALID` for one that is not exact at 8 decimals or does not fit. The other way
+  needs no conversion: a fixed-point value *is* the mantissa at scale 8.
 - **Back-pressure is not loss.** A publication offer that returns `BACK_PRESSURED` or `ADMIN_ACTION`
   MUST be retried, not dropped. The gateway itself holds a message the cluster cannot take yet. Only
   `NOT_CONNECTED` / `CLOSED` mean the gateway is gone (§3).
+- **A report the adapter cannot pass on yet is not consumed.** When its own client cannot take the
+  report now (a back-pressured FIX session), `OrderEntryListener.onReport` returns
+  `ReportAction.ABORT`. The session leaves the report on its gateway's stream (Aeron's controlled
+  poll), and counts nothing: the report sequence, the request's in-flight state and the gap check are
+  as if it had not arrived. It is delivered again on a later `doWork`, and nothing behind it on that
+  stream overtakes it, so a fence's completion is never read before the replayed reports ahead of it.
+  Abort only on a condition that clears: a report aborted for good stalls its gateway's stream.
 - **Operator commands do not belong in an adapter.** Session transitions, purges, definitions, images
   and bulk cancels go through an operator gateway, which a participant's gateway refuses.
 
@@ -158,6 +168,17 @@ MUST do:
 **Persisting the first two across an adapter restart** turns a restart into a resend from where it
 stopped. Without it, an adapter restarts on a mass status: open orders are recovered exactly, and
 anything that finished while it was down is learned only from trade records.
+
+**Requests in flight at a restart.** An adapter that persists its orders hands each one that has no
+report yet back with `OrderEntrySession.restoreInFlight(participantId, clOrdId)`, before the first
+`doWork`. A restored request counts as sent before anything the new process sends, and a fence is
+owed for its participant whatever the stored sequence says. It is then settled by §4's rules: by its
+report if the resend replays one, `NEVER_SEQUENCED` if the resend completes without one, `AMBIGUOUS`
+if it is truncated and the mass status does not state the order. The fence is what makes this
+sound: without one, the opening mass status would move the sequence past the request's report and
+leave the request with no fate. For the same reason, **store an order's report before storing a
+first missing `reportSeq` past it**: a restored request must never have its report below the stored
+sequence, where no resend asks.
 
 ## 6. Not yet provided by the exchange
 

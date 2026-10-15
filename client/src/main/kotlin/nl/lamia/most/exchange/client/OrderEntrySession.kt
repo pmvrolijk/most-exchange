@@ -1,7 +1,8 @@
 package nl.lamia.most.exchange.client
 
-import io.aeron.FragmentAssembler
+import io.aeron.ControlledFragmentAssembler
 import io.aeron.Publication
+import io.aeron.logbuffer.ControlledFragmentHandler.Action
 import nl.lamia.most.exchange.sbe.ClientExecutionReportDecoder
 import nl.lamia.most.exchange.sbe.ExecType
 import nl.lamia.most.exchange.sbe.MessageHeaderDecoder
@@ -60,6 +61,18 @@ enum class OrderFate {
     AMBIGUOUS,
 }
 
+/** What [OrderEntryListener.onReport] did with a report (docs/Adapters.md §2). */
+enum class ReportAction {
+    /** Taken: counted, and never delivered again. */
+    CONSUMED,
+
+    /**
+     * Not taken, and not lost: the report stays on its gateway's stream, counts nothing, and is
+     * delivered again on a later [OrderEntrySession.doWork]. Only for a condition that clears.
+     */
+    ABORT,
+}
+
 /**
  * What an [OrderEntrySession] tells its adapter. Called on the session's thread, from
  * [OrderEntrySession.doWork], [OrderEntrySession.newOrder] or [OrderEntrySession.cancel].
@@ -71,9 +84,10 @@ interface OrderEntryListener {
      * included. A gateway's `GATEWAY_UNAVAILABLE` reject is not — it is not the market's answer, and
      * arrives as [onSettled] instead.
      *
-     * The decoder is valid only during the call.
+     * The decoder is valid only during the call. [ReportAction.ABORT] leaves the report unconsumed:
+     * nothing behind it on the same gateway's stream is read until it is taken.
      */
-    fun onReport(report: ClientExecutionReportDecoder)
+    fun onReport(report: ClientExecutionReportDecoder): ReportAction
 
     /** A request that had no report was settled without one. */
     fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate)
@@ -133,7 +147,8 @@ interface SessionStore {
  *
  * The session tracks only requests still waiting for their first report, keyed by `clOrdId`, which
  * must be unique per participant for the trading day (docs/Adapters.md §2). Mapping the client's own
- * identifiers, and keeping `exchangeOrderId` for cancels, are the adapter's.
+ * identifiers, and keeping `exchangeOrderId` for cancels, are the adapter's. After a restart, the
+ * adapter hands its unanswered requests back with [restoreInFlight] (docs/Adapters.md §5).
  *
  * Not thread-safe: [doWork], [newOrder], [cancel] and [requestMassStatus] belong to one thread, as
  * an Artio library's poll loop does.
@@ -177,6 +192,7 @@ class OrderEntrySession(
     private val participants = Array(participantIds.size) { Participant(participantIds[it]) }
 
     private var active = -1
+    private var started = false
     private var activeDown = false
     private var startupPending = 0
     private var nextRequestId = config.requestIdBase
@@ -207,19 +223,20 @@ class OrderEntrySession(
     private val resendComplete = ReportResendCompleteDecoder()
     private val statusComplete = OrderMassStatusCompleteDecoder()
     private val handlers = Array(links.size) { link ->
-        FragmentAssembler { buffer, offset, length, _ -> onFragment(link, buffer, offset, length) }
+        ControlledFragmentAssembler { buffer, offset, length, _ -> onFragment(link, buffer, offset, length) }
     }
     private val settling = LongArrayList()
 
     override fun roleName(): String = "order-entry-session"
 
     override fun doWork(): Int {
+        started = true
         var work = 0
         if (active < 0) {
             if (!connect()) return 0
             work++
         }
-        for (i in links.indices) work += links[i].poll(handlers[i], config.fragmentLimit)
+        for (i in links.indices) work += links[i].controlledPoll(handlers[i], config.fragmentLimit)
         work += watchActiveGateway()
         work += flushRequests()
         checkUnanswered()
@@ -279,6 +296,18 @@ class OrderEntrySession(
         p.statusRequestId = 0L
         p.statusSecurityId = securityId
         return true
+    }
+
+    /**
+     * Hands back a request the previous process sent that has no report yet (docs/Adapters.md §5),
+     * before the first [doWork]. It counts as sent before anything this session sends, and its
+     * participant fences whatever the [SessionStore] says, so it is settled by the usual rules.
+     */
+    fun restoreInFlight(participantId: Long, clOrdId: Long) {
+        val p = requireNotNull(participantOf(participantId)) { "participant $participantId is not this session's" }
+        check(!started) { "requests are restored before the first doWork" }
+        p.inFlight.put(clOrdId, InFlight(sendPosition++, clock.nanoTime()))
+        p.fenceOwed = true
     }
 
     // ------------------------------------------------------------------ connecting and switching
@@ -415,14 +444,14 @@ class OrderEntrySession(
 
     // ------------------------------------------------------------------ receiving
 
-    private fun onFragment(link: Int, buffer: DirectBuffer, offset: Int, length: Int) {
-        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return
+    private fun onFragment(link: Int, buffer: DirectBuffer, offset: Int, length: Int): Action {
+        if (length < MessageHeaderDecoder.ENCODED_LENGTH) return Action.CONTINUE
         header.wrap(buffer, offset)
         val body = offset + MessageHeaderDecoder.ENCODED_LENGTH
         when (header.templateId()) {
             ClientExecutionReportDecoder.TEMPLATE_ID -> {
                 report.wrap(buffer, body, header.blockLength(), header.version())
-                onReport(link)
+                return onReport(link)
             }
             ReportResendCompleteDecoder.TEMPLATE_ID -> {
                 resendComplete.wrap(buffer, body, header.blockLength(), header.version())
@@ -433,11 +462,12 @@ class OrderEntrySession(
                 onStatusComplete(link)
             }
         }
+        return Action.CONTINUE
     }
 
-    private fun onReport(link: Int) {
+    private fun onReport(link: Int): Action {
         val i = ledger.indexOf(report.participantId())
-        if (i < 0) return
+        if (i < 0) return Action.CONTINUE
         val p = participants[i]
         val clOrdId = report.clOrdId()
         if (report.execType() == ExecType.REJECTED && report.rejectReason() == RejectReason.GATEWAY_UNAVAILABLE) {
@@ -445,13 +475,20 @@ class OrderEntrySession(
             if (p.inFlight.remove(clOrdId) != null) listener.onSettled(p.id, clOrdId, OrderFate.NEVER_SEQUENCED)
             // Move on once: the rejects still arriving from the same gateway must not move again.
             if (link == active) switchGateway()
-            return
+            return Action.CONTINUE
         }
+        val reportSeq = report.reportSeq()
+        if (!ledger.isNew(p.id, reportSeq)) {
+            ledger.accept(p.id, reportSeq) // counts the duplicate
+            return Action.CONTINUE
+        }
+        // Nothing is counted until the adapter has taken it (docs/Adapters.md §2).
+        if (listener.onReport(report) == ReportAction.ABORT) return Action.ABORT
         val gapsBefore = ledger.gapsOpened
-        if (!ledger.accept(p.id, report.reportSeq())) return
+        ledger.accept(p.id, reportSeq)
         if (ledger.gapsOpened != gapsBefore && p.fenceRequestId == 0L) p.fenceOwed = true
         p.inFlight.remove(clOrdId)
-        listener.onReport(report)
+        return Action.CONTINUE
     }
 
     private fun onResendComplete(link: Int) {

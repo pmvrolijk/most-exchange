@@ -6,6 +6,7 @@ import nl.lamia.most.exchange.client.OrderEntryListener
 import nl.lamia.most.exchange.client.OrderEntrySession
 import nl.lamia.most.exchange.client.OrderFate
 import nl.lamia.most.exchange.client.ParticipantRequests
+import nl.lamia.most.exchange.client.ReportAction
 import nl.lamia.most.exchange.sbe.ClientExecutionReportDecoder
 import nl.lamia.most.exchange.sbe.ExecType
 import nl.lamia.most.exchange.sbe.RequestStatus
@@ -61,10 +62,12 @@ fun runStatus(args: Args) {
         val session = OrderEntrySession(
             listOf(link), longArrayOf(participantId),
             object : OrderEntryListener {
-                override fun onReport(report: ClientExecutionReportDecoder) {
-                    if (report.execType() != ExecType.ORDER_STATUS) return
-                    val name = directory.routeFor(report.securityId())?.symbol ?: "#${report.securityId()}"
-                    println(formatReport(report, name))
+                override fun onReport(report: ClientExecutionReportDecoder): ReportAction {
+                    if (report.execType() == ExecType.ORDER_STATUS) {
+                        val name = directory.routeFor(report.securityId())?.symbol ?: "#${report.securityId()}"
+                        println(formatReport(report, name))
+                    }
+                    return ReportAction.CONSUMED
                 }
 
                 override fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate) = Unit

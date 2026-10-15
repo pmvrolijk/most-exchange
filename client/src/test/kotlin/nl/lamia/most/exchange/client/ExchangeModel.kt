@@ -1,7 +1,7 @@
 package nl.lamia.most.exchange.client
 
 import io.aeron.Publication
-import io.aeron.logbuffer.FragmentHandler
+import io.aeron.logbuffer.ControlledFragmentHandler
 import io.aeron.logbuffer.FrameDescriptor
 import io.aeron.logbuffer.Header
 import io.aeron.protocol.DataHeaderFlyweight
@@ -188,7 +188,7 @@ class ModelGateway(private val exchange: ExchangeModel, name: String) : GatewayL
     val requests = mutableListOf<Any>()
     private val outbound = ArrayDeque<ByteArray>()
 
-    // Every report fits one frame, as on the real stream: FragmentAssembler passes it straight through.
+    // Every report fits one frame, as on the real stream: the assembler passes it straight through.
     private val frameHeader = Header(0, 0).apply {
         val frame = UnsafeBuffer(ByteArray(DataHeaderFlyweight.HEADER_LENGTH))
         DataHeaderFlyweight(frame).flags(FrameDescriptor.UNFRAGMENTED.toShort())
@@ -219,12 +219,22 @@ class ModelGateway(private val exchange: ExchangeModel, name: String) : GatewayL
         return position
     }
 
-    override fun poll(handler: FragmentHandler, fragmentLimit: Int): Int {
+    /** As Aeron's controlled poll: an aborted fragment stays at the head of the stream, unconsumed. */
+    override fun controlledPoll(handler: ControlledFragmentHandler, fragmentLimit: Int): Int {
         var n = 0
         while (n < fragmentLimit && outbound.isNotEmpty()) {
-            val bytes = outbound.removeFirst()
-            handler.onFragment(UnsafeBuffer(bytes), 0, bytes.size, frameHeader)
-            n++
+            val bytes = outbound.first()
+            when (handler.onFragment(UnsafeBuffer(bytes), 0, bytes.size, frameHeader)) {
+                ControlledFragmentHandler.Action.ABORT -> return n
+                ControlledFragmentHandler.Action.BREAK -> {
+                    outbound.removeFirst()
+                    return n + 1
+                }
+                else -> {
+                    outbound.removeFirst()
+                    n++
+                }
+            }
         }
         return n
     }

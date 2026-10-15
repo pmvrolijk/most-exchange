@@ -107,7 +107,7 @@ merged to `master` and green in CI (pipelines 35–37). The project's code is AG
 
 | | |
 | --- | --- |
-| Branch | `master` at `1107460`, with this session's close **uncommitted** on top (the user commits it). Pushed to GitLab and to the public GitHub mirror |
+| Branch | `master` at `456ea63`, clean, and pushed to GitLab and to the public GitHub mirror |
 | Modules | 9 — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`. Packages `nl.lamia.most.exchange.*` |
 | Kotlin | ~31,700 lines — 17,280 main across 80 files, 14,380 test across 70 |
 | Frontend | ~3,600 lines of TypeScript and Vue across 25 files, outside the Gradle build |

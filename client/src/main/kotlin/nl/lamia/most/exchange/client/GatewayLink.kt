@@ -3,7 +3,7 @@ package nl.lamia.most.exchange.client
 import io.aeron.Aeron
 import io.aeron.ExclusivePublication
 import io.aeron.Subscription
-import io.aeron.logbuffer.FragmentHandler
+import io.aeron.logbuffer.ControlledFragmentHandler
 import org.agrona.DirectBuffer
 
 /**
@@ -50,7 +50,8 @@ interface GatewayLink {
 
     fun offer(buffer: DirectBuffer, offset: Int, length: Int): Long
 
-    fun poll(handler: FragmentHandler, fragmentLimit: Int): Int
+    /** Reports, as `io.aeron.Subscription.controlledPoll`: an aborted fragment is delivered again. */
+    fun controlledPoll(handler: ControlledFragmentHandler, fragmentLimit: Int): Int
 }
 
 /**
@@ -69,7 +70,8 @@ class AeronGatewayLink(aeron: Aeron, override val endpoint: GatewayEndpoint) : G
 
     override fun offer(buffer: DirectBuffer, offset: Int, length: Int): Long = orders.offer(buffer, offset, length)
 
-    override fun poll(handler: FragmentHandler, fragmentLimit: Int): Int = reports.poll(handler, fragmentLimit)
+    override fun controlledPoll(handler: ControlledFragmentHandler, fragmentLimit: Int): Int =
+        reports.controlledPoll(handler, fragmentLimit)
 
     override fun close() {
         orders.close()

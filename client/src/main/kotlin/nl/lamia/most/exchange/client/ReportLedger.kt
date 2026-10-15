@@ -50,6 +50,12 @@ class ReportLedger(private val participantIds: LongArray) {
     var gapsOpened = 0L
         private set
 
+    /** True when [accept] would count this report: unsequenced, untracked, or not yet received. Counts nothing. */
+    fun isNew(participantId: Long, reportSeq: Long): Boolean {
+        val i = indexOf(participantId)
+        return reportSeq <= 0L || i < 0 || !seen[i].get((reportSeq - 1).toInt())
+    }
+
     /** True for a report to count; false for one already received. */
     fun accept(participantId: Long, reportSeq: Long): Boolean {
         val i = indexOf(participantId)

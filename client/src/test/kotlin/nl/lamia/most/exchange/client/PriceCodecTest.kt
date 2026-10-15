@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.client
 
+import java.lang.management.ManagementFactory
 import kotlin.test.Test
 import kotlin.test.assertContains
 import kotlin.test.assertEquals
@@ -56,6 +57,58 @@ class PriceCodecTest {
             assertEquals(it.toBigDecimal().stripTrailingZeros(),
                 PriceCodec.format(PriceCodec.parse(it)).toBigDecimal().stripTrailingZeros())
         }
+    }
+
+    // ------------------------------------------------------------------------- from a FIX decimal
+
+    @Test
+    fun `a FIX decimal converts exactly to the implied scale`() {
+        // Adapters.md §2: a mantissa and a scale, as Artio's DecimalFloat holds them.
+        assertEquals(100_25000000L, PriceCodec.fromDecimal(10025L, 2))
+        assertEquals(100_00000000L, PriceCodec.fromDecimal(100L, 0))
+        assertEquals(1L, PriceCodec.fromDecimal(1L, 8))
+        assertEquals(-50_50000000L, PriceCodec.fromDecimal(-505L, 1))
+        assertEquals(0L, PriceCodec.fromDecimal(0L, 0))
+        // More than 8 places is still exact when the digits beyond the eighth are zeros.
+        assertEquals(123L, PriceCodec.fromDecimal(1230L, 9))
+        assertEquals(1_00000000L, PriceCodec.fromDecimal(1_000_000_000_000_000_000L, 18))
+    }
+
+    @Test
+    fun `a FIX decimal that is not exact at 8 places, or does not fit, is INVALID and never rounded`() {
+        // Adapters.md §2: INVALID for one that is not exact at 8 decimals or does not fit.
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(123456789L, 9))
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(1L, 19))
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(Long.MAX_VALUE / 10, 0))
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(Long.MIN_VALUE / 10, 0))
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(1L, -1))
+        assertEquals(PriceCodec.INVALID, PriceCodec.fromDecimal(Long.MIN_VALUE, 8))
+    }
+
+    @Test
+    fun `a fixed-point value is its own FIX decimal at scale 8`() {
+        // Adapters.md §2: the other way needs no conversion.
+        listOf("0.00000001", "1.15", "100.25", "-50.5", "9999.99999999").map(PriceCodec::parse).forEach {
+            assertEquals(it, PriceCodec.fromDecimal(it, PriceCodec.IMPLIED_DECIMALS))
+        }
+    }
+
+    @Test
+    fun `converting a FIX decimal allocates nothing`() {
+        // Adapters.md §2: without allocating. Judged as the engine's proofs are: most windows read zero.
+        val threads = ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        var sink = 0L
+        fun round() {
+            for (scale in 0..12) sink += PriceCodec.fromDecimal(10025L + scale, scale)
+            sink += PriceCodec.fromDecimal(123456789L, 9)
+        }
+        repeat(200_000) { round() }
+        val zeroWindows = (1..8).count {
+            val before = threads.currentThreadAllocatedBytes
+            repeat(100_000) { round() }
+            threads.currentThreadAllocatedBytes - before == 0L
+        }
+        assertTrue(zeroWindows > 4, "only $zeroWindows of 8 windows read zero bytes (sink $sink)")
     }
 
     @Test

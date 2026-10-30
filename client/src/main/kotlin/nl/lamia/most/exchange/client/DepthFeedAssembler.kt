@@ -36,8 +36,14 @@ enum class SyncState {
  *
  * Sequence tracking is per shard and per stream: several shards may share one multicast group, and
  * the snapshot stream numbers independently of the incremental one.
+ *
+ * A [listener] is told what was applied, for a consumer that forwards the feed in another protocol
+ * rather than only reading the book.
  */
-class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
+class DepthFeedAssembler(
+    private val maxPending: Int = DEFAULT_MAX_PENDING,
+    private val listener: DepthFeedListener = DepthFeedListener.NONE,
+) {
 
     private val l2Sequences = FeedSequenceTracker()
     private val snapshotSequences = FeedSequenceTracker()
@@ -88,7 +94,10 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
         if (l2Sequences.accept(shardId, seqNum) > 0L) desynchronise(shardId)
         val feed = feedFor(securityId, shardId)
         when (feed.state) {
-            SyncState.SYNCHRONISED -> feed.book.applyDepth(isBid, price, aggregateQty, orderCount)
+            SyncState.SYNCHRONISED -> {
+                feed.book.applyDepth(isBid, price, aggregateQty, orderCount)
+                listener.onDepthChanged(securityId, isBid, price, aggregateQty, orderCount)
+            }
             SyncState.BUILDING -> feed.buffer(seqNum, isBid, price, aggregateQty, orderCount, maxPending)
                 .also { if (!it) abandon(feed) }
             SyncState.WAITING -> updatesWithoutImage++
@@ -101,6 +110,7 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
      */
     fun onLastTrade(securityId: Int, shardId: Int, seqNum: Long, price: Long, qty: Long) {
         feedFor(securityId, shardId).book.applyTrade(price, qty)
+        listener.onTrade(securityId, price, qty)
     }
 
     fun onSnapshotBegin(
@@ -126,6 +136,7 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
         // none does, and it sits on an empty ladder for ever with nothing looking wrong. That is
         // exactly what a consumer starting up after a market data recovery sees.
         if (feed.state == SyncState.SYNCHRONISED && l2SeqNum < l2Sequences.lastSeen(shardId)) return
+        val wasTrusted = feed.state == SyncState.SYNCHRONISED
         feed.state = SyncState.BUILDING
         feed.staging.clear()
         feed.pending.clear()
@@ -133,6 +144,7 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
         feed.expectedLevels = levelCount
         feed.lastTradePrice = lastTradePrice
         feed.lastTradeQty = lastTradeQty
+        if (wasTrusted) listener.onDesynchronised(securityId)
     }
 
     fun onSnapshotLevel(
@@ -196,6 +208,7 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
         feed.pending.clear()
         feed.state = SyncState.SYNCHRONISED
         snapshotsApplied++
+        listener.onSynchronised(securityId)
     }
 
     /**
@@ -206,11 +219,13 @@ class DepthFeedAssembler(private val maxPending: Int = DEFAULT_MAX_PENDING) {
     private fun desynchronise(shardId: Int) {
         for (feed in states.values) {
             if (feed.shardId != shardId || feed.state == SyncState.WAITING) continue
+            val wasTrusted = feed.state == SyncState.SYNCHRONISED
             feed.book.clearDepth()
             feed.staging.clear()
             feed.pending.clear()
             feed.state = SyncState.WAITING
             desynchronisations++
+            if (wasTrusted) listener.onDesynchronised(feed.book.securityId)
         }
     }
 

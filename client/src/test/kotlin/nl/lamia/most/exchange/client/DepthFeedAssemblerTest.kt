@@ -222,4 +222,115 @@ class DepthFeedAssemblerTest {
         val book = assertNotNull(a.book(security))
         assertEquals(100L, book.lastTradePrice)
     }
+
+    // ------------------------------------------------------------ the listener (Adapters.md §0)
+
+    /** What a listener was told, in order, as text. */
+    private class Told(private val atSynchronised: (Int) -> String = { "" }) : DepthFeedListener {
+        val events = mutableListOf<String>()
+        override fun onDepthChanged(securityId: Int, isBid: Boolean, price: Long, aggregateQty: Long, orderCount: Int) {
+            events += "depth $securityId ${if (isBid) "bid" else "ask"} $price $aggregateQty $orderCount"
+        }
+        override fun onTrade(securityId: Int, price: Long, qty: Long) { events += "trade $securityId $price $qty" }
+        override fun onSynchronised(securityId: Int) { events += "synchronised $securityId${atSynchronised(securityId)}" }
+        override fun onDesynchronised(securityId: Int) { events += "desynchronised $securityId" }
+    }
+
+    @Test
+    fun `a listener is told synchronised once the image and the updates after it are in the book, and nothing it installed`() {
+        // A consumer renders a snapshot at synchronised: by then the book must hold the buffered
+        // updates too, and telling it each installed level as a change would send them twice.
+        lateinit var a: DepthFeedAssembler
+        val told = Told { id -> ", bid levels ${a.book(id)?.levels(isBid = true, limit = 5)?.map { it.price }}" }
+        a = DepthFeedAssembler(listener = told)
+        a.onSnapshotBegin(security, shard, ++snap, l2, DepthFeedAssembler.NO_PRICE, 0, 1)
+        a.onSnapshotLevel(security, shard, ++snap, isBid = true, price = 100, aggregateQty = 10, orderCount = 1)
+        a.update(isBid = true, price = 99, qty = 5)
+        a.onSnapshotEnd(security, shard, ++snap, l2 - 1, 1)
+
+        assertEquals(listOf("synchronised $security, bid levels [100, 99]"), told.events)
+    }
+
+    @Test
+    fun `a listener is told each update applied to a trusted book, with the level's new aggregate`() {
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.snapshot(Triple(true, 100L, 10L))
+        a.update(isBid = true, price = 100, qty = 25, orders = 3)
+        a.update(isBid = false, price = 101, qty = 0)
+
+        assertEquals(
+            listOf("synchronised $security", "depth $security bid 100 25 3", "depth $security ask 101 0 1"),
+            told.events,
+        )
+    }
+
+    @Test
+    fun `a listener is told nothing of updates while there is no trusted book`() {
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.update(isBid = true, price = 100, qty = 10)                          // no image
+        a.snapshot(Triple(true, 100L, 10L), withEnd = false)
+        a.update(isBid = true, price = 99, qty = 5)                            // buffered
+        assertEquals(emptyList(), told.events)
+    }
+
+    @Test
+    fun `a gap tells the listener desynchronised for each trusted book on that shard, and only those`() {
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.onSnapshotBegin(1, 1, 1, 0, DepthFeedAssembler.NO_PRICE, 0, 0)
+        a.onSnapshotEnd(1, 1, 2, 0, 0)
+        a.onSnapshotBegin(2, 2, 1, 0, DepthFeedAssembler.NO_PRICE, 0, 0)
+        a.onSnapshotEnd(2, 2, 2, 0, 0)
+        a.onSnapshotBegin(3, 1, 3, 0, DepthFeedAssembler.NO_PRICE, 0, 1)        // shard 1, staged: not trusted
+        a.onDepthUpdate(1, 1, 1, true, 100, 1, 1)
+        told.events.clear()
+
+        a.onDepthUpdate(1, 1, 9, true, 99, 1, 1)                               // shard 1 skips ahead
+
+        assertEquals(listOf("desynchronised 1"), told.events)
+        assertEquals(SyncState.WAITING, a.state(3), "the staged book was dropped too, without a word")
+    }
+
+    @Test
+    fun `an image installed over a trusted book tells desynchronised as it begins and synchronised as it ends`() {
+        // While it is staged the book is not trusted (book() is null), and a consumer must not
+        // render updates on it; at its end the consumer renders it whole.
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.snapshot()
+        a.snapshot(Triple(true, 99L, 15L), withEnd = false)
+        told.events += "(book while staged: ${a.book(security)})"
+        a.onSnapshotEnd(security, shard, ++snap, l2, 1)
+
+        assertEquals(
+            listOf("synchronised $security", "desynchronised $security", "(book while staged: null)", "synchronised $security"),
+            told.events,
+        )
+    }
+
+    @Test
+    fun `a stale image ignored while synchronised tells the listener nothing`() {
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.snapshot(Triple(true, 100L, 10L))
+        a.update(isBid = true, price = 100, qty = 25)
+        told.events.clear()
+
+        a.snapshot(Triple(true, 100L, 10L), at = l2 - 1)
+
+        assertEquals(emptyList(), told.events)
+    }
+
+    @Test
+    fun `a listener is told every trade, whether or not the book is trusted`() {
+        val told = Told()
+        val a = DepthFeedAssembler(listener = told)
+        a.onLastTrade(security, shard, 1, price = 100, qty = 4)
+        a.snapshot()
+        a.onLastTrade(security, shard, 2, price = 101, qty = 2)
+
+        assertEquals(listOf("trade $security 100 4", "synchronised $security", "trade $security 101 2"), told.events)
+    }
 }

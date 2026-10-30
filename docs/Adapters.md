@@ -24,7 +24,7 @@ two modules under **Apache-2.0** (the exchange itself is AGPL-3.0-or-later):
 | Artifact | What it holds |
 | --- | --- |
 | `nl.lamia.most.exchange:sbe` | The wire schema and its generated codecs. The jar's manifest names the schema id and version (`Most-Sbe-Schema-Version`) |
-| `nl.lamia.most.exchange:client` | `DirectoryClient` and `ShardRoute`: which shard serves a security, and its gateway's endpoints. `DepthFeedAssembler`, `DepthFeedDecoder`, `AggregatedBook`, `FeedSequenceTracker`: a trusted L2 book from the feeds. `OrderRequests` and `ParticipantRequests`: the order, cancel, resend and status encoders. `ReportLedger`: which reports arrived. `OrderEntrySession`, `OrderEntryListener`/`ReportAction`, `GatewayLink`/`AeronGatewayLink` and `SessionStore`: §1–§5. `PriceCodec`: fixed-point prices and quantities, from text or a FIX decimal |
+| `nl.lamia.most.exchange:client` | `DirectoryClient` and `ShardRoute`: which shard serves a security, and its gateway's endpoints. `DepthFeedAssembler`, `DepthFeedDecoder`, `AggregatedBook`, `FeedSequenceTracker`: a trusted L2 book from the feeds, and `DepthFeedListener`: what the assembler applied, for an adapter that forwards it. `OrderRequests` and `ParticipantRequests`: the order, cancel, resend and status encoders. `ReportLedger`: which reports arrived. `OrderEntrySession`, `OrderEntryListener`/`ReportAction`, `GatewayLink`/`AeronGatewayLink` and `SessionStore`: §1–§5. `PriceCodec`: fixed-point prices and quantities, from text or a FIX decimal |
 
 `client` depends on `sbe`, `aeron-client` and `agrona` only. Nothing exchange-internal goes into it:
 not the participant registry, gateway authentication or operator commands. `reference`, the
@@ -51,7 +51,9 @@ backends:
   map to a reject and an "unknown" status respectively. **Never present an ambiguous order as
   rejected.**
 - **Market data:** a `SecurityList` from `DirectoryClient`, and snapshots and incremental refreshes
-  of L1/L2 from `DepthFeedAssembler`.
+  of L1/L2 from `DepthFeedAssembler`: a snapshot is the book at `DepthFeedListener.onSynchronised`,
+  an incremental refresh is its `onDepthChanged` and `onTrade` (added 2026-10-30 for the FIX
+  adapter, whose Design §4 decided it).
 
 **What each adapter type waits on in the exchange** (§6):
 

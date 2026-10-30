@@ -1285,7 +1285,11 @@ of the cycle. A subscriber buffers the increments that arrive while the image is
 the image, discards the buffered updates at or below that sequence, and replays the rest.
 `DepthFeedAssembler` in `client` is the one implementation of that, shared by the operator CLI,
 the control plane and anything else that rebuilds a book; a consumer that wrote its own would be a
-second implementation of a rule with no way to detect that it disagreed.
+second implementation of a rule with no way to detect that it disagreed. A consumer that forwards
+the feed rather than reading the book (the FIX adapter's incremental refresh) takes a
+`DepthFeedListener` (2026-10-30): an increment applied to a trusted book, every trade, and the book
+becoming trusted or ceasing to be. Levels an image installs and updates buffered behind it are not
+told as changes; they are in the book when it is told synchronised.
 
 Three properties the design depends on:
 

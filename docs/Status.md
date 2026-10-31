@@ -585,7 +585,11 @@ which fields carry the splice) and `AggregatedBook` (the price-keyed book itself
 **all three** feeds — L2 for increments, the snapshot stream for the images that make them
 applicable, L1 for `LastTrade` — and call `book(securityId)`, which returns null until the book can
 be trusted. `tools/BookCommand.kt` and `control/DepthMonitor.kt` are the two worked examples, and
-they produce identical books level for level, which is the point of sharing the code.
+they produce identical books level for level, which is the point of sharing the code. A consumer that **forwards** the feed rather than reading the book (the FIX adapter's
+incremental refresh) passes a `DepthFeedListener` to the assembler (2026-10-30, `3afef4f`): an
+increment applied to a trusted book, every trade, and the book becoming trusted or ceasing to be.
+On a quiet book the snapshot cycle re-installs an equal image, which tells desynchronised then
+synchronised every cycle: a forwarder should compare before resending a whole book.
 
 ### Things that will waste time if unknown
 

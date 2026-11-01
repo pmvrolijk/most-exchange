@@ -14,7 +14,8 @@ issues 20–26):
   below `nextSeq`.
 - **Two defects found and fixed:** a resend could send one participant another's reports (every
   version before 8), and `run-sweep.sh` measured its own replay from `9622f52` on.
-- **One found and not fixed:** `most cluster shutdown` does not exit the processes (open issue 24).
+- **`most cluster shutdown` now exits both processes** (open issue 24, fixed the same day), and the
+  Operator's Manual is rebuilt for version 8, apart from §2.6's transcripts.
 
 Updated 2026-10-04. **The repository is public** (Handover §2q):
 - **Every push goes to the home GitLab and to `github.com/pmvrolijk/most-exchange`**, which is
@@ -394,8 +395,11 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     both placements (0 unknown), `run-restart.sh` (passed on a re-run, see 25), and the new
     `e2e/run-upgrade.sh`, which upgrades a version 7 node through `most cluster shutdown` and proves a
     version 7 log tail is refused. **Not checked:** native images (no GraalVM toolchain on the
-    laptop; CI's `native:engine`), the Epsilon soak, and the Operator's Manual, which still describes
-    version 7 and needs its §4.2 upgrade note and memory figures.
+    laptop; CI's `native:engine`) and the Epsilon soak. **The Operator's Manual was rebuilt
+    2026-11-01** for version 8 (5.4 ids, reject reasons and the bounded resend; 5.6 and 5.8; 6.7
+    "Upgrading to schema version 8"; 3.1 and 4.4 sizes), except §2.6's transcripts, which predate
+    version 8 (and `reportSeq`) and are regenerated from the Docker dev stack, which still holds
+    version 7 state.
 21. ~~**A resend has no upper bound**~~ **Built with version 8**: `toSeq`, a gap asked for by its
     bounds, and a client settles only once it holds every report below `nextSeq` (Design.md §5).
 22. ~~**`run-sweep.sh` measured the harness from `9622f52` to 2026-11-01**~~ **Fixed** (committed in
@@ -405,13 +409,17 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     2026-11-01: with every report of a participant evicted from the ring, the replay started from its
     newest slot, by then someone else's. Reproduced on version 7 by a test before the fix (Design.md
     §8). **Every deployment before version 8 has it.**
-24. **`most cluster shutdown` stops the cluster but not the processes.** Found 2026-11-01 by
-    `e2e/run-upgrade.sh`, the first run of the documented path on real processes. The snapshot is
-    taken and the consensus module terminates, but neither the cluster host nor the engine wires a
-    termination hook to its `ShutdownSignalBarrier`, so both stay up until SIGTERM, which the help
-    text and LocalTesting.md say they do not need. The fix is Aeron's `terminationHook` on both
-    contexts, signalling the barrier: a lifecycle change, so it waits for a decision and
-    `verify-for-real`. Until then the operator SIGTERMs both after it, as the upgrade script does.
+24. ~~**`most cluster shutdown` stops the cluster but not the processes.**~~ **Fixed 2026-11-01**
+    (after version 8). Found by `e2e/run-upgrade.sh`, the first run of the documented path on real
+    processes: the snapshot was taken and the consensus module terminated, but neither process
+    exited until a SIGTERM. Both now pass Aeron's `terminationHook` to their `ShutdownSignalBarrier`.
+    Fixing it found a second defect: a barrier created before a launch that throws (an active mark
+    file on a quick restart) was never closed, and Agrona's shutdown hook held the exit, warning
+    every 10 s. The cluster host now opens it around the launch, and the engine closes it on its
+    no-driver path, which had the same defect before. **Checked:** `run-upgrade.sh` step 3a (both
+    processes exit 0 through their orderly shutdowns, no SIGTERM), and `run-e2e.sh`, `run-restart.sh`,
+    `run-cluster3.sh`, `run-failover.sh` in both placements, with no barrier warning in any log.
+    **Not checked:** three members through `cluster shutdown` (the manual says so, 6.7).
 25. **`run-restart.sh` step 4a is flaky.** It failed once in two runs on version 8 ("market data
     somehow had the book already") and passed once on version 7. A likely cause is the previous
     market data process's IPC stream lingering after it dies, not shown.
@@ -427,9 +435,9 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 **Next (2026-11-01): commit version 8, then move the FIX adapter to it.** The adapter repository
 builds on the SDK, whose order entry API now takes `ClOrdId` (Adapters.md §2): FIX ClOrdID passes
 through as the exchange's `clOrdId`, the derived id and its collision path can go, and its fences
-inherit the bounded resend. That needs the SDK republished, which waits for a go. Then open issue 24
-(`cluster shutdown` exiting its processes), which is cheap and blocks a clean upgrade procedure, and
-the Operator's Manual for version 8.
+inherit the bounded resend. The SDK is published (2026-11-01). Open issue 24 is fixed and the manual
+rebuilt; what remains of version 8 is the manual's §2.6 transcripts, regenerated from the Docker dev
+stack once it is upgraded through `most cluster shutdown` (6.7).
 
 ~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: the FIX adapter
 repository** (item 13 below). The user chose the adapter framework ahead of archive retention on

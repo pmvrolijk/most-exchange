@@ -139,6 +139,10 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 - **`ShutdownSignalBarrier` must be closed** — `await()` alone leaves the JVM alive — and anything
   printed at shutdown must be **inside** the barrier block, since closing it releases the signal and
   the process exits at once. → R§4
+- **Each process's `terminationHook` signals its barrier** (the cluster host's consensus module, the
+  engine's container), so `most cluster shutdown` exits both processes rather than leaving them up
+  until a SIGTERM. A barrier created before a launch is opened *around* it: a launch that throws must
+  still close it, or Agrona's shutdown hook holds the exit, warning every 10 s.
 
 ## Recovery and restore
 

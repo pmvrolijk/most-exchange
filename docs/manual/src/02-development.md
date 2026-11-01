@@ -354,13 +354,14 @@ cd web && npm install && npm run dev     # http://localhost:5173
 
 ## 2.11 Automated end-to-end checks
 
-Three scripts exercise things unit tests cannot. Run the first two after changing anything that
+These scripts exercise things unit tests cannot. Run the first two after changing anything that
 touches the wire or process lifecycle.
 
 | Script | What it proves |
 | --- | --- |
 | `e2e/run-e2e.sh` | Every process against a real single-node cluster: a trade driven through the CLI, then a short `most load` to confirm the harness still correlates reports to orders. Takes each binary path from an environment variable (`ENGINE`, `GATEWAY`, `MARKETDATA`, `DISCOVERY`) so the same run can drive native images. |
 | `e2e/run-restart.sh` | That state survives a restart. Rests orders, snapshots, stops the whole node, and restarts it on the same security file; on one with a security removed while it holds orders (must refuse); on one with an emptied security removed (must start); and on one with a security added. Also places an order through one gateway and cancels it through another. |
+| `e2e/run-upgrade.sh` | That a version 7 shard upgrades to schema version 8: orders rest on version 7, `most cluster shutdown`, then version 8 restores them, a cancel names an old integer id as its decimal string, `most cluster shutdown` on version 8 exits both processes by itself, and a version 7 log tail with no snapshot at its end is refused. Takes a version 7 build as `OLD`. |
 | `e2e/run-attribution.sh` | Splits a client round trip into gateway, engine and everything else, writing `.hgrm` histograms that are meant to be diffed across changes. |
 | `e2e/run-epsilon-soak.sh` | Runs the Epsilon-GC binary against a real cluster and measures the allocation slope across two runs. |
 

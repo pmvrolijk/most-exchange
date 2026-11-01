@@ -10,7 +10,7 @@
 #   2. `most cluster shutdown` on version 7;
 #   3. version 8 restores the book: the integer ids come back as their decimal strings, a mass status
 #      names them, a cancel by the old id works, and a new order with a text id trades against a
-#      restored one;
+#      restored one; then `most cluster shutdown` on version 8 exits both processes by itself;
 #   4. a version 7 log tail with no snapshot at its end is refused by version 8, never read.
 #
 # Prerequisites: `./gradlew installDist` here, and a version 7 build of the same tree (any commit
@@ -224,15 +224,13 @@ echo
 echo "== 2. most cluster shutdown on version 7: a snapshot at the end of the log"
 stop_support
 $MOST cluster shutdown --dir "$RUN/cluster-host" || fail "cluster shutdown"
-# The consensus module snapshots and terminates, which removes its counters. Neither process exits
-# by itself: no termination hook is wired to their shutdown barriers (found 2026-11-01, Status.md),
-# so the operator's SIGTERM follows, as it does after `cluster snapshot`.
+# The consensus module snapshots and terminates the cluster. A version 7 build predates the
+# termination hooks (open issue 24), so its two processes stay up: they are stopped by hand once its
+# consensus module has gone, which removes its counters. Version 8 exits by itself (step 3a).
 for _ in $(seq 1 120); do
   $MOST counters --aeron-dir "$AERON_DIR" --match "Cluster node role" 2>/dev/null | grep -q "Cluster node role" || break
   sleep 0.25
 done
-$MOST counters --aeron-dir "$AERON_DIR" --match "Cluster node role" 2>/dev/null | grep -q "Cluster node role" \
-  && fail "the consensus module did not terminate after cluster shutdown"
 stop_node
 pass "version 7 node stopped with a snapshot at the end of its log"
 
@@ -274,11 +272,31 @@ grep -q "TRADE .*clOrdId=UPG-1/a.b .*cum 6" "$RUN/cross.out" \
   || fail "a text-id order did not fill against the restored order"
 pass "an order with a text id traded against a restored one"
 
+# ------------------------------------------------------------------------- 3a
+echo
+echo "== 3a. most cluster shutdown on version 8: both processes exit by themselves"
+exited() { # exited <pid> <seconds>
+  local i=0
+  while [ "$i" -lt "$(($2 * 4))" ]; do kill -0 "$1" 2>/dev/null || return 0; sleep 0.25; i=$((i + 1)); done
+  return 1
+}
+stop_support
+$MOST cluster shutdown --dir "$RUN/cluster-host" || fail "cluster shutdown on version 8"
+exited "$ENGINE_PID" 30 || fail "the engine did not exit after cluster shutdown"
+wait "$ENGINE_PID"; ENGINE_CODE=$?
+exited "$CLUSTER_PID" 30 || fail "the cluster host did not exit after cluster shutdown"
+wait "$CLUSTER_PID"; CLUSTER_CODE=$?
+[ "$ENGINE_CODE" -eq 0 ] && [ "$CLUSTER_CODE" -eq 0 ] \
+  || fail "an orderly shutdown exited non-zero: engine $ENGINE_CODE, cluster host $CLUSTER_CODE"
+grep -q "matching-engine: shutdown signal received" "$LOGS/engine-v8.log" \
+  || fail "the engine left without its orderly shutdown"
+grep -q "cluster: shutdown signal received" "$LOGS/cluster-v8.log" \
+  || fail "the cluster host left without its orderly shutdown"
+pass "engine and cluster host exited 0, each through its orderly shutdown, with no SIGTERM"
+
 # -------------------------------------------------------------------------- 4
 echo
 echo "== 4. a version 7 log tail without a snapshot at its end is refused"
-stop_support
-stop_node
 rm -rf "$RUN/cluster-host" "$AERON_DIR"
 bins "$OLD"
 start_cluster tail --fresh

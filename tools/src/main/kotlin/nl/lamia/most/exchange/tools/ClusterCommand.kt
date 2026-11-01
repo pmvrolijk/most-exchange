@@ -180,24 +180,35 @@ private fun runClusterHost(args: Args) {
     val duty = if (args.has("duty")) DutyCycles(SystemNanoClock.INSTANCE) else null
     duty?.let { wrapThreads(it, driverContext, driverThreading, archiveContext, archiveThreading, consensusContext) }
 
-    ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
-        // The counters need a client, and a client needs the driver this call just started.
-        val counterClient = duty?.let { Aeron.connect(Aeron.Context().aeronDirectoryName(aeronDir)) }
-        counterClient?.let { duty.attachInBackground(it, { labels -> println("cluster: duty cycle counters $labels") }) }
-        println("cluster: started, awaiting shutdown signal")
-        ShutdownSignalBarrier().use { it.await() }
-        counterClient?.close()
-        // Inside nothing that races the exit, but still worth printing: an authenticated gateway
-        // count of zero on a shard that configured a registry means every gateway connected
-        // anonymously, which looks identical to it working until a maker goes quiet.
-        registrySource?.close()
-        authenticator?.authenticator?.let {
-            println(
-                "cluster: authenticatedGateways=${it.authenticatedGateways} " +
-                    "rejectedSessions=${it.rejectedSessions}"
-            )
+    // Released by SIGTERM, or by the consensus module terminating itself: `most cluster shutdown`
+    // snapshots and then terminates the cluster, and without the hook this process stayed up
+    // until a SIGTERM nobody knew to send (found 2026-11-01, e2e/run-upgrade.sh). Opened around the
+    // launch, so a launch that throws -- an active mark file on a quick restart -- still closes it:
+    // a barrier left open holds the JVM's exit in Agrona's shutdown hook. Everything printed at
+    // shutdown is inside it, since closing it lets the process exit at once (CLAUDE.md).
+    val barrier = ShutdownSignalBarrier()
+    consensusContext.terminationHook { barrier.signal() }
+
+    barrier.use {
+        ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
+            // The counters need a client, and a client needs the driver this call just started.
+            val counterClient = duty?.let { Aeron.connect(Aeron.Context().aeronDirectoryName(aeronDir)) }
+            counterClient?.let { duty.attachInBackground(it, { labels -> println("cluster: duty cycle counters $labels") }) }
+            println("cluster: started, awaiting shutdown signal")
+            barrier.await()
+            counterClient?.close()
+            // An authenticated gateway count of zero on a shard that configured a registry means
+            // every gateway connected anonymously, which looks identical to it working until a
+            // maker goes quiet.
+            registrySource?.close()
+            authenticator?.authenticator?.let {
+                println(
+                    "cluster: authenticatedGateways=${it.authenticatedGateways} " +
+                        "rejectedSessions=${it.rejectedSessions}"
+                )
+            }
+            println("cluster: shutdown signal received")
         }
-        println("cluster: shutdown signal received")
     }
 }
 

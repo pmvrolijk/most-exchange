@@ -22,6 +22,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Book event stream <span class="ref">1.2, 3.2, 4.4, 4.6</span></li>
 <li>Book image <span class="ref"><b>5.3</b>, 6.6</span></li>
 <li>Circuit breaker, see Collar</li>
+<li>Client order id (<code>clOrdId</code>, <code>origClOrdId</code>) <span class="ref"><b>5.4</b>, 6.2, 6.7</span></li>
 <li>Collar, dynamic <span class="ref"><b>5.3</b>, 5.4</span></li>
 <li>Collar, static <span class="ref">4.2, <b>5.3</b>, 5.4, 6.5</span></li>
 <li>Conflation, depth images <span class="ref">2.8, 4.9</span></li>
@@ -84,11 +85,13 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Phase, session <span class="ref"><b>1.6</b>, 5.1, 5.2</span></li>
 <li>Purge, expired orders <span class="ref"><b>5.1</b>, 5.3</span></li>
 <li>Reject reasons <span class="ref"><b>5.4</b></span></li>
+<li>Resend request, bounded to a gap <span class="ref"><b>5.4</b></span></li>
 <li>Release, immutable <span class="ref"><b>1.4</b>, 3.8, 4.11, 6.7</span></li>
 <li>Reference price, static and dynamic <span class="ref"><b>5.3</b>, 5.4, 6.4</span></li>
 <li>Routing drift <span class="ref">5.8</span></li>
 <li>Counters, Aeron <span class="ref"><b>5.8</b>, 6.1</span></li>
 <li>SBE <span class="ref"><b>1.3</b>, 6.7</span></li>
+<li>Schema version 8 <span class="ref"><b>5.4</b>, 6.2, 6.7</span></li>
 <li>Scheduler, session <span class="ref"><b>5.2</b>, 3.9, 6.4</span></li>
 <li>Self-match prevention <span class="ref"><b>5.4</b></span></li>
 <li>sent vs confirmed <span class="ref"><b>5.3</b>, 5.8</span></li>
@@ -113,6 +116,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li>Uncross <span class="ref">1.6, <b>5.4</b>, 6.4</span></li>
 <li><code>UNAUTHORIZED_PARTICIPANT</code> <span class="ref"><b>4.3</b>, 5.4, 6.5</span></li>
 <li>Universe version <span class="ref">2.5, 5.8</span></li>
+<li>Upgrade to schema version 8 <span class="ref"><b>6.7</b>, 6.2</span></li>
 <li>Zero allocation <span class="ref">2.2, 6.9</span></li>
 </ul>
 
@@ -142,7 +146,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>most cluster snapshot</code> <span class="ref"><b>5.6</b>, 6.7</span></li>
 <li><code>--identity</code>, <code>--secret-file</code> <span class="ref">4.3, <b>5.6</b></span></li>
 <li><code>--order-entry-channel</code>, <code>--report-channel</code> <span class="ref">4.9</span></li>
-<li><code>most cluster shutdown</code> <span class="ref">5.6</span></li>
+<li><code>most cluster shutdown</code> <span class="ref"><b>5.6</b>, 6.7</span></li>
 </ul>
 
 ### Control plane REST
@@ -180,6 +184,7 @@ References are to section numbers. **Bold** marks where a term is defined.
 <li><code>./gradlew :sbe:generateSbeCodecs</code> <span class="ref">1.3</span></li>
 <li><code>e2e/run-e2e.sh</code> <span class="ref">2.11, 6.7</span></li>
 <li><code>e2e/run-restart.sh</code> <span class="ref">2.11</span></li>
+<li><code>e2e/run-upgrade.sh</code> <span class="ref">2.11, 6.7</span></li>
 <li><code>e2e/run-attribution.sh</code> <span class="ref">2.11, 5.7</span></li>
 <li><code>e2e/run-epsilon-soak.sh</code> <span class="ref">2.11</span></li>
 </ul>

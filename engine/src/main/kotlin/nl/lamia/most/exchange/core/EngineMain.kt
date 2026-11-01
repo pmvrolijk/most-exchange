@@ -140,6 +140,11 @@ fun main(args: Array<String>) {
 
     config.aeronDirectoryName?.let(context::aeronDirectoryName)
 
+    // The consensus module terminating the service -- `most cluster shutdown`, after its snapshot --
+    // releases the barrier like SIGTERM does, so the orderly shutdown below runs and the process
+    // exits. Without it the engine outlived its own cluster (found 2026-11-01, e2e/run-upgrade.sh).
+    context.terminationHook { barrier.signal() }
+
     val container = try {
         ClusteredServiceContainer.launch(context)
     } catch (e: DriverTimeoutException) {
@@ -151,6 +156,8 @@ fun main(args: Array<String>) {
                 "  module first (io.aeron.cluster.ClusteredMediaDriver), and point both at the\n" +
                 "  same Aeron directory via ${EngineConfig.AERON_DIR}."
         )
+        // Closed here too: a barrier left open holds the JVM's exit in Agrona's shutdown hook.
+        barrier.close()
         return
     }
 

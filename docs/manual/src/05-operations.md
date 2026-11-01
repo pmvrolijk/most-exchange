@@ -211,7 +211,7 @@ about the future.** Orders placed afterwards are accepted, so publish the revoca
 | Field | Notes |
 | --- | --- |
 | `participantId` | The trading firm |
-| `clOrdId` | Client order id, echoed on every report for this order |
+| `clOrdId` | The participant's own order id: 1 to 20 characters of `A-Z a-z 0-9 - _ + ; : . /`. Echoed on every report for this order. Unique per participant for the trading day; nothing checks that |
 | `price` | Fixed point, 8 implied decimals |
 | `qty` | Fixed point, 8 implied decimals |
 | `smpId` | Self-match prevention id; `0` means use `participantId` |
@@ -221,15 +221,28 @@ about the future.** Orders placed afterwards are accepted, so publish the revoca
 | `smpStrategy` | `CANCEL_AGGRESSOR` (default) or `CANCEL_RESTING` |
 
 A cancel carries `participantId`, `origClOrdId`, a new `clOrdId`, the `exchangeOrderId` to cancel,
-`securityId` and `side`.
+`securityId` and `side`. It cancels only if its participant and its `origClOrdId` match the order's,
+all 20 bytes of the id.
+
+Every execution report carries both `clOrdId` and `origClOrdId`. A cancel's report carries the
+cancel's own `clOrdId` and the order's as `origClOrdId`, and so does a cancel's rejection. Every other
+report — a new order's, a fill's, an expiry's, a bulk cancel's — carries the order's own id in both.
+
+::: term Schema version 8
+The wire format since 2026-11-01. It made `clOrdId` the participant's own text, where it had been a
+64-bit integer, and added `origClOrdId` to every report. The layout of orders, cancels and reports
+changed in place, so a process on an older version cannot be read by one on version 8: moving to it
+is a whole-shard upgrade (6.7).
+:::
 
 ![One client round trip through the stages that own it. The gateway and the engine are the two smallest.](assets/fig-roundtrip.svg)
 
 ### What happens to an order
 
-1. **Gateway.** `securityId` is validated against the shard's list. Anything else is rejected
-   locally with `UNKNOWN_SECURITY` and never reaches the cluster. The message is then forwarded into
-   cluster ingress **unchanged**.
+1. **Gateway.** The participant is checked against the gateway's registry entry, then the client
+   order ids (`INVALID_CL_ORD_ID`), then `securityId` against the shard's list (`UNKNOWN_SECURITY`).
+   A rejection here never reaches the cluster. The message is then forwarded into cluster ingress
+   **unchanged**.
 2. **Consensus.** The message is replicated and sequenced. Every node will apply it at the same log
    position.
 3. **Engine — admit.** Phase gate (`MARKET_CLOSED` outside the four phases below `CLOSED`), static
@@ -266,7 +279,8 @@ larger term buffer or a faster subscriber, not a busier gateway.
 | `SELF_MATCH_PREVENTED` | engine | The aggressor's remainder was cancelled by SMP |
 | `VOLATILITY_HALT` | engine | The aggressor's remainder was cancelled by a dynamic collar breach |
 | `GATEWAY_UNAVAILABLE` | gateway | The cluster session is closed |
-| `UNAUTHORIZED_PARTICIPANT` | gateway | The participant is not one this gateway may act for — or, for a new order, is only `cancelOnly` here (4.3). Never reaches the cluster |
+| `UNAUTHORIZED_PARTICIPANT` | gateway, engine | At the gateway: the participant is not one this gateway may act for — or, for a new order, is only `cancelOnly` here (4.3), and it never reaches the cluster. At the engine: a cancel whose participant or `origClOrdId` does not match the order it names |
+| `INVALID_CL_ORD_ID` | gateway | A `clOrdId` or `origClOrdId` that is empty, longer than 20 characters, has a character outside the set, or has anything after its padding. The report echoes the 20 bytes as sent. Never reaches the cluster |
 
 ### Self-match prevention
 
@@ -319,12 +333,21 @@ rest or fill, and the client must be told.
 Every execution report carries the participant's **`reportSeq`**: from 1, without gaps, across all of
 that participant's orders and every gateway. A client recovers like this:
 
-1. **On a gap in `reportSeq`, or after switching to another gateway**, send one
-   `ReportResendRequest` per participant, from the first `reportSeq` it has not received.
-2. The engine replays every retained report from there, each with its original `reportSeq`. Count
-   one you already have only once. Then it sends `ReportResendComplete`.
-3. **After the completion, any order you sent before the request that still has no report was never
-   sequenced.** Reject it to your own client, or send it again; either way it executes at most once.
+1. **On a gap in `reportSeq`**, send a `ReportResendRequest` for that participant **bounded to the
+   gap**: `fromSeq` the first `reportSeq` it has not received, `toSeq` the last before the next one it
+   has. **After switching to another gateway**, or when an order has gone unanswered for longer than
+   a failover takes, send one per participant **unbounded** (`toSeq` 0): what is missing may lie above
+   everything received.
+2. The engine replays the retained reports in that range, each with its original `reportSeq`. Count
+   one you already have only once. Then it sends `ReportResendComplete`, with `nextSeq`.
+3. **Once you hold every report below `nextSeq`, any order you sent before the request that still has
+   no report was never sequenced.** Reject it to your own client, or send it again; either way it
+   executes at most once. Still missing one (a report the gateway dropped on the way, above a bounded
+   request's `toSeq`)? Settle nothing yet, and ask for that one first.
+
+An unbounded request costs a replay of everything after the first missing report. Under load that is
+a lot: up to 2.4M duplicates were measured at the throughput ceiling, sent into an egress that was
+already full, so bound every request that can be bounded.
 
 A completion with status `TRUNCATED` means the reports below `oldestRetainedSeq` are no longer
 retained. `engine.reportRetention` was smaller than the failover's traffic, or the shard was
@@ -398,7 +421,7 @@ avoid. Four things ask:
 | --- | --- |
 | `most cluster snapshot --ingress 0=HOST:PORT --identity ID --secret-file F` | Through consensus, so **every member** snapshots at the same log position, and the command prints the cluster's **answer** — `snapshot taken, the cluster answered OK`, or the refusal. On a node with a registry the identity must be an `operator=true` entry (4.3). This is the one to use in production. |
 | `most cluster snapshot --dir DIR` | The local control toggle, one member only |
-| `most cluster shutdown` | Snapshot, then stop — which plain SIGTERM does **not** do |
+| `most cluster shutdown` | Snapshot, then stop. The cluster host and the engine both exit 0 by themselves afterwards. Plain SIGTERM takes no snapshot |
 | The control plane's scheduler | At each session close, as the control plane's operator identity (4.9) |
 :::
 
@@ -417,8 +440,8 @@ Leave the scheduler enabled in production: a daily snapshot at the close is what
 ### Restarting a node
 
 ```sh
-most cluster shutdown --dir <the node's --dir>      # on the node; or rely on the scheduler's close snapshot
-systemctl stop most-engine most-cluster-host
+most cluster shutdown --dir <the node's --dir>      # snapshot; both processes then exit 0 by themselves
+systemctl stop most-engine most-cluster-host        # already stopped after a shutdown; needed after a close snapshot
 sleep 15                                            # mark-file liveness is ~10s; 15 for margin
 systemctl start most-cluster-host most-engine
 journalctl -u most-engine | grep 'restored'
@@ -543,6 +566,8 @@ the same `SECURITIES` and `CLUSTER_HOST` knobs as the sweep.
 | `droppedToClient` | gateway | Undeliverable execution reports. The outbound leg drops and counts by design; a rising rate means a subscriber is gone |
 | `clusterBackpressure` | gateway | Transient and retried, so not a loss — but a sustained rate means ingress is saturated |
 | `untrackedReports` | gateway | Reports the engine could not state an `origQty` for. Only orders restored from an older snapshot should produce these |
+| `invalidClOrdIdRejects` | gateway | Orders and cancels refused `INVALID_CL_ORD_ID`. Non-zero means an adapter is passing through ids the exchange cannot carry |
+| `refusedSchemaVersion` | gateway | Orders and cancels from a client, or reports from an engine, on a schema version before 8, dropped unanswered. Non-zero means something was not upgraded (6.7) |
 | `gaps`, `eventsMissed` | market-data | Feed sequence gaps. Occasional under `MaxMulticastFlowControl`; sustained means a subscriber cannot keep up |
 | `foreignShard` | market-data | Book events for another shard. Means this process is pointed at the wrong engine |
 | `imagesApplied` | market-data | A restarted process expects this to be non-zero. Zero with a book that stayed empty means the engine never sent one |

@@ -31,6 +31,7 @@ Four questions answer most incidents, in this order.
 | `could not reach the cluster` | The consensus module is not running, or `gateway.ingressEndpoints` names the wrong hosts |
 | `Active media driver detected` | A previous driver's liveness timeout has not expired, or the Aeron directory was preserved across a restart. It must not be — it is memory-mapped buffers and a `cnc.dat` |
 | `active mark file detected` | A node restarted within roughly ten seconds of the previous one stopping. Wait |
+| `matching-engine: refused to go on -- the log carries a version 7 NewOrderSingle` | The log since the last snapshot was written by an older version, or a gateway was not upgraded. Nothing was applied from it. Restart the old version, `most cluster shutdown`, then start the new one (6.7, "Upgrading to schema version 8") |
 | `could not create archive directory` | A volume or directory landed root-owned |
 | `channel error - Cannot assign requested address` | A channel names a host whose media driver does not own that address. In the dev stack that means anything other than `shard0` (2.9) |
 
@@ -238,9 +239,43 @@ journalctl -u most-engine | grep 'restored'
 ```
 
 ::: warning A wire change is not a rolling upgrade
-Nodes running different schema versions over one log will diverge. Treat any change to
+Nodes running different schema versions over one log would diverge. Since version 8 the schema
+version is part of the engine fingerprint, so they refuse instead (4.2). Treat any change to
 `message-schema.xml` as requiring a coordinated restart of the whole shard, and re-run
 `e2e/run-e2e.sh` first — it exists because unit tests cannot see the wire.
+:::
+
+### Upgrading to schema version 8
+
+Version 8 changed the layout of orders, cancels and execution reports in place (5.4), so the log
+written by an older version cannot be read by version 8. The upgrade is therefore a whole shard at
+once, through a snapshot at the end of the log:
+
+```sh
+most cluster shutdown --dir <the node's --dir>      # on version 7: snapshot, then the cluster stops
+systemctl stop most-engine most-cluster-host        # version 7's processes stay up after it; version 8's exit
+# install version 8: the cluster host, the engine, the gateways, market data and discovery together
+sleep 15
+systemctl start most-cluster-host most-engine
+journalctl -u most-engine | grep 'restored'         # restored N resting orders ... from a snapshot
+```
+
+- **Open orders survive.** A snapshot from before version 8 restores, and each order's integer
+  `clOrdId` becomes its decimal string: order `1001` is `"1001"` from then on, and a cancel names it so.
+- **Without a snapshot at the end of the log, version 8 refuses** with `refused to go on -- the log
+  carries a version 7 NewOrderSingle` and exits non-zero. Nothing is lost: start the old version,
+  run `most cluster shutdown`, and upgrade again.
+- **Upgrade every gateway and every adapter with the shard.** A gateway on version 8 drops an older
+  client's orders unanswered, since it can send nothing that client could read, and counts
+  `refusedSchemaVersion`. Adapters need the version 8 SDK.
+
+`e2e/run-upgrade.sh` runs exactly this, on one node: orders resting on version 7, the shutdown, the
+restore on version 8, a cancel by an old id, and the refusal of a version 7 log tail.
+
+::: warning Not yet run on three members
+On one node the procedure is checked end to end. On a three-member shard, `most cluster shutdown`
+is expected to snapshot and stop every member at the same log position; confirm that every member's
+processes have exited before installing version 8.
 :::
 
 ### Checking a native image you cannot run
@@ -272,12 +307,14 @@ timeout before the first buffer is ever wrapped.
 | `cluster: registry: reloaded` | cluster-host, engine | A new participant registry came into force, with both fingerprints |
 | `discovery: version=... shards=[0] securities=2` | discovery | The universe version now being broadcast |
 
-Shutdown lines carry the counters, which is why an orderly SIGTERM matters:
+Shutdown lines carry the counters, which is why an orderly stop — SIGTERM or `most cluster shutdown`
+— matters:
 
 ```
-gateway: stopped. forwardedToCluster=60000 clusterBackpressure=0 sentToClient=88676
-         droppedToClient=0 rejectedLocally=0 unreachableRejects=0
-         undeliverableCommands=0 unauthorizedRejects=0 refusedCommands=0 untrackedReports=0
+gateway: stopped. forwardedToCluster=5020 clusterBackpressure=0 sentToClient=10971
+         droppedToClient=0 standbyRejects=0 activations=1 rejectedLocally=0 unreachableRejects=0
+         undeliverableCommands=0 unauthorizedRejects=0 refusedCommands=0
+         invalidClOrdIdRejects=0 refusedSchemaVersion=0 untrackedReports=0
 
 market-data: stopped. gaps=0 missed=0 foreignShard=0 droppedL1=0 droppedL2=0 droppedL3=0
              snapshots=929 droppedSnapshot=0 imagesApplied=1 imagesDiscarded=0 imageOutOfBand=0

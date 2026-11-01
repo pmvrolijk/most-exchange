@@ -746,7 +746,7 @@ last one — which after a session's trading is the difference between seconds a
 $MOST cluster snapshot --dir "$RUN/cluster-host"          # local, via the control toggle
 $MOST cluster snapshot --ingress 0=localhost:20110 \
   --identity operator --secret-file "$RUN/operator.secret"  # through consensus; every member snapshots
-$MOST cluster shutdown --dir "$RUN/cluster-host"          # snapshot, then stop
+$MOST cluster shutdown --dir "$RUN/cluster-host"          # snapshot, then both processes exit
 ```
 
 To restart with the books intact, stop **the whole node** — the cluster host included — and start it

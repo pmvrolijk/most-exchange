@@ -142,6 +142,7 @@ private fun execute(
 
     val receiver = Thread({ receiveReports(reports, run) }, "load-receiver")
     receiver.start()
+    establishBaseline(orders, run)
 
     println(
         "load: sending ${spec.count} orders" +
@@ -365,6 +366,69 @@ private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: I
 }
 
 /**
+ * Learns where each participant's report sequence stands before the first order, so that reports
+ * numbered by an earlier run on the same cluster are not taken for a gap. Without it the ledger
+ * starts at 1, the run's first report opens a gap, and the fence replays everything the ring still
+ * holds -- up to a million reports, through egress, in the middle of the measured run. That is what
+ * every rate after the first in a sweep paid from `9622f52` on (Measurements.md, "The harness
+ * replayed the ring").
+ *
+ * The question is a `ReportResendRequest` from past the end: the engine replays nothing and answers
+ * with `nextSeq` (Design.md §5, "Report sequence and resend"). It asks rather than taking the first
+ * report as the start, which would hide a report lost at the very start of the run. Unanswered
+ * within [BASELINE_TIMEOUT_MS], the run warns and starts from 1, as it did before.
+ */
+private fun establishBaseline(gateways: List<Publication>, run: LoadRun) {
+    val header = MessageHeaderEncoder()
+    val encoder = ReportResendRequestEncoder()
+    val claim = BufferClaim()
+    val length = ParticipantRequests.RESEND_REQUEST_LENGTH
+    run.baselinePending = run.spec.participantCount
+    for (p in 0..<run.spec.participantCount) {
+        var attempts = 0
+        while (true) {
+            val result = gateways[run.activeGateway].tryClaim(length, claim)
+            if (result > 0L) {
+                // A plain publication: encode at claim.offset(), with no cluster session header.
+                ParticipantRequests.encodeReportResendRequest(
+                    claim.buffer(), claim.offset(), run.ledger.participantId(p), BASELINE_REQUEST_ID,
+                    Long.MAX_VALUE, encoder, header,
+                )
+                claim.commit()
+                break
+            }
+            if (result != Publication.BACK_PRESSURED && result != Publication.ADMIN_ACTION ||
+                ++attempts >= BACKPRESSURE_RETRY_LIMIT
+            ) {
+                System.err.println(
+                    "most: warning -- could not ask where report sequences stand " +
+                        "(${describeOfferResult(result)}); starting from 1"
+                )
+                run.baselinePending = 0
+                return
+            }
+            Thread.onSpinWait()
+        }
+    }
+    val deadline = System.nanoTime() + BASELINE_TIMEOUT_MS * 1_000_000L
+    while (run.baselinePending > 0 && System.nanoTime() < deadline) Thread.onSpinWait()
+    if (run.baselinePending > 0) {
+        System.err.println(
+            "most: warning -- ${run.baselinePending} participant(s) did not say where their report " +
+                "sequence stands; those start from 1, and a gap at the start will replay the ring"
+        )
+        run.baselinePending = 0
+    } else {
+        println(
+            "load: report sequences resume at " +
+                (0..<run.spec.participantCount).joinToString(" ") {
+                    "${run.ledger.participantId(it)}:${run.ledger.firstMissing(it)}"
+                }
+        )
+    }
+}
+
+/**
  * An `OrderMassStatusRequest` for each participant whose resend came back `TRUNCATED` (Design.md §5,
  * "Order mass status"): every one of its open orders is then stated, and its report sequence resumes
  * from the completion. Sent after the fence on the same path, so the status is at least as new.
@@ -437,7 +501,8 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
                     buffer, offset + MessageHeaderDecoder.ENCODED_LENGTH,
                     header.blockLength(), header.version(),
                 )
-                run.onCompletion(completion)
+                if (completion.requestId() == BASELINE_REQUEST_ID) run.onBaseline(completion)
+                else run.onCompletion(completion)
                 // A standby refusing the fence moves the run on, exactly as it would an order.
                 if (completion.status() == RequestStatus.GATEWAY_UNAVAILABLE &&
                     polling == run.activeGateway && subscriptions.size > 1
@@ -571,6 +636,16 @@ private class LoadRun(val spec: LoadSpec) {
         ackNs[i] = nowNs
         answered++
         foundOpenByStatus++
+    }
+
+    /** Participants whose opening baseline is still unanswered (see establishBaseline). */
+    @Volatile var baselinePending = 0
+
+    fun onBaseline(decoder: ReportResendCompleteDecoder) {
+        val p = (decoder.participantId() - spec.participantBase).toInt()
+        if (p !in 0..<spec.participantCount || baselinePending == 0) return
+        if (decoder.status() == RequestStatus.COMPLETE) ledger.resumeFrom(p, decoder.nextSeq())
+        baselinePending--
     }
 
     fun onCompletion(decoder: ReportResendCompleteDecoder) {
@@ -847,6 +922,10 @@ private val FRAME_LENGTH =
 private const val PARK_THRESHOLD_NS = 100_000L
 private const val PARK_MARGIN_NS = 50_000L
 private const val BACKPRESSURE_RETRY_LIMIT = 10_000
+
+/** The opening baseline's requestId. Fence generations count up from 1, so it is never one of them. */
+private const val BASELINE_REQUEST_ID = -1L
+private const val BASELINE_TIMEOUT_MS = 5_000L
 private const val SHUTDOWN_JOIN_MS = 2_000L
 private const val NANOS_PER_MICRO = 1_000.0
 private const val MAX_TRACKED_NS = 60_000_000_000L

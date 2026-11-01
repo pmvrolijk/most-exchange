@@ -373,6 +373,19 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     `most send`/`cancel` offer once. On `BACK_PRESSURED` they print "gateway did not accept" and
     **exit 0**, so a script carries on with the market closed. This breaks Adapters.md §2's rule. The
     fix is a bounded retry and a non-zero exit.
+20. **String `clOrdId`/`origClOrdId`: decided 2026-11-01, not built** (Design.md §8, "String client
+    order ids"). `char[20]`, the gateway checks the charset, the ids are held in `ColdField`, both
+    ids are on reports, the fields change in place at schema version 8, and the upgrade is `most
+    cluster shutdown`. **Measured 2026-11-01 (Measurements.md S0–S4):** with UDP egress the knee
+    moves one rate step down, from 500–550k/s to 450–500k/s, as the datagram arithmetic predicted
+    (8 reports per datagram become 7). **Building it waits for a go.**
+21. **A resend has no upper bound** (Design.md §8). One lost report replays everything after it,
+    1.3–2.4M duplicates at the knee, into a full egress. A `toSeq` would bound it: a wire change,
+    not decided.
+22. **`run-sweep.sh` measured the harness from `9622f52` to 2026-11-01** (Measurements.md, "The
+    harness replayed the ring"). `most load` started its report ledger at 1, so every rate after
+    the first replayed the ring mid-run. **Fixed, uncommitted:** `most load` asks for each
+    participant's `nextSeq` before its first order. No recorded figure was affected.
 
 ---
 

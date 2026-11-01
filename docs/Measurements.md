@@ -1053,6 +1053,99 @@ length, which is the rule Design.md §5 gives a client.
 
 ---
 
+## The harness replayed the ring (2026-11-01)
+
+**From `9622f52` (report sequence and resend) to this fix, every rate after the first in a
+`run-sweep.sh` measured the harness, not the shard.** `most load` started each participant's
+`ReportLedger` at `reportSeq` 1. The engine's sequence for participants 20–23 carries on across the
+discard pass and the earlier rates on the same cluster. So the run's first report looked like a gap,
+and the fence replayed everything the ring held, up to a million reports, through egress in the
+middle of the measured run. One saturated master run shows it: `3 fences (6 gaps seen), 821,427
+reports replayed (386,271 already received, 435,156 recovered)` for 300,000 orders.
+
+- **Found by bisect** between `aaff566` (E/I/K series) and `b5d457a`. The test was 400k/s aggregate,
+  300,000 orders, ten securities, `DEDICATED`: `258c1dd` answered at 90 µs (response p50 = service
+  p50), `9622f52` at 335 ms. The bisect ran with a Docker stack still up, but the gap is ~3,700x.
+- **The exchange did not regress.** One load run on a fresh cluster, which never trips this, at
+  400k/s (`run-attribution.sh`, ten securities, `DEDICATED`, 3.2M orders): engine `newOrder` p50
+  0.38 µs on both `258c1dd` and master, engine duty 19.0% and 20.9%, and an ack service p50 of
+  105.5 µs and 100.9 µs. This mode of the script prints service time only.
+- **The fix** (`LoadCommand.establishBaseline`). Before its first order, `most load` sends each
+  participant a `ReportResendRequest` with `fromSeq` past the end. The engine replays nothing and
+  answers with `nextSeq` (Design.md §5), and the ledger resumes from there. Each run prints `load:
+  report sequences resume at …`.
+- **Validated, row S0 below:** master with the fix carries 400k/s at a 92 µs median and 500k/s at
+  127 µs, and saturates at 550k/s. That is R7's knee, and `aaff566`'s on the same day.
+- **No recorded figure is affected.** A11–A12 and F3–F5 each drove one load run, and no sweep was
+  recorded between `9622f52` and the fix.
+- **Still there, and not the harness's to fix:** a fence asks from the first missing report, and the
+  engine replays *everything* retained after it. Each run below the knee still loses 7–14 reports
+  (the gateway's outbound drop, `droppedToClient=40` across a whole sweep, open issue 1), and each
+  costs a replay of 500–7,000 reports. **At the knee one lost report replays 1.3–2.4M**, all of them
+  duplicates, into an egress that is already full. A real adapter on `OrderEntrySession` would do the
+  same. That is a protocol question, a bounded resend (Status.md open issue 21), not a harness bug.
+
+Discarded the same morning, and not rows: the first sweeps of the clOrdId A/B (A1–B4, C1), every one
+of them hit by this defect, and run with a Docker exchange stack up (~20% of a core on the VM, load
+average 3–8).
+
+## What S0–S4 say: string client order ids cost one rate step on UDP egress
+
+The A/B for Design.md §8, "String client order ids". **v7** is master with the harness fix.
+**v8-sized** is the same tree with the messages padded to version 8's block lengths and given the
+same work: `NewOrderSingle` 72 B, `OrderCancelRequest` 64 B, `ExecutionReport` and
+`ClientExecutionReport` 120 B, `SnapshotOrder` 88 B. The id words are written by `most load`, read
+by the engine, written into every report and copied by the gateway, and `ColdField` goes to stride 4
+with the id read from it. It is a throwaway worktree, never merged. Egress frames go from 160 B to
+192 B, so 8 reports per 1,408 B datagram become 7. The prediction was about an eighth off the
+UDP-egress knee.
+
+| # | arm | target | achieved | service p50 | service p90 | service p99 | response p50 | response p99 | pacing p99.9 | unans. | dropped | |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| S0a | v7 | 400k/s | 400,001/s | 92.2 µs | 162.4 µs | 550 µs | 92.3 µs | 551 µs | 29.5 µs | 0 | 0 | 300k orders, R7's run length |
+| S0b | v7 | 500k/s | 499,983/s | 126.7 µs | 751 µs | 2.46 ms | 126.9 µs | 2.46 ms | 276.5 µs | 0 | 0 | |
+| S0c | v7 | 550k/s | 550,041/s | 20.1 ms | 52.6 ms | 56.6 ms | 20.1 ms | 56.6 ms | 48.7 µs | 0 | 0 | SATURATED |
+| S1a | v7 | 400k/s | 399,998/s | 82.8 µs | 148.5 µs | 7.36 ms | 82.9 µs | 7.36 ms | 19.8 µs | 0 | 0 | |
+| S1b | v7 | 450k/s | 450,042/s | 146.9 µs | 394.5 µs | 1.10 ms | 147.1 µs | 1.10 ms | 18.0 µs | 0 | 0 | |
+| S1c | v7 | 500k/s | 499,996/s | 1.58 ms | 99.4 ms | 123 ms | 1.58 ms | 123 ms | 6.83 ms | 0 | 0 | INVALID (pacing) |
+| S1d | v7 | 550k/s | 550,051/s | 313 ms | 602 ms | 721 ms | 313 ms | 721 ms | 17.8 µs | 0 | 0 | SATURATED |
+| S2a | v8-sized | 400k/s | 399,998/s | 175.9 µs | 489.7 µs | 1.75 ms | 176.0 µs | 1.75 ms | 25.5 µs | 0 | 0 | |
+| S2b | v8-sized | 450k/s | 450,042/s | 540.7 µs | 3.81 ms | 6.75 ms | 541.2 µs | 6.75 ms | 19.8 µs | 0 | 0 | |
+| S2c | v8-sized | 500k/s | 499,996/s | 461 ms | 820 ms | 945 ms | 461 ms | 945 ms | 15.4 ms | 0 | 0 | INVALID (pacing) |
+| S2d | v8-sized | 550k/s | 550,051/s | 573 ms | 1.12 s | 1.24 s | 573 ms | 1.24 s | 23.2 µs | 0 | 0 | SATURATED |
+| S3a | v7 | 400k/s | 399,998/s | 102.2 µs | 187.1 µs | 947 µs | 102.3 µs | 993 µs | 97.5 µs | 0 | 0 | |
+| S3b | v7 | 450k/s | 450,043/s | 96.4 µs | 291.3 µs | 1.39 ms | 96.6 µs | 1.39 ms | 22.3 µs | 0 | 0 | |
+| S3c | v7 | 500k/s | 499,996/s | 156.3 µs | 2.65 ms | 7.41 ms | 156.4 µs | 7.41 ms | 17.2 µs | 0 | 0 | |
+| S3d | v7 | 550k/s | 550,051/s | 332 ms | 595 ms | 708 ms | 332 ms | 708 ms | 49.7 µs | 0 | 0 | SATURATED |
+| S4a | v8-sized | 400k/s | 399,998/s | 95.7 µs | 275.2 µs | 1.24 ms | 95.8 µs | 1.25 ms | 26.8 µs | 0 | 0 | |
+| S4b | v8-sized | 450k/s | 450,042/s | 290.0 µs | 2.85 ms | 6.37 ms | 290.0 µs | 6.37 ms | 18.0 µs | 0 | 0 | |
+| S4c | v8-sized | 500k/s | 499,995/s | 295 ms | 655 ms | 874 ms | 295 ms | 874 ms | 25.6 µs | 0 | 0 | SATURATED |
+| S4d | v8-sized | 550k/s | 550,051/s | 553 ms | 1.17 s | 1.28 s | 553 ms | 1.28 s | 27.0 µs | 0 | 0 | SATURATED |
+
+Every arm also ran 600k/s, and every arm saturated there.
+
+- **The knee moves one step down, as predicted.** v7 knees between 500k and 550k/s (S3c held 500k
+  at a 156 µs median; S1c is invalid on pacing, its median already 1.6 ms). v8-sized knees between
+  450k and 500k/s in both repeats, S2c and S4c. That is ~50k/s, about a tenth of the ceiling,
+  against the eighth the datagram arithmetic predicted. The step is as fine as the sweep's rates, so
+  that is a bound, not a figure.
+- **Below the knee it costs latency first.** At 450k/s the v8-sized response p50 is 541 and 290 µs
+  against 147 and 97 µs, and its p99 6.4–6.8 ms against 1.1–1.4 ms. At 400k/s the two overlap: 176
+  and 96 µs against 83 and 102 µs.
+- **Not measured:** IPC egress or 8 KB datagrams, where the datagram count does not bind (K1–K5);
+  the 25% larger log on a multi-node replication channel; the engine's per-order cost by
+  `run-attribution.sh`; and the real version 8, whose gateway charset check this prototype does not
+  do.
+
+**Conditions (S0–S4).** Apple M4 Pro, 14 cores (10P+4E), macOS 15.7.9, OpenJDK 21.0.11, JVM. v7 =
+`b5d457a` + the harness fix (uncommitted at the time). v8-sized = the same + the padding prototype.
+Single node, `DRIVER_THREADING=DEDICATED`, archive `SHARED`, unpinned, ten securities, gateway egress
+`aeron:udp?endpoint=localhost:0` (1,408 B), band 99.90–100.10 inside a 5000 bps static collar,
+`maxOrders=1000000` per security, metrics off, 200,000-order discard pass. S0 is 300,000 orders per
+rate (R7's run length); S1–S4 are 1,600,000 orders per rate, interleaved v7, v8, v7, v8. **Idle:**
+Docker stacks stopped, IntelliJ and Firefox closed. The load average of 2.4–7.2 is the runs' own
+residue, back to back. 2026-11-01, 10:43–10:49 local time.
+
 ## Adding a row
 
 ```sh

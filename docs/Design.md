@@ -1131,7 +1131,11 @@ including across a failover** (decided 2026-10-03; §8 has the reasoning). Schem
   order. It replays that participant's retained reports from `fromSeq`, each with its original
   `reportSeq`, on the requesting session, then sends **`ReportResendComplete`**: `nextSeq` (everything
   below it has now been sent), `oldestRetainedSeq`, `replayedCount`, and `COMPLETE`, or `TRUNCATED`
-  when the reports between `fromSeq` and `oldestRetainedSeq` are no longer retained.
+  when the reports between `fromSeq` and `oldestRetainedSeq` are no longer retained. **A `fromSeq`
+  past the participant's last report replays nothing** and completes `COMPLETE`, so its `nextSeq` is
+  a cheap answer to "where does my sequence stand". `most load` asks it before its first order. A
+  client that starts at 1 on a cluster that has numbered reports already sees its first report as a
+  gap, and the fence then replays the whole ring.
 * **The request is a fence.** Everything sequenced before it is reflected in the replay. So after the
   completion, an unacknowledged order with no report **was never sequenced**: the client rejects it
   upstream or resends it, and either way it executes at most once. A gap in `reportSeq` is how a maker
@@ -3453,3 +3457,48 @@ It found three defects that unit tests could not:
   decoding moved to `BookEventReader`, which consumes a sequence for every book event and none for a
   book image, and `BookEventReaderTest` pins both halves against this section. The class exists
   separately because the defect survived on a code path that needed a media driver to reach.
+* **String client order ids. Decided 2026-11-01 (user), and measured the same day. Not built.**
+  Today `clOrdId` and `origClOrdId` are `int64`, so a FIX adapter must derive one per request
+  (most-exchange-fix Design.md §3.2). That derivation is what makes an id collision, its block and
+  its operator reset possible there. The decision, every point the recommendation:
+  - **`char[20]`, null-padded,** in `NewOrderSingle`, `OrderCancelRequest`, `ExecutionReport`,
+    `ClientExecutionReport` and the snapshot order. The charset is `A-Z a-z 0-9 - _ + ; : . /`,
+    1–20 characters, and every byte after the first NUL is NUL. **The gateway checks it** and
+    refuses before the log, with a new `RejectReason`. **The engine treats the id as opaque bytes**
+    and never validates it, which is deterministic either way. Twenty characters cost the log
+    nothing that twelve or sixteen would not, because 32-byte frame alignment puts any id longer
+    than 8 bytes on the same 160 B step for a new order and a cancel. A 36-character UUID does not
+    fit, by choice.
+  - **Held in `ColdField`**, which goes from stride 1 to stride 4 (`origQty` and three words), so
+    two orders share a cache line. A maker's report already reads that line for `origQty`.
+    `OrderField` word 4 is freed. Cost: +240 MB per shard of 10 × 1M orders.
+  - **`ExecutionReport` and `ClientExecutionReport` carry both ids.** A cancel's report states the
+    cancel's `clOrdId` and the order's `origClOrdId`, and every other report states the order's id
+    in both. The second id is free under frame alignment: the block is 120 B, the egress frame
+    192 B, and the ring slot 128 B (+32 MB per node).
+  - **The fields change in place, at schema version 8.** This is not an append: appending would
+    keep a dead `int64` and take the egress frame to 224 B. The snapshot order record gets a **new
+    template id**, and the old one is kept so that a version 7 snapshot still restores. A restored
+    integer id becomes its decimal string, and every `int64` fits, `Long.MIN_VALUE` exactly.
+    **The upgrade is `most cluster shutdown` and a restart**, as for a geometry change. A log tail
+    of version 7 orders cannot be replayed under version 8, and it refuses rather than misreading.
+    **The schema version is folded into the engine fingerprint**, so a cluster of mixed versions
+    refuses through the announcement (§7, "Enforced through the log") instead of diverging.
+  - **The four `requestId` fields keep `int64`**, under a type of their own (`RequestId`).
+  - **Out of scope:** the engine checking `clOrdId` uniqueness (still the client's, Adapters.md
+    §2), and a cancel by `origClOrdId` without `exchangeOrderId`. The adapter keeps its order store
+    for both, and for everything else it answers from.
+  - **Measured first** (decided 2026-11-01). Execution reports per 1,408 B datagram go from 8 to 7,
+    and the driver's UDP sender is what binds (§2). The expected cost on the UDP-egress knee is
+    about an eighth. That is arithmetic until a sweep says otherwise: a sweep on version 7, then the
+    same sweep on a prototype padded to version 8's sizes and its cold stride. **Measured
+    (Measurements.md S0–S4):** with UDP egress in 1,408 B datagrams, the knee moves one step down,
+    from 500–550k/s to 450–500k/s, in both interleaved repeats. Below the knee, at 450k/s, the
+    response p50 is 290–541 µs against 97–147 µs. IPC egress and 8 KB datagrams are not measured;
+    the datagram count does not bind there.
+* **A resend is bounded only below.** `ReportResendRequest` names a `fromSeq` and no end, so one lost
+  report costs a replay of everything retained after it. Below the knee that is a few thousand
+  reports. At the knee, measured on 2026-11-01 (Measurements.md, "The harness replayed the ring"), it
+  is 1.3–2.4M duplicates, sent into an egress that is already full, which turns a dropped report
+  into more drops. `OrderEntrySession` fences the same way. A `toSeq` or a count would bound it to
+  the gap: a wire change, not decided.

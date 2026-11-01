@@ -189,25 +189,37 @@ private fun runClusterHost(args: Args) {
     val barrier = ShutdownSignalBarrier()
     consensusContext.terminationHook { barrier.signal() }
 
+    // The duty counters live in memory this client maps, and the driver's, archive's and consensus
+    // module's threads write them on every loop. So the client is closed only once the clustered
+    // media driver has stopped those threads: closed first, it unmapped the counters under a running
+    // driver thread, which died in AtomicCounter.setRelease with a SIGSEGV (found 2026-11-01, the
+    // first `most cluster shutdown` of the Docker dev stack, which runs with --duty).
+    var counterClient: Aeron? = null
     barrier.use {
-        ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
-            // The counters need a client, and a client needs the driver this call just started.
-            val counterClient = duty?.let { Aeron.connect(Aeron.Context().aeronDirectoryName(aeronDir)) }
-            counterClient?.let { duty.attachInBackground(it, { labels -> println("cluster: duty cycle counters $labels") }) }
-            println("cluster: started, awaiting shutdown signal")
-            barrier.await()
-            counterClient?.close()
-            // An authenticated gateway count of zero on a shard that configured a registry means
-            // every gateway connected anonymously, which looks identical to it working until a
-            // maker goes quiet.
-            registrySource?.close()
-            authenticator?.authenticator?.let {
-                println(
-                    "cluster: authenticatedGateways=${it.authenticatedGateways} " +
-                        "rejectedSessions=${it.rejectedSessions}"
-                )
+        try {
+            ClusteredMediaDriver.launch(driverContext, archiveContext, consensusContext).use {
+                // The counters need a client, and a client needs the driver this call just started.
+                if (duty != null) {
+                    val client = Aeron.connect(Aeron.Context().aeronDirectoryName(aeronDir))
+                    counterClient = client
+                    duty.attachInBackground(client, { labels -> println("cluster: duty cycle counters $labels") })
+                }
+                println("cluster: started, awaiting shutdown signal")
+                barrier.await()
+                // An authenticated gateway count of zero on a shard that configured a registry means
+                // every gateway connected anonymously, which looks identical to it working until a
+                // maker goes quiet.
+                registrySource?.close()
+                authenticator?.authenticator?.let {
+                    println(
+                        "cluster: authenticatedGateways=${it.authenticatedGateways} " +
+                            "rejectedSessions=${it.rejectedSessions}"
+                    )
+                }
+                println("cluster: shutdown signal received")
             }
-            println("cluster: shutdown signal received")
+        } finally {
+            counterClient?.close()
         }
     }
 }

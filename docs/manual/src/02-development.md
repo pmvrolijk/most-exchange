@@ -177,32 +177,45 @@ detects that routing has changed underneath it.
 
 ## 2.6 Driving a trade
 
-Rest an order, then cross it from a second participant.
+Rest an order, then cross it from a second participant. The dev stack's book is rarely empty — a
+load run leaves thousands of orders resting — so these orders are priced inside the spread, where
+they meet only each other.
 
 ```
-$ ./most send --symbol MSFT --side sell --price 100.50 --qty 10 --clordid 2001 --participant 7 --follow 2
+$ ./most send --symbol MSFT --side sell --price 100.01 --qty 10 --clordid ORD-2001 --participant 7 --follow 2
 
-sending sell 10 MSFT @ 100.50 clOrdId=2001
+sending sell 10 MSFT @ 100.01 clOrdId=ORD-2001
 sent to shard 0 via aeron:udp?endpoint=shard0:20001
-  NEW  MSFT  orderId=11 clOrdId=2001  leaves 10 cum 0 of 10
+  NEW  MSFT  orderId=20032 clOrdId=ORD-2001  leaves 10 cum 0 of 10  seq 32
 
-$ ./most send --symbol MSFT --side buy --price 100.50 --qty 4 --clordid 2002 --participant 8 --follow 2
+$ ./most send --symbol MSFT --side buy --price 100.01 --qty 4 --clordid ORD-2002 --participant 8 --follow 2
 
-sending buy 4 MSFT @ 100.50 clOrdId=2002
+sending buy 4 MSFT @ 100.01 clOrdId=ORD-2002
 sent to shard 0 via aeron:udp?endpoint=shard0:20001
-  NEW    MSFT  orderId=12 clOrdId=2002  leaves 4 cum 0 of 4
-  TRADE  MSFT  orderId=12 clOrdId=2002  last 4 @ 100.50 cum 4 leaves 0
+  NEW  MSFT  orderId=20033 clOrdId=ORD-2002  leaves 4 cum 0 of 4  seq 24
+  TRADE  MSFT  orderId=20033 clOrdId=ORD-2002  last 4 @ 100.01 cum 4 leaves 0  seq 25
 ```
 
-`orderId` in the `NEW` report is the `exchangeOrderId` and is what a cancel refers to. Cancelling the
-partially filled maker shows both quantities the engine states on every report:
+`clOrdId` is the participant's own id, returned on every report exactly as it was sent (§5.4).
+`orderId` is the `exchangeOrderId` the engine assigned, and `seq` the participant's report sequence:
+each participant numbers separately, which is why participant 8's reports are at 24 while 7's are
+at 32. Without `--clordid` the CLI uses the current time in milliseconds.
+
+The maker's own `TRADE` report went to participant 7 after its `send` had stopped listening, and
+took sequence 33. Cancelling the partially filled maker shows the next one, and both quantities the
+engine states on every report:
 
 ```
-$ ./most cancel --symbol MSFT --side sell --order-id 11 --orig-clordid 2001 --participant 7 --follow 2
+$ ./most cancel --symbol MSFT --side sell --order-id 20032 --orig-clordid ORD-2001 --clordid CXL-2001 --participant 7 --follow 2
 
-cancelling orderId=11 on MSFT
-  CANCELED  MSFT  orderId=11  leaves 0 cum 4 of 10
+cancelling orderId=20032 on MSFT
+sent to shard 0 via aeron:udp?endpoint=shard0:20001
+  CANCELED  MSFT  orderId=20032 clOrdId=CXL-2001 origClOrdId=ORD-2001  leaves 0 cum 4 of 10  seq 34
 ```
+
+A cancel names the order by `--order-id` and `--orig-clordid` together, and the engine cancels only
+when both match an order of the same participant. Its report carries the cancel's own `clOrdId` and
+the order's as `origClOrdId`; the CLI prints `origClOrdId` only when the two differ.
 
 ::: term cumQty and origQty
 `cumQty` is the quantity filled so far and `origQty` the quantity originally submitted; both are
@@ -212,19 +225,25 @@ report carries `leavesQty = 0` whether the order filled or was cancelled, so sub
 *unknown*, which reaches a client as an explicit `UNKNOWN` enrichment rather than as a number.
 :::
 
-A rejection is an execution report like any other:
+A rejection is an execution report like any other, and takes a sequence number like any other:
 
 ```
-$ ./most send --symbol AAPL --side buy --price 500.00 --qty 1 --clordid 3001 --participant 7 --follow 2
+$ ./most send --symbol AAPL --side buy --price 500.00 --qty 1 --clordid ORD-3001 --participant 7 --follow 2
 
-  REJECTED  AAPL  orderId=0 clOrdId=3001  reason PRICE_OUT_OF_BOUNDS
+sending buy 1 AAPL @ 500.00 clOrdId=ORD-3001
+sent to shard 0 via aeron:udp?endpoint=shard0:20001
+  REJECTED  AAPL  orderId=0 clOrdId=ORD-3001  reason PRICE_OUT_OF_BOUNDS  seq 35
 ```
 
-An unknown symbol never reaches the wire — the CLI resolves symbols against the directory first:
+Two mistakes never reach the wire. The CLI resolves a symbol against the directory first, and checks
+a client order id against the same rule the gateway enforces:
 
 ```
-$ ./most send --symbol TSLA --side buy --price 100.00 --qty 1 --clordid 3002
+$ ./most send --symbol TSLA --side buy --price 100.00 --qty 1 --clordid ORD-3002
 most: unknown symbol 'TSLA' -- try `most securities`
+
+$ ./most send --symbol AAPL --side buy --price 99.00 --qty 1 --clordid ORD#3003 --participant 7
+most: not a valid clOrdId (1-20 of A-Z a-z 0-9 -_+;:./): "ORD#3003"
 ```
 
 ## 2.7 Watching the book
@@ -235,19 +254,23 @@ assembler any other consumer would use.
 ```
 $ ./most book --symbol AAPL,MSFT --depth 5 --refresh 500
 
-── AAPL (id 1) ─────────────────────────────
+── AAPL (id 1) ────────────────────────────────────
        qty ords          bid │ ask        qty        ords
-       128    2       100.64 │ 101.00      40           1
-        54    1       100.59 │ 101.10      40           1
-        50    1       100.55 │ 101.20      40           1
-       103    2       100.51 │ 101.67     103           2
-        43    1       100.50 │ 101.68       1           1
-  spread 0.36   last 101.61 x 29   updates 41
+        89 (1)         99.98 │
+        79 (1)         99.97 │
+        65 (1)         99.95 │
+        81 (1)         99.94 │
+        28 (1)         99.89 │
+  spread n/a   updates 387
 
-── MSFT (id 2) ─────────────────────────────
+── MSFT (id 2) ────────────────────────────────────
        qty ords          bid │ ask        qty        ords
-                             │ 100.50       6           1
-  spread n/a   last 100.50 x 4   updates 1
+        54 (1)         99.96 │ 100.02     98         (1)
+       148 (2)         99.91 │ 100.04     17         (1)
+        94 (1)         99.87 │ 100.12     31         (1)
+       130 (3)         99.86 │ 100.14     29         (1)
+       335 (9)         99.85 │ 100.17     74         (1)
+  spread 0.06   last 100.01 x 4   updates 760
 ```
 
 If it prints `waiting for the depth feed...` it has not yet received a snapshot for that security.
@@ -372,9 +395,14 @@ that is `run-restart.sh` and only `run-restart.sh`.
 
 ```sh
 cd deploy
+docker compose exec -T cluster-host most cluster shutdown --dir /cluster
+                           # snapshot, then cluster-host and engine exit 0 by themselves
 docker compose down        # keeps the books: cluster-data is a durable named volume
 docker compose down -v     # discards the archive, the cluster directory and the books
 ```
+
+The snapshot is what makes the next start quick. Without one, `docker compose down` still keeps
+the books, but the next start replays the log from genesis to rebuild them (5.6).
 
 ::: warning A node cannot restart immediately after the previous one stopped
 Aeron's archive and cluster **mark files** carry a liveness timestamp, and a new process refuses to

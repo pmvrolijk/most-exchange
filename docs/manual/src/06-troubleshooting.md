@@ -269,6 +269,29 @@ journalctl -u most-engine | grep 'restored'         # restored N resting orders 
   client's orders unanswered, since it can send nothing that client could read, and counts
   `refusedSchemaVersion`. Adapters need the version 8 SDK.
 
+On the dev stack the same steps are Compose commands. This is the dev stack's own upgrade, with
+4418 orders resting:
+
+```
+$ docker compose exec -T cluster-host most cluster shutdown --dir /cluster
+Member [0]: SHUTDOWN applied successfully
+cluster: shutdown requested (a snapshot is taken first) via /cluster/cluster
+
+$ docker compose stop engine gateway market-data discovery cluster-host   # version 7 stays up
+$ docker compose --profile cli build                                    # version 8 images
+$ docker compose up -d cluster-host engine gateway market-data discovery
+$ docker compose logs engine | grep -E 'engineFingerprint|restored'
+
+matching-engine: shard=0 fingerprint=3e04cf2b9902f08a engineFingerprint=c6befe8f7c5640c6 ...
+matching-engine: restored 4418 resting orders across 2 books from a snapshot,
+                 nextExchangeOrderId=20032 nextBookEventSeqNum=63 reportSequences=2
+```
+
+The shard `fingerprint` is unchanged, because the securities are. The `engineFingerprint` is
+not (it was `47e0ef48f9a52f14` on version 7), because the schema version is part of it. From
+version 8 on, `most cluster shutdown` stops the `cluster-host` and `engine` containers itself, both
+with exit code 0; `docker compose ps -a` shows them `Exited (0)`.
+
 `e2e/run-upgrade.sh` runs exactly this, on one node: orders resting on version 7, the shutdown, the
 restore on version 8, a cancel by an old id, and the refusal of a version 7 log tail.
 

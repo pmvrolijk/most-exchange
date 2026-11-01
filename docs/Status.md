@@ -427,6 +427,21 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     fences on 2026-10-03. The same on version 7 today (4,060) as on version 8 (4,556), so it is not
     version 8's, and it still leaves 0 unknown. Something since F3 makes the generator ping-pong
     between refusing standbys. Unexplained.
+27. ~~**The cluster host crashed on its way out when run with `--duty`.**~~ **Fixed 2026-11-01.**
+    Found by the first `most cluster shutdown` of the Docker dev stack on version 8: the engine
+    exited 0 and the cluster host died with a SIGSEGV in `AtomicCounter.setRelease` on the driver's
+    thread (exit 127). The duty counters live in a separate Aeron client's mapping, which was closed
+    before the clustered media driver whose threads write them. It is now closed after. Before
+    issue 24's fix, a SIGTERM took the same path, so this predates version 8. No e2e script runs the
+    cluster host with `--duty`; the dev stack does. **Checked:** the dev stack shuts down with both
+    containers `Exited (0)` and restores its 4418 orders.
+28. **`most book` sometimes reports one snapshot-stream gap as it joins** ("1 gaps, 4551 messages
+    missed") on a quiet book, in 2 of 4 runs on the dev stack. The books render correctly and
+    nothing is dropped. Probably the first snapshot cycle a late joiner receives, not looked into.
+29. **The dev stack's book event sequence is behind** (63 after ~20,000 orders). Its cluster volume
+    dates from 2026-09-26, before `258c1dd` (2026-10-03) made followers number book events, so the
+    shortfall was replayed into its snapshots then. Not a current defect; a fresh stack does not
+    have it.
 
 ---
 
@@ -435,9 +450,9 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
 **Next (2026-11-01): commit version 8, then move the FIX adapter to it.** The adapter repository
 builds on the SDK, whose order entry API now takes `ClOrdId` (Adapters.md §2): FIX ClOrdID passes
 through as the exchange's `clOrdId`, the derived id and its collision path can go, and its fences
-inherit the bounded resend. The SDK is published (2026-11-01). Open issue 24 is fixed and the manual
-rebuilt; what remains of version 8 is the manual's §2.6 transcripts, regenerated from the Docker dev
-stack once it is upgraded through `most cluster shutdown` (6.7).
+inherit the bounded resend. The SDK is published (2026-11-01). Open issues 24 and 27 are fixed. The Docker dev
+stack is upgraded to version 8 through `most cluster shutdown`, and the manual's §2.6–§2.7
+transcripts, its dev-stack upgrade (6.7) and its shutdown (2.12) are output from that stack.
 
 ~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: the FIX adapter
 repository** (item 13 below). The user chose the adapter framework ahead of archive retention on

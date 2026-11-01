@@ -431,9 +431,14 @@ network was refused — while being reported as requested, because only the offe
 cluster's recording log is the ground truth when in doubt:
 
 ```sh
-java -cp "/opt/most/tools/lib/*" io.aeron.cluster.ClusterTool <cluster-dir> recording-log \
+java --add-opens java.base/jdk.internal.misc=ALL-UNNAMED \
+  -cp "/opt/most/tools/lib/*" io.aeron.cluster.ClusterTool <cluster-dir> recording-log \
   | grep -o 'type=SNAPSHOT' | wc -l        # two entries per snapshot: consensus module and service
 ```
+
+The `--add-opens` is not optional: without it ClusterTool fails at once with an
+`IllegalAccessError`, like every JVM running Agrona 2.x (2.1). In the dev stack the cluster
+directory is `/cluster/cluster` in the `cluster-host` container.
 
 Leave the scheduler enabled in production: a daily snapshot at the close is what bounds restart time.
 

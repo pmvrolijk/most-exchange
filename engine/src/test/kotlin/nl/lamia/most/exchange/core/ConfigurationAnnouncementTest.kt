@@ -161,7 +161,7 @@ class ConfigurationAnnouncementTest {
         val h = node()
         val buffer = org.agrona.concurrent.UnsafeBuffer(ByteArray(256))
         nl.lamia.most.exchange.sbe.NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, MessageHeaderEncoder())
-            .participantId(1).clOrdId(100).price(99).qty(10).securityId(1)
+            .participantId(1).clOrdId("100").price(99).qty(10).securityId(1)
             .side(nl.lamia.most.exchange.sbe.Side.BUY)
 
         h.deliverServiceMessage(

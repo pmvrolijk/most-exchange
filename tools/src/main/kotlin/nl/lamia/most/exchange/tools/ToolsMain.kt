@@ -10,7 +10,7 @@ private val USAGE = """
     Usage:
       most securities [--verbose]
       most send   --symbol SYM --side buy|sell --price P --qty Q [options]
-      most cancel --symbol SYM --side buy|sell --order-id ID --orig-clordid ID [options]
+      most cancel --symbol SYM --side buy|sell --order-id ID --orig-clordid CLORDID [options]
       most book   [--symbol SYM[,SYM...]] [--depth N] [--refresh MS]
       most load   --symbol SYM[,SYM...] --price-min P --price-max P [options]
       most define --symbol SYM --reference P [--static-collar BPS] [--dynamic-collar BPS]
@@ -77,7 +77,7 @@ private val USAGE = """
       --histogram FILE         Write the latency distribution for plotting
 
     Order options:
-      --clordid ID             Client order id (default: current millis)
+      --clordid CLORDID        Client order id, 1-20 of A-Z a-z 0-9 - _ + ; : . / (default: current millis)
       --smp-id ID              Self-match prevention id (default: the participant id)
       --smp STRATEGY           aggressor (default) or resting
       --expire-date YYYYMMDD   0, the default, is good-til-cancelled

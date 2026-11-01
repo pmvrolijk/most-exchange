@@ -21,3 +21,11 @@ open class NodeRefusal(report: String) : RuntimeException(report)
  * disagree about is identical. Refusing is the only outcome that is never a divergence.
  */
 class ConfigurationMismatch(report: String) : NodeRefusal(report)
+
+/**
+ * Thrown when the log carries an order or a cancel in a layout this build cannot read (Design.md §5,
+ * "Client order ids"). Version 8 changed both in place, so a version 7 one decoded as version 8 would
+ * be a different order. It can only be a log tail written under version 7, or a gateway that was not
+ * upgraded, and every node meets it at the same position, so every node refuses it.
+ */
+class SchemaMismatch(report: String) : NodeRefusal(report)

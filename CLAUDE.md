@@ -16,7 +16,7 @@ cited as → R§n. Do not change a rule without reading its section there.
 same commit when the design changes.
 
 Nine modules — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`,
-`tools`, `control` — all implemented, 681 tests passing. See `docs/Status.md` §1 for what is real.
+`tools`, `control` — all implemented, 721 tests passing. See `docs/Status.md` §1 for what is real.
 
 ## Commands
 
@@ -27,6 +27,7 @@ Nine modules — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-da
 ./gradlew :engine:nativeCompile                    # native binary (needs a GraalVM toolchain)
 ./gradlew installDist && ./e2e/run-e2e.sh          # every process, a real trade, a load run
 ./e2e/run-restart.sh                               # does the shard come back with its book?
+OLD=../v7 ./e2e/run-upgrade.sh                     # version 7 to 8 through a snapshot; a v7 tail refuses
 ./e2e/run-cluster3.sh                              # three members: election, two failovers, a rejoin
 PLACEMENT=colocated ./e2e/run-failover.sh          # what a failover costs a client, per gateway placement
 ./e2e/run-attribution.sh                           # where a round trip goes, by stage
@@ -87,6 +88,18 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   separate gateways upstream of `gateway` and downstream of `market-data`, outside this project.
 - **Prices and quantities are fixed-point `int64` with 8 implied decimals.** Never introduce
   floating point into pricing or matching arithmetic.
+- **`clOrdId` and `origClOrdId` are `char[20]` since version 8**, the participant's own text.
+  `client`'s `ClOrdId` is the one implementation of the rule (1–20 of `A-Z a-z 0-9 - _ + ; : . /`,
+  NUL-padded). **The gateway validates an id; the engine never does** — it holds and compares the
+  bytes as three words (`IdWords`, `ColdField`). Never use the generated `clOrdId(): String` on a hot
+  path: it allocates. Read the bytes at `offset() + …EncodingOffset()`. → R§18
+- **Version 8 changed four layouts in place** (`NewOrderSingle`, `OrderCancelRequest`,
+  `ExecutionReport`, `ClientExecutionReport`). An older one cannot be read: the gateway drops it, the
+  engine refuses it in the log, and the schema version is in the engine fingerprint. The upgrade is
+  `most cluster shutdown`, then a restart. A version 7 snapshot still restores (`SnapshotOrderV7`).
+  → R§18
+- **An SBE field you do not set keeps whatever the buffer held.** In a reused buffer an unset
+  `toSeq` becomes a bound. Set every field.
 - The `wire-change` skill is the full checklist.
 
 ## The adapter SDK
@@ -192,6 +205,10 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
   after a failover. → R§16
 - **Lost reports are recovered by the client's resend request, never by engine back-pressure** — the
   engine cannot wait for a gateway it learns of only through the log it would be blocked on. → R§16
+- **A gap is asked for by its bounds** (`toSeq`); unbounded only after a switch or for an order
+  unanswered too long. **A client settles an unanswered order as never sequenced only once it holds
+  every report below the completion's `nextSeq`**, and fences again first if not. A resend replays
+  only from a report still retained: an evicted participant's newest slot is someone else's. → R§18
 - **`ClientSession.MOCKED_OFFER` is `1`: check for it before `result > 0`**, and never let a test fake
   return 1 for a real claim. → R§16
 - **An `ORDER_STATUS` report is state, not an event** — `reportSeq` 0, never numbered, never put in
@@ -204,9 +221,10 @@ deploy/cloud/linode/bench.sh up|check|sync|run|down  # a 16-core pinned host for
 
 - **The gateway is stateless** — it validates `securityId` inbound (the engine range-checks it
   again defensively), translates the report outbound,
-  and holds nothing per order. **The engine holds `origQty`**, in a parallel `ColdField` `LongArray`
-  beside the packed pool, never in the 64-byte line. A future order attribute that matching does not
-  read belongs there too. → R§7
+  and holds nothing per order. **The engine holds `origQty` and the client order id**, in a parallel
+  `ColdField` `LongArray` (stride 4) beside the packed pool, never in the 64-byte line. A future order
+  attribute that matching does not read belongs there too; word 4 of the line is free for one it
+  does read. → R§7, R§18
 - **Several gateways can serve one shard**, and what must be disjoint between two of them is their
   *client endpoints*. → R§7
 - **An order the gateway cannot forward must not be consumed.** `BACK_PRESSURED`/`ADMIN_ACTION` is

@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.tools
 
+import nl.lamia.most.exchange.client.ClOrdId
 import nl.lamia.most.exchange.client.AeronGatewayLink
 import nl.lamia.most.exchange.client.GatewayEndpoint
 import nl.lamia.most.exchange.client.OrderEntryListener
@@ -70,7 +71,7 @@ fun runStatus(args: Args) {
                     return ReportAction.CONSUMED
                 }
 
-                override fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate) = Unit
+                override fun onSettled(participantId: Long, clOrdId: ClOrdId, fate: OrderFate) = Unit
 
                 override fun onMassStatusComplete(participantId: Long, status: RequestStatus, orderCount: Int, nextSeq: Long) {
                     println(

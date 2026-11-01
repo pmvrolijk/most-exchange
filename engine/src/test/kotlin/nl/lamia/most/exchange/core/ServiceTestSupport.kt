@@ -41,6 +41,14 @@ data class Report(
     val cumQty: Long,
     /** The participant's report sequence (Design.md §5, "Report sequence and resend"). */
     val reportSeq: Long = 0L,
+    /**
+     * The order a cancel's report names; on every other report the order's own id again (Design.md
+     * §5, "Client order ids"). Ids are numbers in these tests, carried as their decimal strings.
+     */
+    val origClOrdId: Long = clOrdId,
+    /** Both ids as the participant sent them, for a test whose ids are not numbers. */
+    val clOrdIdText: String = clOrdId.toString(),
+    val origClOrdIdText: String = clOrdIdText,
 )
 
 /** An `OrderMassStatusComplete`, captured off a fake session's egress. */
@@ -62,6 +70,8 @@ data class ResendCompletion(
     val oldestRetainedSeq: Long,
     val replayedCount: Int,
     val status: nl.lamia.most.exchange.sbe.RequestStatus,
+    /** The `toSeq` asked for, echoed; 0 for no bound (Design.md §5). */
+    val toSeq: Long = 0L,
 )
 
 /**
@@ -155,7 +165,7 @@ class FakeSession(
                 completions += ResendCompletion(
                     completionDecoder.participantId(), completionDecoder.requestId(), completionDecoder.fromSeq(),
                     completionDecoder.nextSeq(), completionDecoder.oldestRetainedSeq(),
-                    completionDecoder.replayedCount(), completionDecoder.status(),
+                    completionDecoder.replayedCount(), completionDecoder.status(), completionDecoder.toSeq(),
                 )
                 continue
             }
@@ -176,7 +186,7 @@ class FakeSession(
             )
             sink += Report(
                 decoder.participantId(),
-                decoder.clOrdId(),
+                decoder.clOrdId().toLongOrNull() ?: -1L,
                 decoder.exchangeOrderId(),
                 decoder.securityId(),
                 decoder.execType().name,
@@ -188,6 +198,9 @@ class FakeSession(
                 decoder.origQty(),
                 decoder.cumQty(),
                 decoder.reportSeq(),
+                decoder.origClOrdId().toLongOrNull() ?: -1L,
+                decoder.clOrdId(),
+                decoder.origClOrdId(),
             )
         }
         claimed.clear()
@@ -403,6 +416,12 @@ class Harness(
         else on(onClientSession).submit(length)
     }
 
+    /**
+     * Sends whatever [encode] writes at offset 0 of the harness's buffer, returning its length: a
+     * message no helper builds, such as one in an older layout.
+     */
+    fun sendRaw(encode: (org.agrona.MutableDirectBuffer) -> Int) = submit(encode(buffer))
+
     private fun submit(length: Int) {
         val sender = inbound
         inbound = session
@@ -412,9 +431,24 @@ class Harness(
         for (live in liveSessions.values) (live as FakeSession).drain()
     }
 
+    @Suppress("LongParameterList")
     fun newOrder(
         participantId: Long,
         clOrdId: Long,
+        securityId: Int,
+        side: Byte,
+        price: Long,
+        qty: Long,
+        smpId: Long = 0L,
+        expireDate: Int = 0,
+        smpStrategy: Byte = SmpStrategy.CANCEL_AGGRESSOR,
+    ) = newOrder(participantId, clOrdId.toString(), securityId, side, price, qty, smpId, expireDate, smpStrategy)
+
+    /** An order whose id is the participant's own text (Design.md §5, "Client order ids"). */
+    @Suppress("LongParameterList")
+    fun newOrder(
+        participantId: Long,
+        clOrdId: String,
         securityId: Int,
         side: Byte,
         price: Long,
@@ -440,6 +474,16 @@ class Harness(
         participantId: Long,
         origClOrdId: Long,
         clOrdId: Long,
+        exchangeOrderId: Long,
+        securityId: Int,
+        side: Byte,
+    ) = cancel(participantId, origClOrdId.toString(), clOrdId.toString(), exchangeOrderId, securityId, side)
+
+    @Suppress("LongParameterList")
+    fun cancel(
+        participantId: Long,
+        origClOrdId: String,
+        clOrdId: String,
         exchangeOrderId: Long,
         securityId: Int,
         side: Byte,
@@ -479,11 +523,13 @@ class Harness(
     }
 
     /** `ReportResendRequest`, as a participant's adapter sends it after a failover or a gap. */
-    fun reportResendRequest(participantId: Long, fromSeq: Long, requestId: Long = 1L) {
+    fun reportResendRequest(participantId: Long, fromSeq: Long, requestId: Long = 1L, toSeq: Long = 0L) {
+        // toSeq always written: the buffer is reused, and an unset field reads the last message's bytes.
         nl.lamia.most.exchange.sbe.ReportResendRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId)
             .requestId(requestId)
             .fromSeq(fromSeq)
+            .toSeq(toSeq)
         submit(MessageHeaderEncoder.ENCODED_LENGTH + nl.lamia.most.exchange.sbe.ReportResendRequestEncoder.BLOCK_LENGTH)
     }
 

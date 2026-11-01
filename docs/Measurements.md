@@ -1146,6 +1146,55 @@ rate (R7's run length); S1–S4 are 1,600,000 orders per rate, interleaved v7, v
 Docker stacks stopped, IntelliJ and Firefox closed. The load average of 2.4–7.2 is the runs' own
 residue, back to back. 2026-11-01, 10:43–10:49 local time.
 
+## What S5–S8 and A13–A14 say: the built version 8 costs what the prototype did
+
+The same A/B as S1–S4, on the real builds: **v7** is `bd25eb1` (the harness fix committed), **v8** is
+the version 8 tree, uncommitted at the time of the run. Interleaved v7, v8, v7, v8.
+
+| # | arm | target | achieved | service p50 | service p90 | service p99 | response p50 | response p99 | pacing p99.9 | unans. | dropped | |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| S5a | v7 | 400k/s | 399,998/s | 84.9 µs | 194.3 µs | 8.86 ms | 84.9 µs | 8.86 ms | 349.4 µs | 0 | 0 | |
+| S5b | v7 | 450k/s | 450,043/s | 101.7 µs | 356.9 µs | 981 µs | 101.8 µs | 981 µs | 14.4 µs | 0 | 0 | |
+| S5c | v7 | 500k/s | 499,997/s | 204.0 µs | 3.10 ms | 10.2 ms | 204.2 µs | 10.2 ms | 14.8 µs | 0 | 0 | |
+| S5d | v7 | 550k/s | 550,050/s | 17.4 ms | 35.6 ms | 78.1 ms | 17.4 ms | 78.1 ms | 22.5 µs | 0 | 0 | SATURATED |
+| S6a | v8 | 400k/s | 399,998/s | 95.7 µs | 343.3 µs | 6.19 ms | 95.8 µs | 6.19 ms | 21.8 µs | 0 | 0 | |
+| S6b | v8 | 450k/s | 450,043/s | 238.3 µs | 2.37 ms | 4.65 ms | 238.5 µs | 4.65 ms | 20.4 µs | 0 | 0 | |
+| S6c | v8 | 500k/s | 499,994/s | 285 ms | 570 ms | 625 ms | 285 ms | 625 ms | 21.8 µs | 0 | 0 | SATURATED |
+| S6d | v8 | 550k/s | 550,050/s | 485 ms | 651 ms | 731 ms | 485 ms | 731 ms | 18.1 µs | 0 | 0 | SATURATED |
+| S7a | v7 | 400k/s | 399,998/s | 82.0 µs | 130.6 µs | 360 µs | 82.0 µs | 360 µs | 13.4 µs | 0 | 0 | |
+| S7b | v7 | 450k/s | 450,043/s | 150.1 µs | 4.55 ms | 18.7 ms | 150.3 µs | 18.7 ms | 15.3 µs | 0 | 0 | |
+| S7c | v7 | 500k/s | 499,996/s | 168.2 µs | 1.58 ms | 2.74 ms | 168.3 µs | 2.74 ms | 16.8 µs | 0 | 0 | |
+| S7d | v7 | 550k/s | 550,049/s | 314 ms | 557 ms | 675 ms | 314 ms | 675 ms | 21.1 µs | 0 | 0 | SATURATED |
+| S8a | v8 | 400k/s | 399,998/s | 93.6 µs | 369.7 µs | 4.08 ms | 93.8 µs | 4.08 ms | 23.2 µs | 0 | 0 | |
+| S8b | v8 | 450k/s | 450,042/s | 160.5 µs | 1.71 ms | 8.20 ms | 160.6 µs | 8.20 ms | 16.9 µs | 0 | 0 | |
+| S8c | v8 | 500k/s | 499,996/s | 260 ms | 569 ms | 641 ms | 260 ms | 641 ms | 21.9 µs | 0 | 0 | SATURATED |
+| S8d | v8 | 550k/s | 550,051/s | 419 ms | 623 ms | 677 ms | 419 ms | 677 ms | 18.8 µs | 0 | 0 | SATURATED |
+
+- **The knee moved one step, as the prototype said.** v7 held 500k/s in both repeats (204 and 168
+  µs medians); v8 saturated there in both. With UDP egress in 1,408 B datagrams, version 8's
+  ten-security knee on this laptop is between 450k and 500k/s, against 500k–550k/s before.
+- **Below the knee the medians overlap at 400k/s** (96 and 94 µs against 85 and 82 µs), and v8's
+  median is higher at 450k/s (238 and 161 µs against 102 and 150 µs).
+
+**Attribution at 250k/s, the rate of A11–A12** (`run-attribution.sh`, metrics and stages on, 2M orders,
+ten securities, `DEDICATED`). This mode prints the client's service time only.
+
+| # | build | client service p50 | engine `newOrder` p50 / p99 | admit | match | settle | engine duty | sender duty |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| A13 | v7 `bd25eb1` | 100.7 µs | 0.38 / 2.29 µs | 0.08 µs | 0.04 µs | 0.17 µs | 14.6% | 91.2% |
+| A14 | v8 | 108.9 µs | 0.42 / 2.04 µs | 0.08 µs | 0.04 µs | 0.17 µs | 15.1% | 92.8% |
+
+- **The engine pays +0.04 µs a new order at p50**, inside no single stage at two-decimal precision:
+  the id copied into the cold words and two ids into each report. The p99 is no worse.
+- **The sender's duty reading is not to be leaned on** (Design.md §8, the duty-counter disagreement).
+
+**Conditions (S5–S8, A13–A14).** Apple M4 Pro, 14 cores (10P+4E), macOS 15.7.9, OpenJDK 21.0.11, JVM.
+Single node, `DRIVER_THREADING=DEDICATED`, archive `SHARED`, unpinned, ten securities, gateway egress
+`aeron:udp?endpoint=localhost:0` (1,408 B), band 99.90–100.10 inside a 5000 bps static collar,
+`maxOrders=1000000` per security. Sweeps: metrics off, 1,600,000 orders per rate, 200,000-order
+discard pass. **Idle:** Docker stacks stopped, IntelliJ and Firefox closed; load average 2.3–6.6 is the
+runs' own residue. 2026-11-01, 12:23–12:29 local time.
+
 ## Adding a row
 
 ```sh

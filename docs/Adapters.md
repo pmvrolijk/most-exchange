@@ -91,9 +91,16 @@ backends:
 
 ## 2. Orders, identifiers and back-pressure
 
+- **`clOrdId` is the client's own identifier** (schema version 8; Design.md §5, "Client order ids"):
+  1 to 20 characters of `A-Z a-z 0-9 - _ + ; : . /`, so a FIX ClOrdID that fits is passed straight
+  through, with nothing to derive or map. Build one with `ClOrdId.of`. One that does not fit is the
+  adapter's to refuse, before sending: the gateway refuses it `INVALID_CL_ORD_ID`.
 - **`clOrdId` MUST be unique per participant for at least the trading day.** The engine does not
   check it. A report carries `clOrdId`, and a duplicate makes two orders indistinguishable to the
-  client. Map the client's own identifier (FIX ClOrdID) to it one to one.
+  client.
+- **Every report carries `clOrdId` and `origClOrdId`.** A cancel's report carries the cancel's
+  `clOrdId` and the order's `origClOrdId` (FIX 11 and 41). Every other report carries the order's
+  own id in both.
 - **Keep `exchangeOrderId`** from the first report. A cancel names both `exchangeOrderId` and
   `origClOrdId`.
 - **Prices and quantities are fixed-point `int64` with 8 implied decimals** (`PriceCodec`). Never pass
@@ -138,12 +145,16 @@ MUST do:
   all of the participant's orders and all gateways. A report with `reportSeq` 0 was made by the
   gateway (a local reject) or is an `ORDER_STATUS`, and is outside the sequence. Count each sequenced
   report **once**: a replay resends some you already have.
-- **On a gap, or after a gateway switch, send a `ReportResendRequest`** per participant, from its first
-  missing `reportSeq`, through the active gateway. It is sequenced like an order, so it is a
-  **fence**:
-  - on `ReportResendComplete` with `COMPLETE`, every report below `nextSeq` has been sent. **An
-    in-flight order sent before the request that still has no report was never sequenced.** Reject
-    it to the client, or send it again. Either is safe, and it will execute at most once;
+- **On a gap, send a `ReportResendRequest` bounded to the gap**: `fromSeq` its first missing
+  `reportSeq`, `toSeq` its last. **After a gateway switch, or for an order unanswered too long, send
+  one unbounded** (`toSeq` 0) from the first missing. One per participant, through the active
+  gateway. Unbounded, one lost report under load replays everything after it (Design.md §5). It is
+  sequenced like an order, so it is a **fence**:
+  - on `ReportResendComplete` with `COMPLETE`, every report below `nextSeq` was generated before the
+    request. **Once you hold every one of them, an in-flight order sent before the request that still
+    has no report was never sequenced.** Reject it to the client, or send it again. Either is safe,
+    and it will execute at most once. **Still missing one** (a report the gateway dropped above a
+    bounded fence's `toSeq`): settle nothing, and fence again for it;
   - on `UNAUTHORIZED_PARTICIPANT` or `GATEWAY_UNAVAILABLE`, nothing was sent. Switch, and fence
     again.
 - **On `TRUNCATED`, send an `OrderMassStatusRequest`** for that participant. It answers one
@@ -162,8 +173,8 @@ MUST do:
 
 | What | Why | How long |
 | --- | --- | --- |
-| Per order: client id ↔ `clOrdId` ↔ `exchangeOrderId`, answered or not | Answering the client, cancelling, settling in-flight orders at a fence | Until terminal, and the trading day for `clOrdId` uniqueness |
-| Per participant: which `reportSeq` arrived, first missing | Gap detection, resend `fromSeq`, deduplicating replays | The session; across an adapter restart if possible |
+| Per order: `clOrdId` (the client's own id) ↔ `exchangeOrderId`, answered or not | Answering the client, cancelling, settling in-flight orders at a fence | Until terminal, and the trading day for `clOrdId` uniqueness |
+| Per participant: which `reportSeq` arrived, first missing | Gap detection, a resend's `fromSeq` and `toSeq`, deduplicating replays | The session; across an adapter restart if possible |
 | Per participant: the last fence's position in its own order stream | Which in-flight orders a completion settles | Until the completion |
 | Every gateway endpoint of the shard | Switching on a reject or a disconnect | Configuration |
 

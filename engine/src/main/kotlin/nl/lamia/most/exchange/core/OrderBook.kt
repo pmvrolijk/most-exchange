@@ -102,7 +102,14 @@ class OrderBook(
 
     fun smpIdOf(node: Int): Long = orders[node * OrderField.STRIDE + OrderField.SMP_ID]
 
-    fun clOrdIdOf(node: Int): Long = orders[node * OrderField.STRIDE + OrderField.CL_ORD_ID]
+    /** Loads the order's client order id into [into], and returns it. */
+    fun loadClOrdId(node: Int, into: IdWords): IdWords {
+        val base = node * ColdField.STRIDE
+        into.word0 = cold[base + ColdField.CL_ORD_ID_0]
+        into.word1 = cold[base + ColdField.CL_ORD_ID_1]
+        into.word2 = cold[base + ColdField.CL_ORD_ID_2]
+        return into
+    }
 
     fun exchangeOrderIdOf(node: Int): Long =
         orders[node * OrderField.STRIDE + OrderField.EXCHANGE_ORDER_ID]
@@ -154,7 +161,7 @@ class OrderBook(
         exchangeOrderId: Long,
         participantId: Long,
         smpId: Long,
-        clOrdId: Long,
+        clOrdId: IdWords,
         price: Long,
         leavesQty: Long,
         origQty: Long,
@@ -172,10 +179,13 @@ class OrderBook(
         orders[base + OrderField.LEAVES_QTY] = leavesQty
         orders[base + OrderField.PARTICIPANT_ID] = participantId
         orders[base + OrderField.SMP_ID] = smpId
-        orders[base + OrderField.CL_ORD_ID] = clOrdId
         orders[base + OrderField.EXCHANGE_ORDER_ID] = exchangeOrderId
         orders[base + OrderField.META] = packMeta(expireDate, side, smpStrategy)
-        cold[node * ColdField.STRIDE + ColdField.ORIG_QTY] = origQty
+        val coldBase = node * ColdField.STRIDE
+        cold[coldBase + ColdField.ORIG_QTY] = origQty
+        cold[coldBase + ColdField.CL_ORD_ID_0] = clOrdId.word0
+        cold[coldBase + ColdField.CL_ORD_ID_1] = clOrdId.word1
+        cold[coldBase + ColdField.CL_ORD_ID_2] = clOrdId.word2
 
         val ladder = if (side == Side.BUY) bids else asks
         val level = levelOf(price)
@@ -256,7 +266,7 @@ class OrderBook(
     fun prepareCancel(
         exchangeOrderId: Long,
         participantId: Long,
-        origClOrdId: Long,
+        origClOrdId: IdWords,
         outcome: CancelOutcome,
     ): Boolean {
         val node = orderIdToIndex.get(exchangeOrderId).toInt()
@@ -266,8 +276,12 @@ class OrderBook(
             return false
         }
         val base = node * OrderField.STRIDE
+        val coldBase = node * ColdField.STRIDE
+        // All 20 bytes of the id (Design.md §5, "Client order ids"); the engine compares, never parses.
         if (orders[base + OrderField.PARTICIPANT_ID] != participantId ||
-            orders[base + OrderField.CL_ORD_ID] != origClOrdId
+            cold[coldBase + ColdField.CL_ORD_ID_0] != origClOrdId.word0 ||
+            cold[coldBase + ColdField.CL_ORD_ID_1] != origClOrdId.word1 ||
+            cold[coldBase + ColdField.CL_ORD_ID_2] != origClOrdId.word2
         ) {
             outcome.rejectReason = RejectReason.UNAUTHORIZED_PARTICIPANT
             return false

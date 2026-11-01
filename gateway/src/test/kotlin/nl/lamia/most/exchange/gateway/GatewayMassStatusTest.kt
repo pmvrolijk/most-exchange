@@ -79,7 +79,7 @@ class GatewayMassStatusTest {
     fun `an order status is translated like any report, outside the sequence`() {
         val b = UnsafeBuffer(ByteArray(512))
         ExecutionReportEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
-            .participantId(7).clOrdId(1001).exchangeOrderId(3).price(101).lastQty(0).leavesQty(6)
+            .participantId(7).clOrdId((1001).toString()).exchangeOrderId(3).price(101).lastQty(0).leavesQty(6)
             .securityId(1).rejectReason(RejectReason.NONE).execType(ExecType.ORDER_STATUS).side(Side.SELL)
             .origQty(10).cumQty(4).reportSeq(0)
         service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH)

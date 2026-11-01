@@ -19,7 +19,6 @@ import nl.lamia.most.exchange.sbe.Side
 import nl.lamia.most.exchange.sbe.SmpStrategy
 import org.agrona.DirectBuffer
 import org.agrona.collections.Long2ObjectHashMap
-import org.agrona.collections.LongArrayList
 import org.agrona.concurrent.Agent
 import org.agrona.concurrent.NanoClock
 import org.agrona.concurrent.SystemNanoClock
@@ -90,7 +89,7 @@ interface OrderEntryListener {
     fun onReport(report: ClientExecutionReportDecoder): ReportAction
 
     /** A request that had no report was settled without one. */
-    fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate)
+    fun onSettled(participantId: Long, clOrdId: ClOrdId, fate: OrderFate)
 
     /** A mass status finished: every open order was stated by an `ORDER_STATUS` report before this. */
     fun onMassStatusComplete(participantId: Long, status: RequestStatus, orderCount: Int, nextSeq: Long) {}
@@ -139,16 +138,20 @@ interface SessionStore {
  * - **Back-pressure** is returned, never dropped: [SendResult.BACK_PRESSURED].
  * - **Switching.** On `NOT_CONNECTED`, and on a `GATEWAY_UNAVAILABLE` from the gateway in use, moves
  *   to the next connected gateway of [links], and fences before the next order.
- * - **The fence.** After a switch, on a `reportSeq` gap, and when a request has gone unanswered for
- *   [Config.unansweredFenceNs], one `ReportResendRequest` per participant from its first missing
- *   report. When it completes, every earlier request still without a report is
- *   [OrderFate.NEVER_SEQUENCED]. When it is `TRUNCATED`, a mass status follows: open orders are
- *   stated, the sequence resumes from its `nextSeq`, and the rest are [OrderFate.AMBIGUOUS].
+ * - **The fence.** After a switch, and when a request has gone unanswered for
+ *   [Config.unansweredFenceNs], one unbounded `ReportResendRequest` per participant from its first
+ *   missing report. On a `reportSeq` gap below reports already received, one bounded to that gap
+ *   (Design.md §5, "a gap is asked for by its bounds"). When a fence completes and every report below
+ *   its `nextSeq` is held, every earlier request still without a report is
+ *   [OrderFate.NEVER_SEQUENCED]; when one is still missing, the session fences again first. When it
+ *   is `TRUNCATED`, a mass status follows: open orders are stated, the sequence resumes from its
+ *   `nextSeq`, and the rest are [OrderFate.AMBIGUOUS].
  *
  * The session tracks only requests still waiting for their first report, keyed by `clOrdId`, which
- * must be unique per participant for the trading day (docs/Adapters.md §2). Mapping the client's own
- * identifiers, and keeping `exchangeOrderId` for cancels, are the adapter's. After a restart, the
- * adapter hands its unanswered requests back with [restoreInFlight] (docs/Adapters.md §5).
+ * must be unique per participant for the trading day (docs/Adapters.md §2). The `clOrdId` is the
+ * client's own (Design.md §5, "Client order ids"); keeping `exchangeOrderId` for cancels is the
+ * adapter's. After a restart, the adapter hands its unanswered requests back with [restoreInFlight]
+ * (docs/Adapters.md §5).
  *
  * Not thread-safe: [doWork], [newOrder], [cancel] and [requestMassStatus] belong to one thread, as
  * an Artio library's poll loop does.
@@ -225,7 +228,7 @@ class OrderEntrySession(
     private val handlers = Array(links.size) { link ->
         ControlledFragmentAssembler { buffer, offset, length, _ -> onFragment(link, buffer, offset, length) }
     }
-    private val settling = LongArrayList()
+    private val settling = ArrayList<InFlight>()
 
     override fun roleName(): String = "order-entry-session"
 
@@ -248,7 +251,7 @@ class OrderEntrySession(
     @Suppress("LongParameterList")
     fun newOrder(
         participantId: Long,
-        clOrdId: Long,
+        clOrdId: ClOrdId,
         securityId: Int,
         side: Side,
         price: Long,
@@ -266,12 +269,15 @@ class OrderEntrySession(
         return send(p, clOrdId, length)
     }
 
-    /** Sends an `OrderCancelRequest`. Its report carries [clOrdId], this request's own id. */
+    /**
+     * Sends an `OrderCancelRequest`. Its report carries [clOrdId], this request's own id, and
+     * [origClOrdId], the order's.
+     */
     @Suppress("LongParameterList")
     fun cancel(
         participantId: Long,
-        clOrdId: Long,
-        origClOrdId: Long,
+        clOrdId: ClOrdId,
+        origClOrdId: ClOrdId,
         exchangeOrderId: Long,
         securityId: Int,
         side: Side,
@@ -303,11 +309,11 @@ class OrderEntrySession(
      * before the first [doWork]. It counts as sent before anything this session sends, and its
      * participant fences whatever the [SessionStore] says, so it is settled by the usual rules.
      */
-    fun restoreInFlight(participantId: Long, clOrdId: Long) {
+    fun restoreInFlight(participantId: Long, clOrdId: ClOrdId) {
         val p = requireNotNull(participantOf(participantId)) { "participant $participantId is not this session's" }
         check(!started) { "requests are restored before the first doWork" }
-        p.inFlight.put(clOrdId, InFlight(sendPosition++, clock.nanoTime()))
-        p.fenceOwed = true
+        p.inFlight.put(InFlight(clOrdId, sendPosition++, clock.nanoTime()))
+        oweUnboundedFence(p)
     }
 
     // ------------------------------------------------------------------ connecting and switching
@@ -321,7 +327,7 @@ class OrderEntrySession(
             if (stored > 1L) {
                 ledger.resumeFrom(i, stored)
                 p.savedFirstMissing = stored
-                p.fenceOwed = true
+                oweUnboundedFence(p)
             }
             if (config.massStatusOnStart) {
                 p.statusOwed = true
@@ -371,13 +377,22 @@ class OrderEntrySession(
      */
     private fun oweFences() {
         for (p in participants) {
-            p.fenceOwed = true
+            oweUnboundedFence(p)
             p.fenceRequestId = 0L
             if (p.statusRequestId != 0L) {
                 p.statusRequestId = 0L
                 p.statusOwed = true
             }
         }
+    }
+
+    /**
+     * A fence for what may lie above everything received: after a switch, a restart, or a request
+     * unanswered too long. Wins over a bounded one owed at the same time.
+     */
+    private fun oweUnboundedFence(p: Participant) {
+        p.fenceOwed = true
+        p.fenceUnbounded = true
     }
 
     // ------------------------------------------------------------------ sending
@@ -390,10 +405,10 @@ class OrderEntrySession(
         return null
     }
 
-    private fun send(p: Participant, clOrdId: Long, length: Int): SendResult {
+    private fun send(p: Participant, clOrdId: ClOrdId, length: Int): SendResult {
         val result = links[active].offer(buffer, 0, length)
         if (result > 0L) {
-            p.inFlight.put(clOrdId, InFlight(sendPosition++, clock.nanoTime()))
+            p.inFlight.put(InFlight(clOrdId, sendPosition++, clock.nanoTime()))
             return SendResult.SENT
         }
         return when (result) {
@@ -411,11 +426,15 @@ class OrderEntrySession(
         for ((i, p) in participants.withIndex()) {
             if (p.fenceOwed && now >= p.retryAtNs) {
                 val requestId = nextRequestId++
+                // A gap below reports already received is asked for by its bounds; anything else may
+                // lie above everything seen, and is not (Design.md §5).
+                val toSeq = if (p.fenceUnbounded) ParticipantRequests.UNBOUNDED else ledger.gapEnd(i)
                 val length = ParticipantRequests.encodeReportResendRequest(
-                    buffer, 0, p.id, requestId, ledger.firstMissing(i), resendEncoder, headerEncoder,
+                    buffer, 0, p.id, requestId, ledger.firstMissing(i), toSeq, resendEncoder, headerEncoder,
                 )
                 if (!offerRequest(length)) return sent
                 p.fenceOwed = false
+                p.fenceUnbounded = false
                 p.fenceRequestId = requestId
                 p.fenceAt = sendPosition
                 fencesSent++
@@ -469,10 +488,14 @@ class OrderEntrySession(
         val i = ledger.indexOf(report.participantId())
         if (i < 0) return Action.CONTINUE
         val p = participants[i]
-        val clOrdId = report.clOrdId()
+        // Read as words, so a report finds its request without an object per report.
+        val idAt = report.offset() + ClientExecutionReportDecoder.clOrdIdEncodingOffset()
+        val w0 = ClOrdId.word0(report.buffer(), idAt)
+        val w1 = ClOrdId.word1(report.buffer(), idAt)
+        val w2 = ClOrdId.word2(report.buffer(), idAt)
         if (report.execType() == ExecType.REJECTED && report.rejectReason() == RejectReason.GATEWAY_UNAVAILABLE) {
             // The gateway's own refusal: it never forwarded the request, so it never reached the log.
-            if (p.inFlight.remove(clOrdId) != null) listener.onSettled(p.id, clOrdId, OrderFate.NEVER_SEQUENCED)
+            p.inFlight.remove(w0, w1, w2)?.let { listener.onSettled(p.id, it.clOrdId, OrderFate.NEVER_SEQUENCED) }
             // Move on once: the rejects still arriving from the same gateway must not move again.
             if (link == active) switchGateway()
             return Action.CONTINUE
@@ -487,7 +510,7 @@ class OrderEntrySession(
         val gapsBefore = ledger.gapsOpened
         ledger.accept(p.id, reportSeq)
         if (ledger.gapsOpened != gapsBefore && p.fenceRequestId == 0L) p.fenceOwed = true
-        p.inFlight.remove(clOrdId)
+        p.inFlight.remove(w0, w1, w2)
         return Action.CONTINUE
     }
 
@@ -500,8 +523,19 @@ class OrderEntrySession(
         p.fenceRequestId = 0L
         when (val status = resendComplete.status()) {
             RequestStatus.COMPLETE -> {
-                settle(p, p.fenceAt, OrderFate.NEVER_SEQUENCED)
-                if (ledger.hasGap(i)) p.fenceOwed = true
+                // Every report below nextSeq was generated before the fence. Holding them all, an
+                // unanswered request sent before it was never sequenced; still missing one (a report
+                // the gateway dropped above a bounded fence), nothing is settled until it is held
+                // (Design.md §5, "The request is a fence").
+                if (ledger.missingBelow(i, resendComplete.nextSeq()) == 0L) {
+                    settle(p, p.fenceAt, OrderFate.NEVER_SEQUENCED)
+                    if (ledger.hasGap(i)) p.fenceOwed = true
+                } else if (ledger.hasGap(i)) {
+                    p.fenceOwed = true
+                } else {
+                    // Missing only above everything received: bounded would ask for nothing.
+                    oweUnboundedFence(p)
+                }
             }
             RequestStatus.TRUNCATED -> {
                 // Reports are gone that no resend brings back: ask what is still open.
@@ -550,16 +584,12 @@ class OrderEntrySession(
     private fun settle(p: Participant, before: Long, fate: OrderFate) {
         settling.clear()
         // Collected first: removing while iterating an open-addressing map can skip entries.
-        val keys = p.inFlight.keys.iterator()
-        while (keys.hasNext()) {
-            val clOrdId = keys.nextLong()
-            if (p.inFlight.get(clOrdId)!!.sentPosition < before) settling.addLong(clOrdId)
+        p.inFlight.forEach { if (it.sentPosition < before) settling.add(it) }
+        for (request in settling) {
+            p.inFlight.remove(request.clOrdId)
+            listener.onSettled(p.id, request.clOrdId, fate)
         }
-        for (k in 0..<settling.size) {
-            val clOrdId = settling.getLong(k)
-            p.inFlight.remove(clOrdId)
-            listener.onSettled(p.id, clOrdId, fate)
-        }
+        settling.clear()
     }
 
     private fun checkUnanswered() {
@@ -569,12 +599,7 @@ class OrderEntrySession(
         val cutoff = now - config.unansweredFenceNs
         for (p in participants) {
             if (p.fenceOwed || p.fenceRequestId != 0L || p.statusRequestId != 0L) continue
-            for (request in p.inFlight.values) {
-                if (request.sentNs <= cutoff) {
-                    p.fenceOwed = true
-                    break
-                }
-            }
+            if (p.inFlight.anyOlderThan(cutoff)) oweUnboundedFence(p)
         }
     }
 
@@ -598,11 +623,81 @@ class OrderEntrySession(
         return if (i < 0) null else participants[i]
     }
 
-    private class InFlight(val sentPosition: Long, val sentNs: Long)
+    private class InFlight(val clOrdId: ClOrdId, val sentPosition: Long, val sentNs: Long) {
+        /** The next request whose id hashes to the same key. */
+        var next: InFlight? = null
+
+        fun matches(w0: Long, w1: Long, w2: Long): Boolean =
+            clOrdId.word0 == w0 && clOrdId.word1 == w1 && clOrdId.word2 == w2
+    }
+
+    /**
+     * Requests awaiting their first report, by `clOrdId`, chained per hash of its three words, so a
+     * report's id is looked up from its bytes with nothing allocated (Design.md §5, "Client order ids").
+     */
+    private class InFlightTable {
+        private val heads = Long2ObjectHashMap<InFlight>()
+
+        fun put(request: InFlight) {
+            val id = request.clOrdId
+            remove(id.word0, id.word1, id.word2) // a reused id replaces the earlier request, as before
+            val key = key(id.word0, id.word1, id.word2)
+            request.next = heads.get(key)
+            heads.put(key, request)
+        }
+
+        fun remove(id: ClOrdId): InFlight? = remove(id.word0, id.word1, id.word2)
+
+        fun remove(w0: Long, w1: Long, w2: Long): InFlight? {
+            val key = key(w0, w1, w2)
+            var previous: InFlight? = null
+            var entry = heads.get(key)
+            while (entry != null) {
+                if (entry.matches(w0, w1, w2)) {
+                    val next = entry.next
+                    when {
+                        previous != null -> previous.next = next
+                        next == null -> heads.remove(key)
+                        else -> heads.put(key, next)
+                    }
+                    entry.next = null
+                    return entry
+                }
+                previous = entry
+                entry = entry.next
+            }
+            return null
+        }
+
+        inline fun forEach(action: (InFlight) -> Unit) {
+            for (head in heads.values) {
+                var entry: InFlight? = head
+                while (entry != null) {
+                    val next = entry.next
+                    action(entry)
+                    entry = next
+                }
+            }
+        }
+
+        fun anyOlderThan(cutoffNs: Long): Boolean {
+            forEach { if (it.sentNs <= cutoffNs) return true }
+            return false
+        }
+
+        private fun key(w0: Long, w1: Long, w2: Long): Long {
+            var h = w0 * -0x61c8864680b583ebL
+            h = (h xor w1) * -0x61c8864680b583ebL
+            h = (h xor w2) * -0x61c8864680b583ebL
+            return h xor (h ushr 29)
+        }
+    }
 
     private class Participant(val id: Long) {
-        val inFlight = Long2ObjectHashMap<InFlight>()
+        val inFlight = InFlightTable()
         var fenceOwed = false
+        /** The fence owed must ask for everything from the first missing report, not one gap. */
+        var fenceUnbounded = false
         var fenceRequestId = 0L
         /** [sendPosition] when the fence in flight was sent: it settles every request below. */
         var fenceAt = 0L

@@ -48,23 +48,15 @@ class GatewayResendTest {
         )
     }
 
-    private fun engineReport(reportSeq: Long?) {
+    private fun engineReport(reportSeq: Long) {
         val b = UnsafeBuffer(ByteArray(512))
         val header = MessageHeaderEncoder()
         val encoder = ExecutionReportEncoder().wrapAndApplyHeader(b, 0, header)
-            .participantId(7).clOrdId(1001).exchangeOrderId(3).price(100).lastQty(4).leavesQty(6)
+            .participantId(7).clOrdId((1001).toString()).exchangeOrderId(3).price(100).lastQty(4).leavesQty(6)
             .securityId(1).rejectReason(RejectReason.NONE).execType(ExecType.TRADE).side(Side.SELL)
             .origQty(10).cumQty(4)
-        val blockLength = if (reportSeq == null) {
-            // An engine older than version 6: the same body, a header that says it ends at cumQty.
-            header.wrap(b, 0).blockLength(VERSION_5_BLOCK_LENGTH).version(5)
-                .templateId(ExecutionReportEncoder.TEMPLATE_ID).schemaId(ExecutionReportEncoder.SCHEMA_ID)
-            VERSION_5_BLOCK_LENGTH
-        } else {
-            encoder.reportSeq(reportSeq)
-            ExecutionReportEncoder.BLOCK_LENGTH
-        }
-        service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + blockLength)
+        encoder.reportSeq(reportSeq)
+        service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH)
     }
 
     // --------------------------------------------------------------------------------- reportSeq
@@ -76,16 +68,9 @@ class GatewayResendTest {
     }
 
     @Test
-    fun `a report from an engine older than version 6 carries reportSeq 0, not sequenced`() {
-        engineReport(reportSeq = null)
-        assertEquals(0L, sink.toClient.single().reportSeq)
-        assertEquals(4L, sink.toClient.single().cumQty, "the fields before reportSeq still decode")
-    }
-
-    @Test
     fun `a report the gateway makes itself is outside the sequence`() {
         NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
-            .participantId(7).clOrdId(1).price(100).qty(10).smpId(0).securityId(99).expireDate(0)
+            .participantId(7).clOrdId((1).toString()).price(100).qty(10).smpId(0).securityId(99).expireDate(0)
             .side(Side.BUY).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
         service.onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + NewOrderSingleEncoder.BLOCK_LENGTH)
 
@@ -155,8 +140,4 @@ class GatewayResendTest {
         assertTrue(sink.toClient.isEmpty(), "a completion is not an execution report")
     }
 
-    private companion object {
-        /** ExecutionReport's blockLength before reportSeq was added. */
-        const val VERSION_5_BLOCK_LENGTH = 80
-    }
 }

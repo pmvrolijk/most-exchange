@@ -1,5 +1,7 @@
 package nl.lamia.most.exchange.core
 
+import nl.lamia.most.exchange.client.ClOrdId
+import org.agrona.concurrent.UnsafeBuffer
 /**
  * Books use tickSize 1 and priceFloor 0, so price == level and the tests read as prices.
  */
@@ -51,7 +53,7 @@ fun OrderBook.add(
         exchangeOrderId = id,
         participantId = participantId,
         smpId = effectiveSmpId(smpId, participantId),
-        clOrdId = if (clOrdId != 0L) clOrdId else id,
+        clOrdId = idWords(if (clOrdId != 0L) clOrdId else id),
         price = price,
         leavesQty = qty,
         origQty = origQty,
@@ -61,6 +63,30 @@ fun OrderBook.add(
     )
     return id
 }
+
+/** A client order id for a test: [value] as its decimal string, as a version 7 id restores (Design.md §5). */
+fun idWords(value: Long): IdWords {
+    val bytes = UnsafeBuffer(ByteArray(ClOrdId.LENGTH))
+    ClOrdId.encodeDecimal(value, bytes, 0)
+    return IdWords().readFrom(bytes, 0)
+}
+
+/** The order's client order id, read back as the number a test gave it; -1 when it is not one. */
+fun OrderBook.clOrdIdOf(node: Int): Long {
+    val bytes = UnsafeBuffer(ByteArray(ClOrdId.LENGTH))
+    loadClOrdId(node, IdWords()).writeTo(bytes, 0)
+    return ClOrdId.parseDecimal(bytes, 0)
+}
+
+/** The order's client order id as the participant sent it. */
+fun OrderBook.clOrdIdTextOf(node: Int): String {
+    val bytes = UnsafeBuffer(ByteArray(ClOrdId.LENGTH))
+    loadClOrdId(node, IdWords()).writeTo(bytes, 0)
+    return ClOrdId.toString(bytes, 0)
+}
+
+fun OrderBook.prepareCancel(exchangeOrderId: Long, participantId: Long, origClOrdId: Long, outcome: CancelOutcome) =
+    prepareCancel(exchangeOrderId, participantId, idWords(origClOrdId), outcome)
 
 class Fill(val makerOrderId: Long, val price: Long, val qty: Long, val makerLeaves: Long)
 

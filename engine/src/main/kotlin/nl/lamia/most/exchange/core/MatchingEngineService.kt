@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.core
 
+import nl.lamia.most.exchange.client.ClOrdId
 import nl.lamia.most.exchange.sbe.AuctionUncrossedEncoder
 import nl.lamia.most.exchange.sbe.BookImageBeginEncoder
 import nl.lamia.most.exchange.sbe.BookImageEndEncoder
@@ -35,6 +36,7 @@ import nl.lamia.most.exchange.sbe.SnapshotEngineStateDecoder
 import nl.lamia.most.exchange.sbe.SnapshotEngineStateEncoder
 import nl.lamia.most.exchange.sbe.SnapshotOrderDecoder
 import nl.lamia.most.exchange.sbe.SnapshotOrderEncoder
+import nl.lamia.most.exchange.sbe.SnapshotOrderV7Decoder
 import nl.lamia.most.exchange.sbe.SnapshotReportSeqDecoder
 import nl.lamia.most.exchange.sbe.SnapshotReportSeqEncoder
 import nl.lamia.most.exchange.sbe.TradeExecutedEncoder
@@ -55,6 +57,7 @@ import org.agrona.DirectBuffer
 import org.agrona.MutableDirectBuffer
 import org.agrona.collections.Long2LongHashMap
 import org.agrona.collections.Long2ObjectHashMap
+import org.agrona.concurrent.UnsafeBuffer
 import java.util.concurrent.TimeUnit
 import nl.lamia.most.exchange.sbe.Phase as SbePhase
 import nl.lamia.most.exchange.sbe.RejectReason as SbeRejectReason
@@ -229,6 +232,13 @@ class MatchingEngineService(
     private val snapshotOrderEncoder = SnapshotOrderEncoder()
     private val snapshotEndEncoder = SnapshotEndEncoder()
     private val snapshotReportSeqEncoder = SnapshotReportSeqEncoder()
+
+    // Client order ids on their way through (Design.md §5, "Client order ids"): read from the message
+    // or the book, written into the report, never looked inside. Reused, so nothing allocates.
+    private val takerClOrdId = IdWords()
+    private val cancelClOrdId = IdWords()
+    private val cancelOrigClOrdId = IdWords()
+    private val bookClOrdId = IdWords()
 
     /**
      * Set once this node has read a `ConfigurationAnnouncement` it disagrees with. From then on it
@@ -584,12 +594,14 @@ class MatchingEngineService(
 
         when (headerDecoder.templateId()) {
             NewOrderSingleDecoder.TEMPLATE_ID -> {
+                if (version < ClOrdId.SINCE_SCHEMA_VERSION) refuseLayout("NewOrderSingle", version)
                 newOrderDecoder.wrap(buffer, body, blockLength, version)
                 onNewOrder(session)
                 metrics?.newOrder?.record(metrics.nanoTime() - started)
             }
 
             OrderCancelRequestDecoder.TEMPLATE_ID -> {
+                if (version < ClOrdId.SINCE_SCHEMA_VERSION) refuseLayout("OrderCancelRequest", version)
                 cancelDecoder.wrap(buffer, body, blockLength, version)
                 onCancel(session)
                 metrics?.cancel?.record(metrics.nanoTime() - started)
@@ -647,7 +659,9 @@ class MatchingEngineService(
         val stages = metrics != null && metrics.stages
         val stageStart = if (stages) metrics.nanoTime() else 0L
         val participantId = newOrderDecoder.participantId()
-        val clOrdId = newOrderDecoder.clOrdId()
+        val clOrdId = takerClOrdId.readFrom(
+            newOrderDecoder.buffer(), newOrderDecoder.offset() + NewOrderSingleDecoder.clOrdIdEncodingOffset(),
+        )
         val price = newOrderDecoder.price()
         val qty = newOrderDecoder.qty()
         val rawSmpId = newOrderDecoder.smpId()
@@ -661,7 +675,7 @@ class MatchingEngineService(
 
         val bookIndex = indexOfSecurity(securityId)
         if (bookIndex < 0) {
-            reject(participantId, clOrdId, securityId, side, price, RejectReason.UNKNOWN_SECURITY)
+            reject(participantId, clOrdId, clOrdId, securityId, side, price, RejectReason.UNKNOWN_SECURITY)
             if (stages) metrics.admit.record(metrics.nanoTime() - stageStart)
             return
         }
@@ -669,7 +683,7 @@ class MatchingEngineService(
 
         val reason = validateNewOrder(book, qty, price, expireDate)
         if (reason != RejectReason.NONE) {
-            reject(participantId, clOrdId, securityId, side, price, reason, origQty = qty)
+            reject(participantId, clOrdId, clOrdId, securityId, side, price, reason, origQty = qty)
             if (stages) metrics.admit.record(metrics.nanoTime() - stageStart)
             return
         }
@@ -678,7 +692,7 @@ class MatchingEngineService(
         val orderId = nextExchangeOrderId++
 
         sendExecutionReport(
-            participantId, clOrdId, orderId, securityId, ExecType.NEW, side,
+            participantId, clOrdId, clOrdId, orderId, securityId, ExecType.NEW, side,
             price = price, lastQty = 0L, leavesQty = qty, rejectReason = RejectReason.NONE,
             origQty = qty, cumQty = 0L,
         )
@@ -710,19 +724,19 @@ class MatchingEngineService(
                 remaining -= fillQty
                 val makerId = book.exchangeOrderIdOf(maker)
                 val makerParticipant = book.participantIdOf(maker)
-                val makerClOrdId = book.clOrdIdOf(maker)
+                val makerClOrdId = book.loadClOrdId(maker, bookClOrdId)
                 val makerSide = book.sideOfOrder(maker)
                 val makerOrigQty = book.origQtyOf(maker)
 
                 // Taker's leavesQty is the RUNNING remainder, not origQty - thisFill.
                 sendExecutionReport(
-                    participantId, clOrdId, orderId, securityId, ExecType.TRADE, side,
+                    participantId, clOrdId, clOrdId, orderId, securityId, ExecType.TRADE, side,
                     price = fillPrice, lastQty = fillQty, leavesQty = remaining,
                     rejectReason = RejectReason.NONE,
                     origQty = qty, cumQty = qty - remaining,
                 )
                 sendExecutionReport(
-                    makerParticipant, makerClOrdId, makerId, securityId, ExecType.TRADE, makerSide,
+                    makerParticipant, makerClOrdId, makerClOrdId, makerId, securityId, ExecType.TRADE, makerSide,
                     price = fillPrice, lastQty = fillQty, leavesQty = makerLeaves,
                     rejectReason = RejectReason.NONE,
                     origQty = makerOrigQty, cumQty = cumQtyOf(makerOrigQty, makerLeaves),
@@ -740,7 +754,7 @@ class MatchingEngineService(
                 val makerSide = book.sideOfOrder(maker)
                 val makerOrigQty = book.origQtyOf(maker)
                 sendExecutionReport(
-                    book.participantIdOf(maker), book.clOrdIdOf(maker), makerId, securityId,
+                    book.participantIdOf(maker), book.loadClOrdId(maker, bookClOrdId), bookClOrdId, makerId, securityId,
                     ExecType.CANCELED, makerSide, price = makerPrice, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.SELF_MATCH_PREVENTED,
                     origQty = makerOrigQty,
@@ -767,7 +781,7 @@ class MatchingEngineService(
             }
 
             MatchStatus.SELF_MATCH_STOP -> sendExecutionReport(
-                participantId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
+                participantId, clOrdId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
                 price = price, lastQty = 0L, leavesQty = 0L,
                 rejectReason = RejectReason.SELF_MATCH_PREVENTED,
                 origQty = qty, cumQty = qty - remaining,
@@ -775,7 +789,7 @@ class MatchingEngineService(
 
             MatchStatus.COLLAR_BREACH -> {
                 sendExecutionReport(
-                    participantId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
+                    participantId, clOrdId, clOrdId, orderId, securityId, ExecType.CANCELED, side,
                     price = price, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.VOLATILITY_HALT,
                     origQty = qty, cumQty = qty - remaining,
@@ -824,8 +838,11 @@ class MatchingEngineService(
 
     private fun onCancel(session: ClientSession) {
         val participantId = cancelDecoder.participantId()
-        val origClOrdId = cancelDecoder.origClOrdId()
-        val clOrdId = cancelDecoder.clOrdId()
+        val body = cancelDecoder.offset()
+        val origClOrdId = cancelOrigClOrdId.readFrom(
+            cancelDecoder.buffer(), body + OrderCancelRequestDecoder.origClOrdIdEncodingOffset(),
+        )
+        val clOrdId = cancelClOrdId.readFrom(cancelDecoder.buffer(), body + OrderCancelRequestDecoder.clOrdIdEncodingOffset())
         val exchangeOrderId = cancelDecoder.exchangeOrderId()
         val securityId = cancelDecoder.securityId()
         val side = cancelDecoder.side().value()
@@ -835,13 +852,13 @@ class MatchingEngineService(
 
         val bookIndex = indexOfSecurity(securityId)
         if (bookIndex < 0) {
-            reject(participantId, clOrdId, securityId, side, 0L, RejectReason.UNKNOWN_SECURITY)
+            reject(participantId, clOrdId, origClOrdId, securityId, side, 0L, RejectReason.UNKNOWN_SECURITY)
             return
         }
         val book = books[bookIndex]
 
         if (!book.prepareCancel(exchangeOrderId, participantId, origClOrdId, cancelOutcome)) {
-            reject(participantId, clOrdId, securityId, side, 0L, cancelOutcome.rejectReason)
+            reject(participantId, clOrdId, origClOrdId, securityId, side, 0L, cancelOutcome.rejectReason)
             return
         }
 
@@ -851,7 +868,8 @@ class MatchingEngineService(
         // origQty - leavesQty: the report below carries leavesQty = 0.
         val origQty = book.origQtyOf(cancelOutcome.nodeIndex)
         sendExecutionReport(
-            participantId, clOrdId, exchangeOrderId, securityId, ExecType.CANCELED, cancelSide,
+            // The cancel's own id, and the order's, which prepareCancel has just matched.
+            participantId, clOrdId, origClOrdId, exchangeOrderId, securityId, ExecType.CANCELED, cancelSide,
             price = price, lastQty = 0L, leavesQty = 0L, rejectReason = RejectReason.NONE,
             origQty = origQty, cumQty = cumQtyOf(origQty, cancelOutcome.leavesQty),
         )
@@ -891,7 +909,8 @@ class MatchingEngineService(
             val leavesQty = book.leavesQtyOf(node)
             val origQty = book.origQtyOf(node)
             sendExecutionReport(
-                participantId, book.clOrdIdOf(node), orderId, securityId, ExecType.CANCELED, side,
+                participantId, book.loadClOrdId(node, bookClOrdId), bookClOrdId, orderId, securityId,
+                ExecType.CANCELED, side,
                 price = price, lastQty = 0L, leavesQty = 0L, rejectReason = RejectReason.NONE,
                 origQty = origQty, cumQty = cumQtyOf(origQty, leavesQty),
             )
@@ -927,7 +946,7 @@ class MatchingEngineService(
                 val side = book.sideOfOrder(node)
                 val origQty = book.origQtyOf(node)
                 sendExecutionReport(
-                    book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
+                    book.participantIdOf(node), book.loadClOrdId(node, bookClOrdId), bookClOrdId, orderId, securityId,
                     ExecType.CANCELED, side, price = orderPrice, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.SELF_MATCH_PREVENTED,
                     origQty = origQty, cumQty = cumQtyOf(origQty, book.leavesQtyOf(node)),
@@ -963,7 +982,7 @@ class MatchingEngineService(
         val leaves = book.leavesQtyOf(node)
         val origQty = book.origQtyOf(node)
         sendExecutionReport(
-            book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
+            book.participantIdOf(node), book.loadClOrdId(node, bookClOrdId), bookClOrdId, orderId, securityId,
             ExecType.TRADE, side, price = fillPrice, lastQty = fillQty, leavesQty = leaves,
             rejectReason = RejectReason.NONE,
             origQty = origQty, cumQty = cumQtyOf(origQty, leaves),
@@ -985,7 +1004,7 @@ class MatchingEngineService(
                 val side = book.sideOfOrder(node)
                 val origQty = book.origQtyOf(node)
                 sendExecutionReport(
-                    book.participantIdOf(node), book.clOrdIdOf(node), orderId, securityId,
+                    book.participantIdOf(node), book.loadClOrdId(node, bookClOrdId), bookClOrdId, orderId, securityId,
                     ExecType.EXPIRED, side, price = price, lastQty = 0L, leavesQty = 0L,
                     rejectReason = RejectReason.NONE,
                     origQty = origQty, cumQty = cumQtyOf(origQty, book.leavesQtyOf(node)),
@@ -1151,7 +1170,6 @@ class MatchingEngineService(
                     snapshotOrderEncoder.wrapAndApplyHeader(buffer, offset, headerEncoder)
                         .participantId(book.participantIdOf(node))
                         .smpId(book.smpIdOf(node))
-                        .clOrdId(book.clOrdIdOf(node))
                         .exchangeOrderId(book.exchangeOrderIdOf(node))
                         .price(book.orderPrice(node))
                         .leavesQty(book.leavesQtyOf(node))
@@ -1160,6 +1178,8 @@ class MatchingEngineService(
                         .side(SbeSide.get(book.sideOfOrder(node)))
                         .smpStrategy(SbeSmpStrategy.get(book.smpStrategyOfOrder(node)))
                         .origQty(book.origQtyOf(node))
+                    book.loadClOrdId(node, bookClOrdId)
+                        .writeTo(buffer, snapshotOrderEncoder.offset() + SnapshotOrderEncoder.clOrdIdEncodingOffset())
                 }
             }
         }
@@ -1202,6 +1222,10 @@ class MatchingEngineService(
     private fun loadSnapshot(image: Image) {
         val bookDecoder = SnapshotBookDecoder()
         val orderDecoder = SnapshotOrderDecoder()
+        val orderV7Decoder = SnapshotOrderV7Decoder()
+        val restoredClOrdId = IdWords()
+        // A version 7 snapshot's integer id becomes its decimal string (Design.md §5, "Client order ids").
+        val decimalScratch = UnsafeBuffer(ByteArray(ClOrdId.LENGTH))
         val stateDecoder = SnapshotEngineStateDecoder()
         val endDecoder = SnapshotEndDecoder()
         val reportSeqDecoder = SnapshotReportSeqDecoder()
@@ -1236,6 +1260,50 @@ class MatchingEngineService(
             }
             currentIndex = NOT_FOUND
             currentRestored = 0
+        }
+
+        /** Books one restored order, or records why it cannot be; true when it was booked. */
+        @Suppress("LongParameterList")
+        fun restoreOrder(
+            securityId: Int, price: Long, exchangeOrderId: Long, participantId: Long, smpId: Long,
+            clOrdId: IdWords, leavesQty: Long, origQty: Long, expireDate: Int, side: Byte, smpStrategy: Byte,
+        ): Boolean {
+            if (currentIndex == NOT_FOUND || securityId != currentSecurityId) {
+                // Either an order for a book the header said was empty, or an image
+                // whose ordering has been lost. Both mean the counts cannot be trusted.
+                report.fatal(
+                    "the snapshot carries an order for security $securityId outside " +
+                        "that security's own section"
+                )
+                return false
+            }
+            val book = books[currentIndex]
+            if (!book.isLevelInRange(book.levelOf(price))) {
+                // Never let this reach book(): it indexes the ladder unchecked. And the
+                // throw does not even surface here -- Image.poll catches an exception
+                // from its handler, hands it to the client error handler and advances
+                // the position anyway, so the order is silently dropped and the book
+                // comes back quietly wrong. Checking is the only way to see it; the
+                // count reconciliation below is the backstop if one ever slips past.
+                report.fatal(
+                    "security $securityId: a resting order at price $price falls " +
+                        "outside this node's ladder"
+                )
+                return false
+            }
+            book.book(
+                exchangeOrderId = exchangeOrderId,
+                participantId = participantId,
+                smpId = smpId,
+                clOrdId = clOrdId,
+                price = price,
+                leavesQty = leavesQty,
+                origQty = origQty,
+                expireDate = expireDate,
+                side = side,
+                smpStrategy = smpStrategy,
+            )
+            return true
         }
 
         while (!done && !image.isEndOfStream) {
@@ -1349,48 +1417,38 @@ class MatchingEngineService(
                     SnapshotOrderDecoder.TEMPLATE_ID -> {
                         orderDecoder.wrap(buffer, body, blockLength, version)
                         if (report.hasFatal) return@poll
-                        val securityId = orderDecoder.securityId()
-                        if (currentIndex == NOT_FOUND || securityId != currentSecurityId) {
-                            // Either an order for a book the header said was empty, or an image
-                            // whose ordering has been lost. Both mean the counts cannot be trusted.
-                            report.fatal(
-                                "the snapshot carries an order for security $securityId outside " +
-                                    "that security's own section"
+                        restoredClOrdId.readFrom(buffer, body + SnapshotOrderDecoder.clOrdIdEncodingOffset())
+                        if (restoreOrder(
+                                orderDecoder.securityId(), orderDecoder.price(), orderDecoder.exchangeOrderId(),
+                                orderDecoder.participantId(), orderDecoder.smpId(), restoredClOrdId,
+                                orderDecoder.leavesQty(), orderDecoder.origQty(), orderDecoder.expireDate(),
+                                orderDecoder.side().value(), orderDecoder.smpStrategy().value(),
                             )
-                            return@poll
+                        ) {
+                            currentRestored++
+                            totalRestored++
                         }
-                        val book = books[currentIndex]
-                        val price = orderDecoder.price()
-                        if (!book.isLevelInRange(book.levelOf(price))) {
-                            // Never let this reach book(): it indexes the ladder unchecked. And the
-                            // throw does not even surface here -- Image.poll catches an exception
-                            // from its handler, hands it to the client error handler and advances
-                            // the position anyway, so the order is silently dropped and the book
-                            // comes back quietly wrong. Checking is the only way to see it; the
-                            // count reconciliation below is the backstop if one ever slips past.
-                            report.fatal(
-                                "security $securityId: a resting order at price $price falls " +
-                                    "outside this node's ladder"
+                    }
+
+                    SnapshotOrderV7Decoder.TEMPLATE_ID -> {
+                        orderV7Decoder.wrap(buffer, body, blockLength, version)
+                        if (report.hasFatal) return@poll
+                        ClOrdId.encodeDecimal(orderV7Decoder.clOrdId(), decimalScratch, 0)
+                        restoredClOrdId.readFrom(decimalScratch, 0)
+                        // Absent on a version 2 snapshot; 0 means unknown and travels to the client
+                        // as Enrichment.UNKNOWN rather than as an invented number.
+                        val origQty = if (orderV7Decoder.origQty() == SnapshotOrderV7Decoder.origQtyNullValue()) 0L
+                        else orderV7Decoder.origQty()
+                        if (restoreOrder(
+                                orderV7Decoder.securityId(), orderV7Decoder.price(), orderV7Decoder.exchangeOrderId(),
+                                orderV7Decoder.participantId(), orderV7Decoder.smpId(), restoredClOrdId,
+                                orderV7Decoder.leavesQty(), origQty, orderV7Decoder.expireDate(),
+                                orderV7Decoder.side().value(), orderV7Decoder.smpStrategy().value(),
                             )
-                            return@poll
+                        ) {
+                            currentRestored++
+                            totalRestored++
                         }
-                        book.book(
-                            exchangeOrderId = orderDecoder.exchangeOrderId(),
-                            participantId = orderDecoder.participantId(),
-                            smpId = orderDecoder.smpId(),
-                            clOrdId = orderDecoder.clOrdId(),
-                            price = price,
-                            leavesQty = orderDecoder.leavesQty(),
-                            // Absent on a version 2 snapshot; 0 means unknown and travels to the
-                            // client as Enrichment.UNKNOWN rather than as an invented number.
-                            origQty = if (orderDecoder.origQty() == SnapshotOrderDecoder.origQtyNullValue()) 0L
-                            else orderDecoder.origQty(),
-                            expireDate = orderDecoder.expireDate(),
-                            side = orderDecoder.side().value(),
-                            smpStrategy = orderDecoder.smpStrategy().value(),
-                        )
-                        currentRestored++
-                        totalRestored++
                     }
 
                     SnapshotReportSeqDecoder.TEMPLATE_ID -> {
@@ -1493,16 +1551,18 @@ class MatchingEngineService(
      * [origQty] is the quantity of the order that was refused, which is known for a new order and
      * not for a cancel of an order the engine never accepted; 0 means unknown (Design.md §3.1).
      */
+    @Suppress("LongParameterList")
     private fun reject(
         participantId: Long,
-        clOrdId: Long,
+        clOrdId: IdWords,
+        origClOrdId: IdWords,
         securityId: Int,
         side: Byte,
         price: Long,
         rejectReason: Int,
         origQty: Long = 0L,
     ) = sendExecutionReport(
-        participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
+        participantId, clOrdId, origClOrdId, 0L, securityId, ExecType.REJECTED, side,
         price = price, lastQty = 0L, leavesQty = 0L, rejectReason = rejectReason,
         origQty = origQty, cumQty = 0L,
     )
@@ -1517,7 +1577,8 @@ class MatchingEngineService(
     @Suppress("LongParameterList")
     private fun sendExecutionReport(
         participantId: Long,
-        clOrdId: Long,
+        clOrdId: IdWords,
+        origClOrdId: IdWords,
         exchangeOrderId: Long,
         securityId: Int,
         execType: ExecType,
@@ -1537,7 +1598,6 @@ class MatchingEngineService(
         val slot = reportRing.append(participantId, reportSeq)
         execReportEncoder.wrapAndApplyHeader(reportRing.buffer, reportRing.offset(slot), headerEncoder)
             .participantId(participantId)
-            .clOrdId(clOrdId)
             .exchangeOrderId(exchangeOrderId)
             .price(price)
             .lastQty(lastQty)
@@ -1552,6 +1612,7 @@ class MatchingEngineService(
             .origQty(origQty)
             .cumQty(cumQty)
             .reportSeq(reportSeq)
+        writeClOrdIds(reportRing.buffer, clOrdId, origClOrdId)
 
         val sessionId = participantToSession.get(participantId)
         val session = if (sessionId == NULL_SESSION) null else cluster.getClientSession(sessionId)
@@ -1560,6 +1621,27 @@ class MatchingEngineService(
             return
         }
         if (!deliverRetained(session, slot)) undeliverableReports++
+    }
+
+    /** Both ids into the report [execReportEncoder] has just encoded (Design.md §5, "Client order ids"). */
+    private fun writeClOrdIds(buffer: MutableDirectBuffer, clOrdId: IdWords, origClOrdId: IdWords) {
+        val body = execReportEncoder.offset()
+        clOrdId.writeTo(buffer, body + ExecutionReportEncoder.clOrdIdEncodingOffset())
+        origClOrdId.writeTo(buffer, body + ExecutionReportEncoder.origClOrdIdEncodingOffset())
+    }
+
+    /**
+     * Stops applying the log at an order or a cancel in a layout this build cannot read (Design.md §5,
+     * "Client order ids"). Decoded anyway, it would be a different order on every node.
+     */
+    private fun refuseLayout(message: String, version: Int): Nothing {
+        refused = true
+        throw SchemaMismatch(
+            "matching-engine: refused to go on -- the log carries a version $version $message, and this " +
+                "build reads version ${ClOrdId.SINCE_SCHEMA_VERSION} and later (Design.md §5, \"Client order ids\").\n" +
+                "  Either the log tail was written under version 7, or a gateway was not upgraded. The upgrade " +
+                "is `most cluster shutdown`, which leaves a snapshot at the end of the log, then a restart."
+        )
     }
 
     /**
@@ -1677,7 +1759,6 @@ class MatchingEngineService(
                     claim.buffer(), claim.offset() + AeronCluster.SESSION_HEADER_LENGTH, headerEncoder,
                 )
                     .participantId(book.participantIdOf(node))
-                    .clOrdId(book.clOrdIdOf(node))
                     .exchangeOrderId(book.exchangeOrderIdOf(node))
                     .price(book.orderPrice(node))
                     .lastQty(0L)
@@ -1690,6 +1771,7 @@ class MatchingEngineService(
                     .cumQty(cumQtyOf(origQty, leavesQty))
                     // State, not an event: outside the participant's report sequence.
                     .reportSeq(0L)
+                writeClOrdIds(claim.buffer(), book.loadClOrdId(node, bookClOrdId), bookClOrdId)
                 claim.commit()
                 return true
             }
@@ -1718,16 +1800,22 @@ class MatchingEngineService(
         participantToSession.put(participantId, session.id())
         resendRequests++
 
+        // toSeq 0 asks for everything; a version 7 request has none, and reads as the null value.
+        val toSeq = resendRequestDecoder.toSeq().let { if (it <= 0L) 0L else it }
         val lastSeq = lastReportSeq.get(participantId)
         val oldest = reportRing.oldestRetainedSeq(participantId, lastSeq)
+        val upTo = if (toSeq == 0L) lastSeq else minOf(toSeq, lastSeq)
+        val start = maxOf(fromSeq, oldest)
         var replayed = 0
-        if (fromSeq <= lastSeq) {
-            var slot = reportRing.slotOf(participantId, maxOf(fromSeq, oldest), lastSeq)
+        // Only from a report still retained: with every one of this participant's evicted, its newest
+        // slot holds another participant's report now, which must never be sent here.
+        if (start <= upTo) {
+            var slot = reportRing.slotOf(participantId, start, lastSeq)
             while (true) {
                 // A session that cannot take the replay cannot take the answer either; stop.
                 if (!deliverRetained(session, slot)) return
                 replayed++
-                if (reportRing.seqAt(slot) >= lastSeq) break
+                if (reportRing.seqAt(slot) >= upTo) break
                 slot = reportRing.nextOf(slot)
             }
         }
@@ -1748,7 +1836,8 @@ class MatchingEngineService(
                     .nextSeq(lastSeq + 1)
                     .oldestRetainedSeq(oldest)
                     .replayedCount(replayed)
-                    .status(if (fromSeq < oldest && fromSeq <= lastSeq) RequestStatus.TRUNCATED else RequestStatus.COMPLETE)
+                    .status(if (fromSeq < oldest && fromSeq <= upTo) RequestStatus.TRUNCATED else RequestStatus.COMPLETE)
+                    .toSeq(toSeq)
                 claim.commit()
                 return
             }

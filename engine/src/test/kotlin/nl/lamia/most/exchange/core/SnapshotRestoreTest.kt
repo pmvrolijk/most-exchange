@@ -6,7 +6,7 @@ import nl.lamia.most.exchange.sbe.SnapshotBookEncoder
 import nl.lamia.most.exchange.sbe.SnapshotEndEncoder
 import nl.lamia.most.exchange.sbe.SnapshotEngineStateEncoder
 import nl.lamia.most.exchange.sbe.SnapshotReportSeqEncoder
-import nl.lamia.most.exchange.sbe.SnapshotOrderEncoder
+import nl.lamia.most.exchange.sbe.SnapshotOrderV7Encoder
 import io.aeron.Aeron
 import io.aeron.ExclusivePublication
 import io.aeron.Image
@@ -315,6 +315,33 @@ class SnapshotRestoreTest {
     }
 
     @Test
+    fun `a version 7 snapshot's integer ids restore as their decimal strings, and a cancel can name one`() {
+        // Design.md §5, "Client order ids": each integer clOrdId becomes its decimal string, and
+        // every int64 fits, Long.MIN_VALUE in exactly 20 characters.
+        val target = Harness(arrayOf(serviceBook(securityId = 1)))
+        target.restore(
+            publish { pub ->
+                state(pub, FINGERPRINT)
+                bookHeader(pub, securityId = 1, claimedOrders = 2)
+                writeVersionSevenOrder(pub, exchangeOrderId = 1L, clOrdId = 1_234_567_890_123L, price = 100L)
+                writeVersionSevenOrder(pub, exchangeOrderId = 2L, clOrdId = Long.MIN_VALUE, price = 99L)
+                end(pub, 2L)
+            }
+        )
+
+        val book = target.books[0]
+        val ids = mutableListOf<String>()
+        book.forEachRestingOrder { ids += book.clOrdIdTextOf(it) }
+        assertEquals(setOf("1234567890123", "-9223372036854775808"), ids.toSet())
+
+        target.cancel(10L, origClOrdId = "1234567890123", clOrdId = "CXL", exchangeOrderId = 1L, securityId = 1, side = Side.BUY)
+        val cancelled = target.reports.last()
+        assertEquals("CANCELED", cancelled.execType)
+        assertEquals("1234567890123", cancelled.origClOrdIdText)
+        assertEquals(6L, cancelled.origQty, "the rest of the order restored as it was")
+    }
+
+    @Test
     fun `a node that has refused its configuration writes no snapshot`() {
         // Design.md §7, "Enforced through the log": a refused node holds state computed under a
         // configuration the leader disagrees with, and a snapshot would hand it to the next restart.
@@ -504,7 +531,7 @@ class SnapshotRestoreTest {
     }
 
     /**
-     * A `SnapshotOrder` as schema version 2 wrote it: the same body, one field shorter, and a
+     * A `SnapshotOrderV7` (id 32) as schema version 2 wrote it: the same body, one field shorter, and a
      * header that says so. Hand-written because the current encoder cannot produce it.
      */
     private fun writeVersionTwoOrder(
@@ -516,8 +543,8 @@ class SnapshotRestoreTest {
         val buffer = UnsafeBuffer(ByteArray(256))
         MessageHeaderEncoder().wrap(buffer, 0)
             .blockLength(V2_ORDER_BLOCK_LENGTH)
-            .templateId(SnapshotOrderEncoder.TEMPLATE_ID)
-            .schemaId(SnapshotOrderEncoder.SCHEMA_ID)
+            .templateId(SnapshotOrderV7Encoder.TEMPLATE_ID)
+            .schemaId(SnapshotOrderV7Encoder.SCHEMA_ID)
             .version(2)
         val body = MessageHeaderEncoder.ENCODED_LENGTH
         buffer.putLong(body, 10L)              // participantId
@@ -531,6 +558,26 @@ class SnapshotRestoreTest {
         buffer.putByte(body + 56, Side.BUY)
         buffer.putByte(body + 57, SmpStrategy.CANCEL_AGGRESSOR)
         offer(publication, buffer, body + V2_ORDER_BLOCK_LENGTH)
+    }
+
+    /** A resting buy as a version 7 snapshot holds it: `SnapshotOrderV7`, with an int64 clOrdId. */
+    private fun writeVersionSevenOrder(publication: ExclusivePublication, exchangeOrderId: Long, clOrdId: Long, price: Long) {
+        val buffer = UnsafeBuffer(ByteArray(256))
+        val header = MessageHeaderEncoder()
+        SnapshotOrderV7Encoder().wrapAndApplyHeader(buffer, 0, header)
+            .participantId(10L)
+            .smpId(10L)
+            .clOrdId(clOrdId)
+            .exchangeOrderId(exchangeOrderId)
+            .price(price)
+            .leavesQty(6L)
+            .securityId(1)
+            .expireDate(0)
+            .side(nl.lamia.most.exchange.sbe.Side.BUY)
+            .smpStrategy(nl.lamia.most.exchange.sbe.SmpStrategy.CANCEL_AGGRESSOR)
+            .origQty(6L)
+        header.version(7)
+        offer(publication, buffer, MessageHeaderEncoder.ENCODED_LENGTH + SnapshotOrderV7Encoder.BLOCK_LENGTH)
     }
 
     private fun assertBooksMatch(expected: OrderBook, actual: OrderBook) {
@@ -548,7 +595,7 @@ class SnapshotRestoreTest {
     private fun describe(book: OrderBook, node: Int): String = buildString {
         append("id=").append(book.exchangeOrderIdOf(node))
         append(" participant=").append(book.participantIdOf(node))
-        append(" clOrdId=").append(book.clOrdIdOf(node))
+        append(" clOrdId=").append(book.clOrdIdTextOf(node))
         append(" smpId=").append(book.smpIdOf(node))
         append(" side=").append(book.sideOfOrder(node))
         append(" price=").append(book.orderPrice(node))

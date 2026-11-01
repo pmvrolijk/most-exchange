@@ -25,13 +25,22 @@ object ParticipantRequests {
      */
     const val ALL_SECURITIES = -1
 
-    /** Every retained report of [participantId] from [fromSeq] on, then the completion. */
+    /** A resend's `toSeq` asking for every retained report from `fromSeq` on. */
+    const val UNBOUNDED = 0L
+
+    /**
+     * The retained reports of [participantId] from [fromSeq] to [toSeq] inclusive, then the
+     * completion. [toSeq] [UNBOUNDED] asks for everything from [fromSeq] on (Design.md §5, "Report
+     * sequence and resend": a gap is asked for by its bounds).
+     */
+    @Suppress("LongParameterList")
     fun encodeReportResendRequest(
         buffer: MutableDirectBuffer,
         offset: Int,
         participantId: Long,
         requestId: Long,
         fromSeq: Long,
+        toSeq: Long = UNBOUNDED,
         encoder: ReportResendRequestEncoder = ReportResendRequestEncoder(),
         header: MessageHeaderEncoder = MessageHeaderEncoder(),
     ): Int {
@@ -39,6 +48,7 @@ object ParticipantRequests {
             .participantId(participantId)
             .requestId(requestId)
             .fromSeq(fromSeq)
+            .toSeq(toSeq)
         return MessageHeaderEncoder.ENCODED_LENGTH + ReportResendRequestEncoder.BLOCK_LENGTH
     }
 

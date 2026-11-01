@@ -1,5 +1,9 @@
 package nl.lamia.most.exchange.core
 
+import nl.lamia.most.exchange.client.ClOrdId
+import org.agrona.DirectBuffer
+import org.agrona.MutableDirectBuffer
+
 /**
  * Domain primitives and the packed order-pool layout. See Design.md §3.
  *
@@ -25,8 +29,9 @@ const val BPS_DENOMINATOR = 10_000L
  * Field offsets within the packed order pool. Stride is 8 longs = 64 bytes = exactly one
  * cache line, so touching an order costs one cache miss rather than seven (Design.md §3.1).
  *
- * The eight words are full, so anything else an order needs goes in [ColdField] rather than
- * evicting a field from here or doubling the stride.
+ * Anything else an order needs goes in [ColdField] rather than doubling the stride. Word 4 is free
+ * since version 8 moved the client's order id to [ColdField] (Design.md §3.1): the first candidate
+ * for an attribute matching does read, such as an iceberg's display quantity.
  */
 object OrderField {
     const val STRIDE = 8
@@ -37,7 +42,9 @@ object OrderField {
 
     /** Effective SMP id: the order's smpId, or participantId when smpId == 0. */
     const val SMP_ID = 3
-    const val CL_ORD_ID = 4
+
+    /** Free (Design.md §3.1). */
+    const val SPARE = 4
     const val EXCHANGE_ORDER_ID = 5
 
     /** next: low int32 | prev: high int32 */
@@ -48,22 +55,55 @@ object OrderField {
 }
 
 /**
- * A second, cold word per order, held in a parallel array rather than in the cache line above.
+ * Four cold words per order, 32 bytes, held in a parallel array rather than in the cache line above,
+ * so two orders share a line.
  *
- * It is touched only where an execution report is generated or the book is walked for a snapshot
- * — never inside the matching loop — so it costs a cache miss on paths that were already taking
- * one and nothing at all on the path the budget in Design.md §2 is about. This is where an order
- * attribute that matching does not read belongs: a future validity (at-open, IOC) goes here, and
- * the hot 64 bytes stay 64 bytes.
+ * They are touched only where an execution report is generated, a cancel is checked, or the book is
+ * walked for a snapshot — never inside the matching loop — so they cost a cache miss on paths that
+ * were already taking one and nothing at all on the path the budget in Design.md §2 is about. This
+ * is where an order attribute that matching does not read belongs, and the hot 64 bytes stay 64.
  *
  * [ORIG_QTY] is 0 for an order restored from a version 2 snapshot, which predates the field. That
  * value means *unknown* and is carried through to `Enrichment.UNKNOWN` on the wire rather than
  * being turned into a number nobody can justify.
+ *
+ * [CL_ORD_ID_0] to [CL_ORD_ID_2] are the client's order id, its 20 bytes as [ClOrdId]'s three
+ * words (Design.md §5, "Client order ids"). The engine never looks inside them.
  */
 object ColdField {
-    const val STRIDE = 1
+    const val STRIDE = 4
 
     const val ORIG_QTY = 0
+    const val CL_ORD_ID_0 = 1
+    const val CL_ORD_ID_1 = 2
+    const val CL_ORD_ID_2 = 3
+}
+
+/**
+ * A client order id in flight through the engine: its three words, read from a message or from the
+ * book and written into a report, with nothing allocated. The engine keeps a few of these and reuses
+ * them. It never validates one (Design.md §5, "Client order ids").
+ */
+class IdWords {
+    var word0 = 0L
+    var word1 = 0L
+    var word2 = 0L
+
+    fun readFrom(buffer: DirectBuffer, offset: Int): IdWords {
+        word0 = ClOrdId.word0(buffer, offset)
+        word1 = ClOrdId.word1(buffer, offset)
+        word2 = ClOrdId.word2(buffer, offset)
+        return this
+    }
+
+    fun writeTo(buffer: MutableDirectBuffer, offset: Int) = ClOrdId.writeWords(buffer, offset, word0, word1, word2)
+
+    fun copyFrom(other: IdWords): IdWords {
+        word0 = other.word0
+        word1 = other.word1
+        word2 = other.word2
+        return this
+    }
 }
 
 fun packLinks(next: Int, prev: Int): Long =

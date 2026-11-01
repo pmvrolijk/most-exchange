@@ -25,7 +25,7 @@ object OrderRequests {
         buffer: MutableDirectBuffer,
         offset: Int,
         participantId: Long,
-        clOrdId: Long,
+        clOrdId: ClOrdId,
         securityId: Int,
         side: Side,
         price: Long,
@@ -38,7 +38,6 @@ object OrderRequests {
     ): Int {
         encoder.wrapAndApplyHeader(buffer, offset, header)
             .participantId(participantId)
-            .clOrdId(clOrdId)
             .price(price)
             .qty(qty)
             .smpId(smpId)
@@ -46,17 +45,21 @@ object OrderRequests {
             .expireDate(expireDate)
             .side(side)
             .smpStrategy(smpStrategy)
+        clOrdId.writeTo(buffer, encoder.offset() + NewOrderSingleEncoder.clOrdIdEncodingOffset())
         return NEW_ORDER_LENGTH
     }
 
-    /** A cancel. Its report carries [clOrdId], the cancel's own id, not [origClOrdId]. */
+    /**
+     * A cancel of the order [origClOrdId] names. Its report carries [clOrdId], the cancel's own id, and
+     * [origClOrdId] beside it (Design.md §5, "Client order ids").
+     */
     @Suppress("LongParameterList")
     fun encodeCancel(
         buffer: MutableDirectBuffer,
         offset: Int,
         participantId: Long,
-        clOrdId: Long,
-        origClOrdId: Long,
+        clOrdId: ClOrdId,
+        origClOrdId: ClOrdId,
         exchangeOrderId: Long,
         securityId: Int,
         side: Side,
@@ -65,11 +68,11 @@ object OrderRequests {
     ): Int {
         encoder.wrapAndApplyHeader(buffer, offset, header)
             .participantId(participantId)
-            .origClOrdId(origClOrdId)
-            .clOrdId(clOrdId)
             .exchangeOrderId(exchangeOrderId)
             .securityId(securityId)
             .side(side)
+        origClOrdId.writeTo(buffer, encoder.offset() + OrderCancelRequestEncoder.origClOrdIdEncodingOffset())
+        clOrdId.writeTo(buffer, encoder.offset() + OrderCancelRequestEncoder.clOrdIdEncodingOffset())
         return CANCEL_LENGTH
     }
 }

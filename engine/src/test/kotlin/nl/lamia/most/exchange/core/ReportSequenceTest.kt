@@ -161,6 +161,75 @@ class ReportSequenceTest {
     }
 
     @Test
+    fun `a participant whose every report was evicted is told so, and is sent nobody else's`() {
+        // Found 2026-11-01: with all of the maker's reports evicted, its newest slot held the
+        // taker's report, and the replay sent it to the maker.
+        val harness = continuous(reportRetention = 4)
+        rest(harness, MAKER, 2)                                 // maker 1, 2
+        rest(harness, TAKER, 4, firstClOrdId = 200L)            // evicts both of the maker's
+        val before = harness.session.reports.size
+
+        harness.reportResendRequest(MAKER, fromSeq = 1L)
+
+        assertEquals(before, harness.session.reports.size, "nothing replayed, and no other participant's report")
+        assertEquals(
+            ResendCompletion(MAKER, 1L, 1L, nextSeq = 3L, oldestRetainedSeq = 3L, replayedCount = 0, status = RequestStatus.TRUNCATED),
+            harness.session.completions.single(),
+        )
+    }
+
+    @Test
+    fun `toSeq bounds the replay, and the completion still says where the sequence is`() {
+        // Design.md §5: retained reports from fromSeq to toSeq inclusive; nextSeq is the participant's.
+        val harness = continuous()
+        rest(harness, MAKER, 6)
+
+        harness.reportResendRequest(MAKER, fromSeq = 2L, toSeq = 4L)
+
+        assertEquals(listOf(2L, 3L, 4L), harness.reportsOf(MAKER).drop(6).map { it.reportSeq })
+        assertEquals(
+            ResendCompletion(MAKER, 1L, 2L, nextSeq = 7L, oldestRetainedSeq = 1L, replayedCount = 3, status = RequestStatus.COMPLETE, toSeq = 4L),
+            harness.session.completions.single(),
+        )
+    }
+
+    @Test
+    fun `toSeq 0 asks for everything, and a version 7 request without one is read the same way`() {
+        // Design.md §5: toSeq 0 asks for everything from fromSeq on, which is what a version 7
+        // request, which has no toSeq, is read as.
+        val harness = continuous()
+        rest(harness, MAKER, 3)
+
+        harness.reportResendRequest(MAKER, fromSeq = 2L, toSeq = 0L)
+        assertEquals(listOf(2L, 3L), harness.reportsOf(MAKER).drop(3).map { it.reportSeq })
+
+        harness.sendRaw { buffer ->
+            val header = nl.lamia.most.exchange.sbe.MessageHeaderEncoder()
+            nl.lamia.most.exchange.sbe.ReportResendRequestEncoder().wrapAndApplyHeader(buffer, 0, header)
+                .participantId(MAKER).requestId(2L).fromSeq(2L)
+                .toSeq(2L) // written, but past a version 7 block: never read
+            header.version(7).blockLength(VERSION_7_RESEND_BLOCK_LENGTH)
+            nl.lamia.most.exchange.sbe.MessageHeaderEncoder.ENCODED_LENGTH + VERSION_7_RESEND_BLOCK_LENGTH
+        }
+        assertEquals(listOf(2L, 3L, 2L, 3L), harness.reportsOf(MAKER).drop(3).map { it.reportSeq })
+        assertEquals(listOf(0L, 0L), harness.session.completions.map { it.toSeq })
+    }
+
+    @Test
+    fun `a bound below the oldest retained report is truncated, and one past the last stops there`() {
+        val harness = continuous(reportRetention = 4)
+        rest(harness, MAKER, 6)                                 // 1 and 2 evicted
+
+        harness.reportResendRequest(MAKER, fromSeq = 1L, toSeq = 2L)
+        assertEquals(RequestStatus.TRUNCATED, harness.session.completions.last().status, "everything asked for is gone")
+        assertEquals(0, harness.session.completions.last().replayedCount)
+
+        harness.reportResendRequest(MAKER, fromSeq = 5L, toSeq = 99L, requestId = 2L)
+        assertEquals(listOf(5L, 6L), harness.reportsOf(MAKER).drop(6).map { it.reportSeq })
+        assertEquals(RequestStatus.COMPLETE, harness.session.completions.last().status)
+    }
+
+    @Test
     fun `a new leader replays the reports it generated while it was following`() {
         val node = continuous()
         node.service.onRoleChange(Cluster.Role.FOLLOWER)
@@ -191,5 +260,8 @@ class ReportSequenceTest {
         const val SECURITY = 1
         const val MAKER = 7L
         const val TAKER = 9L
+
+        /** ReportResendRequest's block before toSeq was added in version 8. */
+        const val VERSION_7_RESEND_BLOCK_LENGTH = 24
     }
 }

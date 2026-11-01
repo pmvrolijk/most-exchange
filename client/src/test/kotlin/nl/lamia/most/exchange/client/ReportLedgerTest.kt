@@ -36,6 +36,21 @@ class ReportLedgerTest {
     }
 
     @Test
+    fun `a gap is bounded by the next report received, and a tail has no bound`() {
+        // Design.md §5: a gap is asked for from its first missing to its last.
+        ledger.accept(20L, 1L)
+        assertEquals(0L, ledger.gapEnd(0), "nothing above the first missing: no gap to bound")
+        ledger.accept(20L, 4L)
+        ledger.accept(20L, 7L)          // 2-3 and 5-6 lost
+        assertEquals(2L, ledger.firstMissing(0))
+        assertEquals(3L, ledger.gapEnd(0), "the first gap ends before 4, the next report held")
+        ledger.accept(20L, 2L)
+        ledger.accept(20L, 3L)
+        assertEquals(5L, ledger.firstMissing(0))
+        assertEquals(6L, ledger.gapEnd(0))
+    }
+
+    @Test
     fun `a replayed report already received is counted once`() {
         ledger.accept(20L, 1L)
         ledger.accept(20L, 2L)

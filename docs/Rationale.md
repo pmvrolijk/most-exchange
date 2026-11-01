@@ -741,3 +741,44 @@ Writing the expectations by hand found one wrong expectation before any code ran
 truncated resend recovers nothing, when the ring's newest report is still replayed. Ten deliberate
 mutations of the session were each caught by at least one test.
 
+
+## 18. Client order ids carried as sent, changed in place, and a resend bounded to its gap
+
+Decided with the user on 2026-11-01, measured first (Measurements.md S0–S4), built the same day.
+
+**Why carry the participant's own id.** Until version 8 `clOrdId` was an `int64`, so an adapter had
+to invent one per request. The FIX adapter derived it from the session's sequence, which made an id
+collision possible after a wipe of Artio's state, and with it a session block and an operator reset.
+An id the participant chose needs nothing allocated and cannot collide with anything the exchange
+did. It also reaches the exchange's own record, which a drop copy and trade capture will need. What
+it does not remove: the adapter's order store, which answers cancels by `origClOrdId`, day
+uniqueness, 35=H and 35=AF.
+
+**Why 20 characters, and why `ColdField`.** Frames are 32-byte aligned, so any id longer than 8 bytes
+puts a new order and a cancel on the same 160 B log step: twenty costs nothing that twelve would
+not. The id is read where a report is made, a cancel is checked or a snapshot is walked, never in
+the matching loop, which is `ColdField`'s rule. At stride 4 two orders share a cache line, and a
+maker's report already reads `origQty` there.
+
+**Why in place, not appended.** SBE's own evolution rule is to append. Appending would have kept a
+dead `int64` in four messages and taken the execution report's egress frame from 192 B to 224 B:
+six reports per 1,408 B datagram instead of seven, on the stage that binds (§13, Design.md §2).
+In place costs the ability to read an older order, cancel or report. That is paid once, by
+`most cluster shutdown` before the upgrade, and made safe three ways: the gateway drops an older
+message, the engine refuses one in the log (`SchemaMismatch`), and the schema version is in the
+engine fingerprint. A snapshot is the one older record that must still be read, so its order record
+got a new template id and kept the old one.
+
+**Why the engine never validates an id.** The check is a refusal, and a refusal by the engine has to
+be identical on every node and replay. The gateway's refusal comes before the log, where a
+node-local decision may rest (R§8). The engine compares 20 bytes, which is deterministic whatever
+they are.
+
+**Why `toSeq`, and why the settle rule moved with it.** Unbounded, one dropped report under load
+replayed everything after it, 1.3–2.4M duplicates at the knee, into an egress already full. A gap
+is now asked for by its bounds. That breaks an assumption the fence relied on: that a completion
+follows a replay of everything above `fromSeq`. A report the gateway drops above `toSeq` would then
+be missing when the completion arrives, and a client settling on the completion alone would call a
+sequenced order never sequenced. So a client settles only once it holds every report below
+`nextSeq`, and fences again first if not. The mutation that settles on the completion alone is
+caught by `OrderEntrySessionTest`.

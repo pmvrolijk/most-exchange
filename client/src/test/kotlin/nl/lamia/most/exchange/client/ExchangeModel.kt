@@ -23,14 +23,18 @@ import org.agrona.DirectBuffer
 import org.agrona.concurrent.UnsafeBuffer
 
 /**
- * A model of one shard as a client sees it, written from Design.md §5 ("Report sequence and resend",
- * "Order mass status") and the gateway's refusals (Design.md §1), never from [OrderEntrySession].
+ * A model of one shard as a client sees it, written from Design.md §5 ("Client order ids", "Report
+ * sequence and resend", "Order mass status") and the gateway's refusals (Design.md §1), never from
+ * [OrderEntrySession].
  *
  * What it models, because the session's correctness rests on each:
  * - every engine report numbered per participant from 1 and retained in a ring of [retention],
  *   **whether or not it is delivered** — that is what a resend recovers after a failover;
- * - a resend replays from `fromSeq` with the original numbers, then completes, `TRUNCATED` when the
- *   ring no longer reaches `fromSeq`;
+ * - a resend replays from `fromSeq` to `toSeq` (0: no bound) with the original numbers, then
+ *   completes with the participant's `nextSeq`, `TRUNCATED` when the ring no longer reaches what was
+ *   asked for;
+ * - every report carries `clOrdId` and `origClOrdId`: a cancel's the cancel's and the order's, every
+ *   other the order's own in both;
  * - a mass status states each open order with `reportSeq` 0, then completes with `nextSeq`;
  * - a gateway's own refusals carry `reportSeq` 0 and never reach the log.
  *
@@ -39,7 +43,7 @@ import org.agrona.concurrent.UnsafeBuffer
 class ExchangeModel(private val retention: Int = 1_000) {
 
     private class Open(
-        val participantId: Long, val clOrdId: Long, val exchangeOrderId: Long, val securityId: Int,
+        val participantId: Long, val clOrdId: ClOrdId, val exchangeOrderId: Long, val securityId: Int,
         val side: Side, val price: Long, val origQty: Long, var cumQty: Long,
     )
 
@@ -58,7 +62,7 @@ class ExchangeModel(private val retention: Int = 1_000) {
 
     fun nextSeqOf(participantId: Long): Long = nextSeq[participantId] ?: 1L
 
-    fun openOrders(participantId: Long): List<Long> =
+    fun openOrders(participantId: Long): List<ClOrdId> =
         open.values.filter { it.participantId == participantId }.map { it.clOrdId }
 
     /** Sequences one message arriving through [via], and returns what the engine sends back on it. */
@@ -69,23 +73,27 @@ class ExchangeModel(private val retention: Int = 1_000) {
         when (h.templateId()) {
             NewOrderSingleDecoder.TEMPLATE_ID -> {
                 val d = NewOrderSingleDecoder().wrap(buffer, body, h.blockLength(), h.version())
+                val clOrdId = ClOrdId.read(buffer, body + NewOrderSingleDecoder.clOrdIdEncodingOffset())
                 val order = Open(
-                    d.participantId(), d.clOrdId(), nextOrderId++, d.securityId(), d.side(), d.price(),
+                    d.participantId(), clOrdId, nextOrderId++, d.securityId(), d.side(), d.price(),
                     d.qty(), 0L,
                 )
                 open[order.exchangeOrderId] = order
-                engineReport(via, order, order.clOrdId, ExecType.NEW, lastQty = 0L)
+                engineReport(via, order, order.clOrdId, order.clOrdId, ExecType.NEW, lastQty = 0L)
             }
             OrderCancelRequestDecoder.TEMPLATE_ID -> {
                 val d = OrderCancelRequestDecoder().wrap(buffer, body, h.blockLength(), h.version())
+                val clOrdId = ClOrdId.read(buffer, body + OrderCancelRequestDecoder.clOrdIdEncodingOffset())
+                val origClOrdId = ClOrdId.read(buffer, body + OrderCancelRequestDecoder.origClOrdIdEncodingOffset())
                 val order = open[d.exchangeOrderId()]
-                if (order == null || order.participantId != d.participantId() || order.clOrdId != d.origClOrdId()) {
-                    val ghost = Open(d.participantId(), d.clOrdId(), d.exchangeOrderId(), d.securityId(), d.side(), 0L, 0L, 0L)
-                    engineReport(via, ghost, d.clOrdId(), ExecType.REJECTED, 0L, RejectReason.UNKNOWN_ORDER)
+                if (order == null || order.participantId != d.participantId() || order.clOrdId != origClOrdId) {
+                    // Design.md §5 "Client order ids": a cancel's reject names the cancel and the order it named.
+                    val ghost = Open(d.participantId(), clOrdId, d.exchangeOrderId(), d.securityId(), d.side(), 0L, 0L, 0L)
+                    engineReport(via, ghost, clOrdId, origClOrdId, ExecType.REJECTED, 0L, RejectReason.UNKNOWN_ORDER)
                 } else {
                     open.remove(order.exchangeOrderId)
-                    // The cancel's report carries the cancel's own clOrdId (MatchingEngineService.onCancel).
-                    engineReport(via, order, d.clOrdId(), ExecType.CANCELED, 0L, leavesQty = 0L)
+                    // The cancel's own clOrdId, and the order's as origClOrdId.
+                    engineReport(via, order, clOrdId, order.clOrdId, ExecType.CANCELED, 0L, leavesQty = 0L)
                 }
             }
             ReportResendRequestDecoder.TEMPLATE_ID -> {
@@ -93,13 +101,16 @@ class ExchangeModel(private val retention: Int = 1_000) {
                 val p = d.participantId()
                 val retained = ring.filter { it.participantId == p }
                 val oldest = retained.firstOrNull()?.seq ?: nextSeqOf(p)
+                // toSeq 0 asks for everything; a version 7 request has none, and reads as the null value.
+                val toSeq = if (d.toSeq() <= 0L) 0L else d.toSeq()
+                val upTo = if (toSeq == 0L) nextSeqOf(p) - 1 else minOf(toSeq, nextSeqOf(p) - 1)
                 var replayed = 0
-                for (r in retained) if (r.seq >= d.fromSeq()) {
+                for (r in retained) if (r.seq >= d.fromSeq() && r.seq <= upTo) {
                     via.deliver(r.bytes)
                     replayed++
                 }
-                val status = if (d.fromSeq() < oldest) RequestStatus.TRUNCATED else RequestStatus.COMPLETE
-                via.deliverResendComplete(p, d.requestId(), d.fromSeq(), nextSeqOf(p), oldest, replayed, status)
+                val status = if (d.fromSeq() < oldest && d.fromSeq() <= upTo) RequestStatus.TRUNCATED else RequestStatus.COMPLETE
+                via.deliverResendComplete(p, d.requestId(), d.fromSeq(), toSeq, nextSeqOf(p), oldest, replayed, status)
             }
             OrderMassStatusRequestDecoder.TEMPLATE_ID -> {
                 val d = OrderMassStatusRequestDecoder().wrap(buffer, body, h.blockLength(), h.version())
@@ -108,7 +119,7 @@ class ExchangeModel(private val retention: Int = 1_000) {
                         (d.securityId() == ParticipantRequests.ALL_SECURITIES || it.securityId == d.securityId())
                 }
                 // State, not an event: reportSeq 0, not numbered, not retained (Design.md §5).
-                for (order in mine) via.deliver(encode(order, order.clOrdId, ExecType.ORDER_STATUS, 0L, seq = 0L))
+                for (order in mine) via.deliver(encode(order, order.clOrdId, order.clOrdId, ExecType.ORDER_STATUS, 0L, seq = 0L))
                 via.deliverStatusComplete(d.participantId(), d.requestId(), nextSeqOf(d.participantId()), mine.size, d.securityId(), RequestStatus.COMPLETE)
             }
             else -> error("the model does not sequence template ${h.templateId()}")
@@ -116,34 +127,35 @@ class ExchangeModel(private val retention: Int = 1_000) {
     }
 
     /** The maker side of a trade: [qty] of [clOrdId] fills, reported through [via]. */
-    fun fill(via: ModelGateway, participantId: Long, clOrdId: Long, qty: Long) {
+    fun fill(via: ModelGateway, participantId: Long, clOrdId: ClOrdId, qty: Long) {
         val order = open.values.first { it.participantId == participantId && it.clOrdId == clOrdId }
         order.cumQty += qty
         if (order.cumQty == order.origQty) open.remove(order.exchangeOrderId)
-        engineReport(via, order, clOrdId, ExecType.TRADE, lastQty = qty)
+        engineReport(via, order, clOrdId, clOrdId, ExecType.TRADE, lastQty = qty)
     }
 
     /** Numbered and retained on every node before it is routed; delivered only if [via] delivers. */
+    @Suppress("LongParameterList")
     private fun engineReport(
-        via: ModelGateway, order: Open, clOrdId: Long, execType: ExecType, lastQty: Long,
+        via: ModelGateway, order: Open, clOrdId: ClOrdId, origClOrdId: ClOrdId, execType: ExecType, lastQty: Long,
         reason: RejectReason = RejectReason.NONE, leavesQty: Long = order.origQty - order.cumQty,
     ) {
         val p = order.participantId
         val seq = nextSeqOf(p)
         nextSeq[p] = seq + 1
-        val bytes = encode(order, clOrdId, execType, lastQty, seq, reason, leavesQty)
+        val bytes = encode(order, clOrdId, origClOrdId, execType, lastQty, seq, reason, leavesQty)
         ring.addLast(Retained(p, seq, bytes))
         while (ring.size > retention) ring.removeFirst()
         if (!via.dropReports) via.deliver(bytes)
     }
 
+    @Suppress("LongParameterList")
     private fun encode(
-        order: Open, clOrdId: Long, execType: ExecType, lastQty: Long, seq: Long,
+        order: Open, clOrdId: ClOrdId, origClOrdId: ClOrdId, execType: ExecType, lastQty: Long, seq: Long,
         reason: RejectReason = RejectReason.NONE, leavesQty: Long = order.origQty - order.cumQty,
     ): ByteArray {
         reportEncoder.wrapAndApplyHeader(scratch, 0, header)
             .participantId(order.participantId)
-            .clOrdId(clOrdId)
             .exchangeOrderId(order.exchangeOrderId)
             .price(order.price)
             .lastQty(lastQty)
@@ -156,6 +168,8 @@ class ExchangeModel(private val retention: Int = 1_000) {
             .side(order.side)
             .enrichment(Enrichment.KNOWN)
             .reportSeq(seq)
+        clOrdId.writeTo(scratch, reportEncoder.offset() + ClientExecutionReportEncoder.clOrdIdEncodingOffset())
+        origClOrdId.writeTo(scratch, reportEncoder.offset() + ClientExecutionReportEncoder.origClOrdIdEncodingOffset())
         return bytes(MessageHeaderEncoder.ENCODED_LENGTH + ClientExecutionReportEncoder.BLOCK_LENGTH)
     }
 
@@ -245,12 +259,12 @@ class ModelGateway(private val exchange: ExchangeModel, name: String) : GatewayL
 
     @Suppress("LongParameterList")
     fun deliverResendComplete(
-        participantId: Long, requestId: Long, fromSeq: Long, nextSeq: Long, oldest: Long, replayed: Int,
+        participantId: Long, requestId: Long, fromSeq: Long, toSeq: Long, nextSeq: Long, oldest: Long, replayed: Int,
         status: RequestStatus,
     ) {
         ReportResendCompleteEncoder().wrapAndApplyHeader(scratch, 0, header)
             .participantId(participantId).requestId(requestId).fromSeq(fromSeq).nextSeq(nextSeq)
-            .oldestRetainedSeq(oldest).replayedCount(replayed).status(status)
+            .oldestRetainedSeq(oldest).replayedCount(replayed).status(status).toSeq(toSeq)
         deliver(copy(MessageHeaderEncoder.ENCODED_LENGTH + ReportResendCompleteEncoder.BLOCK_LENGTH))
     }
 
@@ -270,15 +284,19 @@ class ModelGateway(private val exchange: ExchangeModel, name: String) : GatewayL
         when (h.templateId()) {
             NewOrderSingleDecoder.TEMPLATE_ID -> {
                 val d = NewOrderSingleDecoder().wrap(buffer, body, h.blockLength(), h.version())
-                localReject(d.participantId(), d.clOrdId(), d.securityId(), d.side())
+                val clOrdId = body + NewOrderSingleDecoder.clOrdIdEncodingOffset()
+                localReject(d.participantId(), buffer, clOrdId, clOrdId, d.securityId(), d.side())
             }
             OrderCancelRequestDecoder.TEMPLATE_ID -> {
                 val d = OrderCancelRequestDecoder().wrap(buffer, body, h.blockLength(), h.version())
-                localReject(d.participantId(), d.clOrdId(), d.securityId(), d.side())
+                localReject(
+                    d.participantId(), buffer, body + OrderCancelRequestDecoder.clOrdIdEncodingOffset(),
+                    body + OrderCancelRequestDecoder.origClOrdIdEncodingOffset(), d.securityId(), d.side(),
+                )
             }
             ReportResendRequestDecoder.TEMPLATE_ID -> {
                 val d = ReportResendRequestDecoder().wrap(buffer, body, h.blockLength(), h.version())
-                deliverResendComplete(d.participantId(), d.requestId(), d.fromSeq(), 0L, 0L, 0, RequestStatus.GATEWAY_UNAVAILABLE)
+                deliverResendComplete(d.participantId(), d.requestId(), d.fromSeq(), d.toSeq(), 0L, 0L, 0, RequestStatus.GATEWAY_UNAVAILABLE)
             }
             OrderMassStatusRequestDecoder.TEMPLATE_ID -> {
                 val d = OrderMassStatusRequestDecoder().wrap(buffer, body, h.blockLength(), h.version())
@@ -287,12 +305,18 @@ class ModelGateway(private val exchange: ExchangeModel, name: String) : GatewayL
         }
     }
 
-    private fun localReject(participantId: Long, clOrdId: Long, securityId: Int, side: Side) {
-        ClientExecutionReportEncoder().wrapAndApplyHeader(scratch, 0, header)
-            .participantId(participantId).clOrdId(clOrdId).exchangeOrderId(0L).price(0L).lastQty(0L)
+    /** The gateway echoes the ids as sent (Design.md §5, "Client order ids"). */
+    @Suppress("LongParameterList")
+    private fun localReject(
+        participantId: Long, request: DirectBuffer, clOrdIdAt: Int, origClOrdIdAt: Int, securityId: Int, side: Side,
+    ) {
+        val encoder = ClientExecutionReportEncoder().wrapAndApplyHeader(scratch, 0, header)
+            .participantId(participantId).exchangeOrderId(0L).price(0L).lastQty(0L)
             .leavesQty(0L).cumQty(0L).origQty(0L).securityId(securityId)
             .rejectReason(RejectReason.GATEWAY_UNAVAILABLE).execType(ExecType.REJECTED).side(side)
             .enrichment(Enrichment.KNOWN).reportSeq(0L)
+        ClOrdId.copy(request, clOrdIdAt, scratch, encoder.offset() + ClientExecutionReportEncoder.clOrdIdEncodingOffset())
+        ClOrdId.copy(request, origClOrdIdAt, scratch, encoder.offset() + ClientExecutionReportEncoder.origClOrdIdEncodingOffset())
         deliver(copy(MessageHeaderEncoder.ENCODED_LENGTH + ClientExecutionReportEncoder.BLOCK_LENGTH))
     }
 

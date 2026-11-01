@@ -4,7 +4,19 @@ Where the project stands, what is open, and what to do next. **This is the sessi
 read this, not the handover. [`Handover.md`](Handover.md) is the archive: work records (§2a–§2q),
 load-bearing decisions (§3) and lessons learned (§6).
 
-Last updated 2026-10-04. **The repository is public** (Handover §2q):
+Last updated 2026-11-01. **Schema version 8, uncommitted** (Design.md §5, "Client order ids"; open
+issues 20–26):
+- **Client order ids are the participant's own text**, `char[20]`, on orders, cancels and both
+  reports, with `origClOrdId` on every report. The SDK's API changed (`ClOrdId` in place of `Long`),
+  so **the FIX adapter must move to it** and can drop its derived ids; publishing the SDK waits for a
+  go.
+- **A resend is bounded to its gap** (`toSeq`), and a client settles only once it holds every report
+  below `nextSeq`.
+- **Two defects found and fixed:** a resend could send one participant another's reports (every
+  version before 8), and `run-sweep.sh` measured its own replay from `9622f52` on.
+- **One found and not fixed:** `most cluster shutdown` does not exit the processes (open issue 24).
+
+Updated 2026-10-04. **The repository is public** (Handover §2q):
 - **Every push goes to the home GitLab and to `github.com/pmvrolijk/most-exchange`**, which is
   public. Keep claude.ai links, internal host names and real secrets out of tracked files.
 - **GitHub Actions mirrors the GitLab pipeline** job for job (`.github/workflows/ci.yml`), and its
@@ -107,11 +119,11 @@ merged to `master` and green in CI (pipelines 35–37). The project's code is AG
 
 | | |
 | --- | --- |
-| Branch | `master` at `456ea63`, clean, and pushed to GitLab and to the public GitHub mirror |
+| Branch | `master` at `bd25eb1`, with schema version 8 uncommitted on top (2026-11-01) |
 | Modules | 9 — `sbe`, `client`, `reference`, `discovery`, `engine`, `market-data`, `gateway`, `tools`, `control`. Packages `nl.lamia.most.exchange.*` |
 | Kotlin | ~31,700 lines — 17,280 main across 80 files, 14,380 test across 70 |
 | Frontend | ~3,600 lines of TypeScript and Vue across 25 files, outside the Gradle build |
-| Tests | 681, all passing |
+| Tests | 721, all passing (2026-11-01, schema version 8) |
 | Specification | [`Design.md`](Design.md) — authoritative. §8 is the open list |
 | Rules | [`../CLAUDE.md`](../CLAUDE.md) — the traps. [`Rationale.md`](Rationale.md) — why each exists |
 | Architecture | [`Architecture.drawio`](Architecture.drawio) — the whole system on one page |
@@ -373,23 +385,51 @@ Ordered by what would block a real deployment first. Full reasoning in `Design.m
     `most send`/`cancel` offer once. On `BACK_PRESSURED` they print "gateway did not accept" and
     **exit 0**, so a script carries on with the market closed. This breaks Adapters.md §2's rule. The
     fix is a bounded retry and a non-zero exit.
-20. **String `clOrdId`/`origClOrdId`: decided 2026-11-01, not built** (Design.md §8, "String client
-    order ids"). `char[20]`, the gateway checks the charset, the ids are held in `ColdField`, both
-    ids are on reports, the fields change in place at schema version 8, and the upgrade is `most
-    cluster shutdown`. **Measured 2026-11-01 (Measurements.md S0–S4):** with UDP egress the knee
-    moves one rate step down, from 500–550k/s to 450–500k/s, as the datagram arithmetic predicted
-    (8 reports per datagram become 7). **Building it waits for a go.**
-21. **A resend has no upper bound** (Design.md §8). One lost report replays everything after it,
-    1.3–2.4M duplicates at the knee, into a full egress. A `toSeq` would bound it: a wire change,
-    not decided.
-22. **`run-sweep.sh` measured the harness from `9622f52` to 2026-11-01** (Measurements.md, "The
-    harness replayed the ring"). `most load` started its report ledger at 1, so every rate after
-    the first replayed the ring mid-run. **Fixed, uncommitted:** `most load` asks for each
-    participant's `nextSeq` before its first order. No recorded figure was affected.
+20. ~~**String `clOrdId`/`origClOrdId`**~~ **Built 2026-11-01, schema version 8** (Design.md §5,
+    "Client order ids"; §8; R§18). `char[20]` and the participant's own text, checked by the gateway,
+    held in `ColdField`, both ids on every report, layouts changed in place, version 7 snapshots
+    restore. **Measured on the real builds** (Measurements.md S5–S8, A13–A14): the UDP-egress knee
+    moved one step, from 500–550k/s to 450–500k/s, and the engine pays +0.04 µs a new order.
+    **Checked:** `./gradlew build` (721 tests), `run-e2e.sh`, `run-cluster3.sh`, `run-failover.sh` in
+    both placements (0 unknown), `run-restart.sh` (passed on a re-run, see 25), and the new
+    `e2e/run-upgrade.sh`, which upgrades a version 7 node through `most cluster shutdown` and proves a
+    version 7 log tail is refused. **Not checked:** native images (no GraalVM toolchain on the
+    laptop; CI's `native:engine`), the Epsilon soak, and the Operator's Manual, which still describes
+    version 7 and needs its §4.2 upgrade note and memory figures.
+21. ~~**A resend has no upper bound**~~ **Built with version 8**: `toSeq`, a gap asked for by its
+    bounds, and a client settles only once it holds every report below `nextSeq` (Design.md §5).
+22. ~~**`run-sweep.sh` measured the harness from `9622f52` to 2026-11-01**~~ **Fixed** (committed in
+    `bd25eb1`): `most load` asks for each participant's `nextSeq` before its first order
+    (Measurements.md, "The harness replayed the ring"). No recorded figure was affected.
+23. ~~**A resend could send one participant another's reports**~~ **Fixed with version 8.** Found
+    2026-11-01: with every report of a participant evicted from the ring, the replay started from its
+    newest slot, by then someone else's. Reproduced on version 7 by a test before the fix (Design.md
+    §8). **Every deployment before version 8 has it.**
+24. **`most cluster shutdown` stops the cluster but not the processes.** Found 2026-11-01 by
+    `e2e/run-upgrade.sh`, the first run of the documented path on real processes. The snapshot is
+    taken and the consensus module terminates, but neither the cluster host nor the engine wires a
+    termination hook to its `ShutdownSignalBarrier`, so both stay up until SIGTERM, which the help
+    text and LocalTesting.md say they do not need. The fix is Aeron's `terminationHook` on both
+    contexts, signalling the barrier: a lifecycle change, so it waits for a decision and
+    `verify-for-real`. Until then the operator SIGTERMs both after it, as the upgrade script does.
+25. **`run-restart.sh` step 4a is flaky.** It failed once in two runs on version 8 ("market data
+    somehow had the book already") and passed once on version 7. A likely cause is the previous
+    market data process's IPC stream lingering after it dies, not shown.
+26. **A co-located failover now fences ~4,000 times**, once per gateway switch, where F3 recorded 4
+    fences on 2026-10-03. The same on version 7 today (4,060) as on version 8 (4,556), so it is not
+    version 8's, and it still leaves 0 unknown. Something since F3 makes the generator ping-pong
+    between refusing standbys. Unexplained.
 
 ---
 
 ## 3. To do next
+
+**Next (2026-11-01): commit version 8, then move the FIX adapter to it.** The adapter repository
+builds on the SDK, whose order entry API now takes `ClOrdId` (Adapters.md §2): FIX ClOrdID passes
+through as the exchange's `clOrdId`, the derived id and its collision path can go, and its fences
+inherit the bounded resend. That needs the SDK republished, which waits for a go. Then open issue 24
+(`cluster shutdown` exiting its processes), which is cheap and blocks a clean upgrade procedure, and
+the Operator's Manual for version 8.
 
 ~~**Next: in-flight orders at a failover**~~ **Done** (open issue 3a). **Next session: the FIX adapter
 repository** (item 13 below). The user chose the adapter framework ahead of archive retention on

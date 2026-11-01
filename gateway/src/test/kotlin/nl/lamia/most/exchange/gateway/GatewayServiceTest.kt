@@ -32,6 +32,9 @@ data class ClientReport(
     val enrichment: Enrichment,
     /** The engine's per-participant sequence, or 0 for a report the gateway made itself. */
     val reportSeq: Long = 0L,
+    /** Both ids as they reached the client (Design.md §5, "Client order ids"). */
+    val clOrdIdText: String = clOrdId.toString(),
+    val origClOrdIdText: String = clOrdIdText,
 )
 
 /** An OrderMassStatusComplete as the client received it. */
@@ -98,16 +101,13 @@ class RecordingSink : GatewaySink {
             header.version(),
         )
         toClient += ClientReport(
-            decoder.participantId(), decoder.clOrdId(), decoder.exchangeOrderId(),
+            decoder.participantId(), decoder.clOrdId().toLongOrNull() ?: -1L, decoder.exchangeOrderId(),
             decoder.execType().name, decoder.lastQty(), decoder.leavesQty(),
             decoder.cumQty(), decoder.origQty(), decoder.rejectReason().value(),
-            decoder.enrichment(), decoder.reportSeq(),
+            decoder.enrichment(), decoder.reportSeq(), decoder.clOrdId(), decoder.origClOrdId(),
         )
     }
 }
-
-/** ExecutionReport's blockLength before origQty and cumQty were added. */
-private const val VERSION_2_BLOCK_LENGTH = 64
 
 class GatewayServiceTest {
 
@@ -125,7 +125,7 @@ class GatewayServiceTest {
         side: Side = Side.BUY,
     ): ClientMessageAction {
         NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
-            .participantId(participantId).clOrdId(clOrdId).price(price).qty(qty).smpId(0)
+            .participantId(participantId).clOrdId((clOrdId).toString()).price(price).qty(qty).smpId(0)
             .securityId(securityId).expireDate(0).side(side).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
         return service.onClientMessage(
             buffer, 0,
@@ -139,7 +139,7 @@ class GatewayServiceTest {
         securityId: Int,
     ): ClientMessageAction {
         OrderCancelRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
-            .participantId(participantId).origClOrdId(clOrdId).clOrdId(clOrdId + 1)
+            .participantId(participantId).origClOrdId((clOrdId).toString()).clOrdId((clOrdId + 1).toString())
             .exchangeOrderId(1).securityId(securityId).side(Side.BUY)
         return service.onClientMessage(
             buffer, 0,
@@ -160,38 +160,12 @@ class GatewayServiceTest {
     ) {
         val b = UnsafeBuffer(ByteArray(512))
         ExecutionReportEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
-            .participantId(participantId).clOrdId(clOrdId).exchangeOrderId(exchangeOrderId)
+            .participantId(participantId).clOrdId((clOrdId).toString()).exchangeOrderId(exchangeOrderId)
             .price(100).lastQty(lastQty).leavesQty(leavesQty).securityId(1)
             .rejectReason(rejectReason).execType(execType).side(Side.BUY)
             .origQty(origQty).cumQty(cumQty)
         service.onExecutionReport(
             b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH,
-        )
-    }
-
-    /**
-     * A report from an engine built before schema version 3, which carried neither quantity. The
-     * body is identical; only the header says how much of it to believe.
-     */
-    private fun versionTwoReport(
-        participantId: Long,
-        clOrdId: Long,
-        exchangeOrderId: Long,
-        execType: ExecType,
-        lastQty: Long = 0,
-        leavesQty: Long = 0,
-    ) {
-        val b = UnsafeBuffer(ByteArray(512))
-        val header = MessageHeaderEncoder()
-        ExecutionReportEncoder().wrapAndApplyHeader(b, 0, header)
-            .participantId(participantId).clOrdId(clOrdId).exchangeOrderId(exchangeOrderId)
-            .price(100).lastQty(lastQty).leavesQty(leavesQty).securityId(1)
-            .rejectReason(RejectReason.NONE).execType(execType).side(Side.BUY)
-        header.wrap(b, 0).blockLength(VERSION_2_BLOCK_LENGTH).version(2)
-            .templateId(ExecutionReportEncoder.TEMPLATE_ID)
-            .schemaId(ExecutionReportEncoder.SCHEMA_ID)
-        service.onExecutionReport(
-            b, 0, MessageHeaderEncoder.ENCODED_LENGTH + VERSION_2_BLOCK_LENGTH,
         )
     }
 
@@ -324,15 +298,85 @@ class GatewayServiceTest {
     }
 
     @Test
-    fun `a report from an engine older than schema version 3 is marked unknown`() {
-        // The field is absent, not zero, and the two must reach the same honest answer.
-        versionTwoReport(1, 100, 500, ExecType.TRADE, lastQty = 4, leavesQty = 6)
+    fun `a report from an engine older than version 8 is dropped and counted, never translated`() {
+        // Design.md §5, "Client order ids": version 8 changed the layout in place, so an older
+        // engine's report would be read as somebody else's numbers. Supersedes the version 2 and
+        // version 5 cases, which were translated.
+        val b = UnsafeBuffer(ByteArray(512))
+        val header = MessageHeaderEncoder()
+        ExecutionReportEncoder().wrapAndApplyHeader(b, 0, header)
+            .participantId(1).exchangeOrderId(500).price(100).lastQty(4).leavesQty(6).securityId(1)
+            .rejectReason(RejectReason.NONE).execType(ExecType.TRADE).side(Side.BUY)
+        header.version(7)
+        service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH)
 
-        val fill = sink.toClient.single()
-        assertEquals(Enrichment.UNKNOWN, fill.enrichment)
-        assertEquals(0L, fill.origQty)
-        assertEquals(0L, fill.cumQty)
-        assertEquals(1L, service.untrackedReports)
+        assertTrue(sink.toClient.isEmpty())
+        assertEquals(1L, service.refusedSchemaVersion)
+    }
+
+    // ------------------------------------------------------------ client order ids (Design.md §5)
+
+    @Test
+    fun `an order and a cancel with a malformed id are refused locally, echoing the bytes sent`() {
+        // Design.md §5: 1-20 of A-Z a-z 0-9 - _ + ; : . /, NUL-padded; INVALID_CL_ORD_ID before the log.
+        NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(1).clOrdId("has space").price(100).qty(10).smpId(0)
+            .securityId(1).expireDate(0).side(Side.BUY).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
+        service.onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + NewOrderSingleEncoder.BLOCK_LENGTH)
+
+        OrderCancelRequestEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(1).origClOrdId("ORD=1").clOrdId("CXL-1")
+            .exchangeOrderId(1).securityId(1).side(Side.BUY)
+        service.onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + OrderCancelRequestEncoder.BLOCK_LENGTH)
+
+        assertTrue(sink.toCluster.isEmpty(), "neither reached the log")
+        assertEquals(
+            listOf(
+                Triple(RejectReason.INVALID_CL_ORD_ID.value(), "has space", "has space"),
+                Triple(RejectReason.INVALID_CL_ORD_ID.value(), "CXL-1", "ORD=1"),
+            ),
+            sink.toClient.map { Triple(it.rejectReason, it.clOrdIdText, it.origClOrdIdText) },
+        )
+        assertEquals(2L, service.invalidClOrdIdRejects)
+    }
+
+    @Test
+    fun `an id with bytes after its padding is malformed`() {
+        val order = NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(1).clOrdId("AB").price(100).qty(10).smpId(0)
+            .securityId(1).expireDate(0).side(Side.BUY).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
+        buffer.putByte(order.offset() + NewOrderSingleEncoder.clOrdIdEncodingOffset() + 5, 'X'.code.toByte())
+        service.onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + NewOrderSingleEncoder.BLOCK_LENGTH)
+
+        assertTrue(sink.toCluster.isEmpty())
+        assertEquals(RejectReason.INVALID_CL_ORD_ID.value(), sink.toClient.single().rejectReason)
+    }
+
+    @Test
+    fun `an order from a version 7 client is dropped unanswered and counted`() {
+        // Design.md §5: nothing the gateway sends could be read by the client that sent it.
+        NewOrderSingleEncoder().wrapAndApplyHeader(buffer, 0, headerEncoder)
+            .participantId(1).clOrdId("V7").price(100).qty(10).smpId(0)
+            .securityId(1).expireDate(0).side(Side.BUY).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
+        headerEncoder.version(7)
+        service.onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + NewOrderSingleEncoder.BLOCK_LENGTH)
+
+        assertTrue(sink.toCluster.isEmpty())
+        assertTrue(sink.toClient.isEmpty())
+        assertEquals(1L, service.refusedSchemaVersion)
+    }
+
+    @Test
+    fun `both ids on the engine's report reach the client as they are`() {
+        val b = UnsafeBuffer(ByteArray(512))
+        ExecutionReportEncoder().wrapAndApplyHeader(b, 0, MessageHeaderEncoder())
+            .participantId(1).clOrdId("CXL-9").origClOrdId("ORD/9.a").exchangeOrderId(500).price(100)
+            .lastQty(0).leavesQty(0).securityId(1).rejectReason(RejectReason.NONE).execType(ExecType.CANCELED)
+            .side(Side.BUY).origQty(10).cumQty(0).reportSeq(3)
+        service.onExecutionReport(b, 0, MessageHeaderEncoder.ENCODED_LENGTH + ExecutionReportEncoder.BLOCK_LENGTH)
+
+        val report = sink.toClient.single()
+        assertEquals("CXL-9" to "ORD/9.a", report.clOrdIdText to report.origClOrdIdText)
     }
 
     @Test

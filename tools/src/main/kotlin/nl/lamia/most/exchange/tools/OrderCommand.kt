@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.tools
 
+import nl.lamia.most.exchange.client.ClOrdId
 import nl.lamia.most.exchange.client.OrderRequests
 import nl.lamia.most.exchange.client.PriceCodec
 import nl.lamia.most.exchange.client.RoutedSecurity
@@ -20,7 +21,7 @@ data class OrderRequest(
     val side: Byte,
     val price: Long,
     val qty: Long,
-    val clOrdId: Long,
+    val clOrdId: ClOrdId,
     val participantId: Long,
     val smpId: Long,
     val smpStrategy: Byte,
@@ -60,7 +61,9 @@ object OrderParser {
             side = side,
             price = price,
             qty = qty,
-            clOrdId = args.long("clordid", System.currentTimeMillis()),
+            // The participant's own id (Design.md §5, "Client order ids"); checked here so a bad one
+            // is reported as a typo, not as the gateway's INVALID_CL_ORD_ID.
+            clOrdId = ClOrdId.of(args.optional("clordid") ?: System.currentTimeMillis().toString()),
             participantId = participantId,
             smpId = args.long("smp-id", 0L),
             smpStrategy = parseStrategy(args.optional("smp")),
@@ -98,7 +101,7 @@ data class LocalOrder(
     val side: Byte,
     val price: Long,
     val qty: Long,
-    val clOrdId: Long,
+    val clOrdId: ClOrdId,
     val participantId: Long,
     val smpId: Long,
     val smpStrategy: Byte,
@@ -114,8 +117,8 @@ fun encodeCancel(
     buffer: MutableDirectBuffer,
     security: RoutedSecurity,
     participantId: Long,
-    origClOrdId: Long,
-    clOrdId: Long,
+    origClOrdId: ClOrdId,
+    clOrdId: ClOrdId,
     exchangeOrderId: Long,
     side: Byte,
 ): Int = OrderRequests.encodeCancel(
@@ -141,8 +144,10 @@ fun formatReport(decoder: ClientExecutionReportDecoder, symbol: String): String 
     // The participant's report sequence (Design.md §5), when the engine stamped one; a report the
     // gateway made itself has none.
     val seq = if (decoder.reportSeq() > 0L) "  seq ${decoder.reportSeq()}" else ""
+    // A cancel's report names the order it cancelled; every other report carries the order's id twice.
+    val origId = decoder.origClOrdId().let { if (it == decoder.clOrdId()) "" else " origClOrdId=$it" }
     return "  $execType  $symbol  orderId=${decoder.exchangeOrderId()} " +
-        "clOrdId=${decoder.clOrdId()}  $detail$seq"
+        "clOrdId=${decoder.clOrdId()}$origId  $detail$seq"
 }
 
 private fun sendAndFollow(
@@ -250,9 +255,9 @@ fun runCancel(args: Args) {
     val config = ToolsConfig.from(args)
     val symbol = args.required("symbol")
     val side = OrderParser.parseSide(args.required("side"))
-    val origClOrdId = args.requiredLong("orig-clordid")
+    val origClOrdId = ClOrdId.of(args.required("orig-clordid"))
     val exchangeOrderId = args.requiredLong("order-id")
-    val clOrdId = args.long("clordid", System.currentTimeMillis())
+    val clOrdId = ClOrdId.of(args.optional("clordid") ?: System.currentTimeMillis().toString())
 
     sendAndFollow(
         args,

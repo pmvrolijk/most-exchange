@@ -91,6 +91,16 @@ class ReportLedger(private val participantIds: LongArray) {
     fun firstMissing(participantIndex: Int): Long = firstMissing[participantIndex]
 
     /**
+     * The last missing `reportSeq` of the gap that starts at [firstMissing]: the one before the next
+     * report received. 0 when nothing above [firstMissing] has arrived, so there is no gap to bound,
+     * only reports not yet seen (Design.md §5, "a gap is asked for by its bounds").
+     */
+    fun gapEnd(participantIndex: Int): Long {
+        val next = seen[participantIndex].nextSetBit((firstMissing[participantIndex] - 1).toInt())
+        return if (next < 0) 0L else next.toLong()
+    }
+
+    /**
      * Reports below [nextSeq] still not received. After a `COMPLETE` resend that ended at [nextSeq]
      * this must be 0; anything else is a report the engine says it sent and the client never had.
      */

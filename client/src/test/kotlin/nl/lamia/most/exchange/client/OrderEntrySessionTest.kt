@@ -38,7 +38,11 @@ class OrderEntrySessionTest {
         check(isReady) { "the opening mass status did not complete" }
     }
 
-    private fun OrderEntrySession.buy(clOrdId: Long) = newOrder(p, clOrdId, 1, Side.BUY, 100_00000000L, 10_00000000L)
+    // Orders are numbered here for readability; on the wire each is its decimal string (Design.md §5).
+    private fun OrderEntrySession.buy(clOrdId: Long) = newOrder(p, ClOrdId.of(clOrdId), 1, Side.BUY, 100_00000000L, 10_00000000L)
+
+    private fun ExchangeModel.fill(via: ModelGateway, participantId: Long, clOrdId: Long, qty: Long) =
+        fill(via, participantId, ClOrdId.of(clOrdId), qty)
 
     // ------------------------------------------------------------------------- connecting
 
@@ -140,20 +144,50 @@ class OrderEntrySessionTest {
     // ------------------------------------------------------------------------- gaps and replays
 
     @Test
-    fun `a gap is fenced from the first missing report, and a replayed report is delivered once`() {
-        // Adapters.md §4: on a gap, resend from the first missing reportSeq; count each report once.
+    fun `a gap below what has arrived is asked for by its bounds, and nothing is replayed twice`() {
+        // Design.md §5 "Report sequence and resend": a client that has received reports above a gap
+        // asks for fromSeq = the gap's first missing and toSeq = its last. Adapters.md §4: count each
+        // report once.
         val session = session().opened()
         session.buy(1); session.pump()
         a.dropReports = true
-        session.buy(2); session.pump() // seq 2, lost
+        session.buy(2); session.buy(3); session.pump() // seq 2 and 3, lost
         a.dropReports = false
-        session.buy(3); session.pump() // seq 3 arrives: the gap opens, and the fence asks from 2
+        session.buy(4); session.buy(5); session.pump() // seq 4 and 5 arrive: the gap is 2..3
 
         val resend = a.lastRequest<ReportResendRequestDecoder>()
         assertEquals(2L, resend.fromSeq())
-        assertEquals(listOf(1L, 3L, 2L), seen.reports.map { it.reportSeq })
-        assertEquals(1L, session.duplicateReports, "the replay re-sent seq 3, which arrived once already")
+        assertEquals(3L, resend.toSeq())
+        assertEquals(listOf(1L, 4L, 5L, 2L, 3L), seen.reports.map { it.reportSeq })
+        assertEquals(0L, session.duplicateReports, "only the gap was replayed")
         assertTrue(seen.settled.isEmpty(), "every order was answered")
+    }
+
+    @Test
+    fun `a fence that leaves a report below nextSeq missing settles nothing until it is held`() {
+        // Design.md §5 "The request is a fence": once a client holds every report below nextSeq, an
+        // unanswered order sent before the request was never sequenced; still missing one, it fences
+        // again before it settles anything. Order 4 is sequenced and its report lost above the
+        // bounded fence's toSeq, so settling on that fence's completion would call it NEVER_SEQUENCED:
+        // a reject to the client for an order resting in the book.
+        val session = session(a).opened()
+        session.buy(1); session.pump() // seq 1
+        a.dropReports = true
+        session.buy(2) // seq 2, lost: the gap
+        a.dropReports = false
+        session.buy(3) // seq 3, arrives and opens the gap at the next poll
+        a.dropReports = true
+        session.buy(4) // seq 4, lost above the gap, before the fence is sent
+        a.dropReports = false
+        a.blackhole = true
+        session.buy(5) // never sequenced
+        a.blackhole = false
+        session.pump()
+
+        val fences = a.requests.filterIsInstance<ReportResendRequestDecoder>()
+        assertEquals(listOf(2L to 2L, 4L to 0L), fences.map { it.fromSeq() to it.toSeq() }, "bounded, then unbounded for the tail")
+        assertEquals(listOf(1L, 3L, 2L, 4L), seen.reports.map { it.reportSeq })
+        assertEquals(mapOf(5L to OrderFate.NEVER_SEQUENCED), seen.settled, "4 was answered, never settled")
     }
 
     // ------------------------------------------------------------------------- failover
@@ -175,6 +209,8 @@ class OrderEntrySessionTest {
 
         assertEquals(b.endpoint, session.activeGateway)
         assertEquals(ReportResendRequestDecoder.TEMPLATE_ID, b.received.first(), "the fence goes before anything else")
+        // Design.md §5: after a switch what is missing may lie above everything seen, so no bound.
+        assertEquals(ParticipantRequests.UNBOUNDED, b.lastRequest<ReportResendRequestDecoder>().toSeq())
         assertEquals(listOf(1L, 2L), seen.reports.map { it.clOrdId }, "the replay recovered the sequenced orders")
         assertEquals(
             mapOf(3L to OrderFate.NEVER_SEQUENCED, 4L to OrderFate.NEVER_SEQUENCED, 5L to OrderFate.NEVER_SEQUENCED),
@@ -325,8 +361,8 @@ class OrderEntrySessionTest {
         exchange.sequence(a, order(clOrdId = 300L)) // seq 1: the previous run sent 300 and died before its report
         a.drain()
         val session = session()
-        session.restoreInFlight(p, 300L)
-        session.restoreInFlight(p, 301L) // the previous run's last request, which never reached the log
+        session.restoreInFlight(p, ClOrdId.of(300L))
+        session.restoreInFlight(p, ClOrdId.of(301L)) // the previous run's last request, which never reached the log
         session.opened()
 
         assertEquals(
@@ -349,7 +385,7 @@ class OrderEntrySessionTest {
         small.sequence(sa, order(clOrdId = 401L)) // seq 3, open; the ring holds only this one
         sa.drain()
         val session = OrderEntrySession(listOf(sa), longArrayOf(p), seen, OrderEntrySession.Config(requestIdBase = 1_000L), clock = clock)
-        for (clOrdId in longArrayOf(400L, 401L, 402L)) session.restoreInFlight(p, clOrdId)
+        for (clOrdId in longArrayOf(400L, 401L, 402L)) session.restoreInFlight(p, ClOrdId.of(clOrdId))
         session.opened()
 
         assertEquals(Report(401L, ExecType.NEW, 3L), seen.reports.first(), "what the ring still held is replayed")
@@ -364,9 +400,9 @@ class OrderEntrySessionTest {
     fun `a request is restored only before the session starts, and only for its own participants`() {
         // Adapters.md §5: before the first doWork.
         val session = session()
-        assertFailsWith<IllegalArgumentException> { session.restoreInFlight(99L, 1L) }
+        assertFailsWith<IllegalArgumentException> { session.restoreInFlight(99L, ClOrdId.of(1L)) }
         session.doWork()
-        assertFailsWith<IllegalStateException> { session.restoreInFlight(p, 1L) }
+        assertFailsWith<IllegalStateException> { session.restoreInFlight(p, ClOrdId.of(1L)) }
     }
 
     @Test
@@ -381,11 +417,9 @@ class OrderEntrySessionTest {
 
     private fun order(participantId: Long = p, clOrdId: Long): org.agrona.DirectBuffer {
         val buffer = org.agrona.concurrent.UnsafeBuffer(ByteArray(128))
-        nl.lamia.most.exchange.sbe.NewOrderSingleEncoder()
-            .wrapAndApplyHeader(buffer, 0, nl.lamia.most.exchange.sbe.MessageHeaderEncoder())
-            .participantId(participantId).clOrdId(clOrdId).price(100_00000000L).qty(10_00000000L)
-            .smpId(0L).securityId(1).expireDate(0).side(Side.SELL)
-            .smpStrategy(nl.lamia.most.exchange.sbe.SmpStrategy.CANCEL_AGGRESSOR)
+        OrderRequests.encodeNewOrder(
+            buffer, 0, participantId, ClOrdId.of(clOrdId), 1, Side.SELL, 100_00000000L, 10_00000000L,
+        )
         return buffer
     }
 
@@ -416,12 +450,12 @@ class OrderEntrySessionTest {
                 refused++
                 return ReportAction.ABORT
             }
-            reports += Report(report.clOrdId(), report.execType(), report.reportSeq())
+            reports += Report(report.clOrdId().toLong(), report.execType(), report.reportSeq())
             return ReportAction.CONSUMED
         }
 
-        override fun onSettled(participantId: Long, clOrdId: Long, fate: OrderFate) {
-            check(settled.put(clOrdId, fate) == null) { "order $clOrdId settled twice" }
+        override fun onSettled(participantId: Long, clOrdId: ClOrdId, fate: OrderFate) {
+            check(settled.put(clOrdId.toString().toLong(), fate) == null) { "order $clOrdId settled twice" }
         }
 
         override fun onMassStatusComplete(participantId: Long, status: RequestStatus, orderCount: Int, nextSeq: Long) {

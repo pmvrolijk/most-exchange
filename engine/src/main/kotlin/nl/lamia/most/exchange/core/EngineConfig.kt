@@ -3,6 +3,7 @@ package nl.lamia.most.exchange.core
 import nl.lamia.most.exchange.reference.IdleStrategySpec
 import nl.lamia.most.exchange.reference.ParticipantRegistry
 import nl.lamia.most.exchange.reference.ShardSpec
+import nl.lamia.most.exchange.sbe.MessageHeaderEncoder
 import java.io.File
 import java.util.Properties
 
@@ -116,7 +117,11 @@ data class EngineConfig(
      */
     fun engineFingerprintValue(): Long {
         var hash = 1125899906842597L
-        for (c in "auctionMaxPasses=$auctionMaxPasses reportRetention=$reportRetention") hash = hash * 31 + c.code
+        // The schema version too: two builds that read the log differently must not agree (Design.md §5,
+        // "Client order ids").
+        val settings = "auctionMaxPasses=$auctionMaxPasses reportRetention=$reportRetention " +
+            "schemaVersion=${MessageHeaderEncoder.SCHEMA_VERSION}"
+        for (c in settings) hash = hash * 31 + c.code
         return hash
     }
 

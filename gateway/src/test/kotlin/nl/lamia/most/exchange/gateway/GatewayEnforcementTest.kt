@@ -54,14 +54,14 @@ class GatewayEnforcementTest {
 
     private fun GatewayService.order(participantId: Long, securityId: Int = 1): ClientMessageAction {
         orderEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
-            .participantId(participantId).clOrdId(100).price(100).qty(10).smpId(0)
+            .participantId(participantId).clOrdId((100).toString()).price(100).qty(10).smpId(0)
             .securityId(securityId).expireDate(0).side(Side.BUY).smpStrategy(SmpStrategy.CANCEL_AGGRESSOR)
         return onClientMessage(buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + NewOrderSingleEncoder.BLOCK_LENGTH)
     }
 
     private fun GatewayService.cancel(participantId: Long): ClientMessageAction {
         cancelEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
-            .participantId(participantId).origClOrdId(100).clOrdId(101)
+            .participantId(participantId).origClOrdId((100).toString()).clOrdId((101).toString())
             .exchangeOrderId(1).securityId(1).side(Side.BUY)
         return onClientMessage(
             buffer, 0, MessageHeaderEncoder.ENCODED_LENGTH + OrderCancelRequestEncoder.BLOCK_LENGTH,

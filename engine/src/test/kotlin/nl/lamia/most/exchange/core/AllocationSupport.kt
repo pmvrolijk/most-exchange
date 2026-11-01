@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.core
 
+import nl.lamia.most.exchange.client.ClOrdId
 import nl.lamia.most.exchange.sbe.MessageHeaderEncoder
 import nl.lamia.most.exchange.sbe.NewOrderSingleEncoder
 import nl.lamia.most.exchange.sbe.OrderCancelRequestEncoder
@@ -218,7 +219,6 @@ internal class Driver(
     fun newOrder(participantId: Long, clOrdId: Long, side: Byte, price: Long, qty: Long) {
         newOrderEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId)
-            .clOrdId(clOrdId)
             .price(price)
             .qty(qty)
             .smpId(0L)
@@ -226,6 +226,8 @@ internal class Driver(
             .expireDate(0)
             .side(SbeSide.get(side))
             .smpStrategy(SbeSmpStrategy.get(SmpStrategy.CANCEL_AGGRESSOR))
+        // Allocation-free, as any id written here must be: this thread is the one measured.
+        ClOrdId.encodeDecimal(clOrdId, buffer, newOrderEncoder.offset() + NewOrderSingleEncoder.clOrdIdEncodingOffset())
         service.onSessionMessage(session, 0L, buffer, 0, newOrderLength, header)
     }
 
@@ -275,7 +277,6 @@ internal class Driver(
     fun newOrderExpiring(participantId: Long, clOrdId: Long, side: Byte, price: Long, expires: Int) {
         newOrderEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId)
-            .clOrdId(clOrdId)
             .price(price)
             .qty(1L)
             .smpId(0L)
@@ -283,17 +284,19 @@ internal class Driver(
             .expireDate(expires)
             .side(SbeSide.get(side))
             .smpStrategy(SbeSmpStrategy.get(SmpStrategy.CANCEL_AGGRESSOR))
+        // Allocation-free, as any id written here must be: this thread is the one measured.
+        ClOrdId.encodeDecimal(clOrdId, buffer, newOrderEncoder.offset() + NewOrderSingleEncoder.clOrdIdEncodingOffset())
         service.onSessionMessage(session, 0L, buffer, 0, newOrderLength, header)
     }
 
     fun cancel(participantId: Long, origClOrdId: Long, clOrdId: Long, orderId: Long, side: Byte) {
         cancelEncoder.wrapAndApplyHeader(buffer, 0, headerEncoder)
             .participantId(participantId)
-            .origClOrdId(origClOrdId)
-            .clOrdId(clOrdId)
             .exchangeOrderId(orderId)
             .securityId(Alloc.SECURITY_ID)
             .side(SbeSide.get(side))
+        ClOrdId.encodeDecimal(origClOrdId, buffer, cancelEncoder.offset() + OrderCancelRequestEncoder.origClOrdIdEncodingOffset())
+        ClOrdId.encodeDecimal(clOrdId, buffer, cancelEncoder.offset() + OrderCancelRequestEncoder.clOrdIdEncodingOffset())
         service.onSessionMessage(session, 0L, buffer, 0, cancelLength, header)
     }
 }

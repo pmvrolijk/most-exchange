@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.tools
 
+import nl.lamia.most.exchange.client.ClOrdId
 import io.aeron.Aeron
 import io.aeron.FragmentAssembler
 import io.aeron.Publication
@@ -161,12 +162,16 @@ private fun execute(
         var fencedOn = run.activeGateway
         sendFence(orders, run, ordersBefore = spec.count)
         while (System.nanoTime() < drainDeadline + spec.drainMs * 1_000_000L &&
-            (run.pendingCompletions > 0 || run.statusPending > 0 || run.statusOwed())
+            (run.pendingCompletions > 0 || run.statusPending > 0 || run.statusOwed() || run.fenceWanted)
         ) {
             // Refused by a standby: the receiver has moved on, so fence again where it went.
             if (run.activeGateway != fencedOn) {
                 fencedOn = run.activeGateway
                 sendFence(orders, run, ordersBefore = spec.count)
+            } else if (run.fenceWanted && run.pendingCompletions == 0) {
+                // The last fence left a report missing: ask for it before settling anything.
+                run.fenceWanted = false
+                sendFence(orders, run, ordersBefore = spec.count, bounded = true)
             }
             if (run.statusOwed()) sendStatusRequests(orders, run)
             Thread.onSpinWait()
@@ -205,7 +210,7 @@ private fun send(gateways: List<Publication>, spec: LoadSpec, pool: OrderPool, r
             // A gap in some participant's reportSeq: reports were lost on the way -- a failover the
             // client cannot otherwise see, or a drop under load. Ask, once, from the first missing.
             run.fenceWanted = false
-            sendFence(gateways, run, ordersBefore = i)
+            sendFence(gateways, run, ordersBefore = i, bounded = true)
         }
         // A resend came back TRUNCATED: the reports it could not send are gone, so ask what is open.
         if (run.statusOwed()) sendStatusRequests(gateways, run)
@@ -277,7 +282,6 @@ private fun offer(
             // (MatchingEngineService.kt); applying it here would shift every message by 32 bytes.
             encoder.wrapAndApplyHeader(claim.buffer(), claim.offset(), header)
                 .participantId(pool.participantId[slot])
-                .clOrdId(clOrdId)
                 .price(pool.price[slot])
                 .qty(pool.qty[slot])
                 .smpId(0L)
@@ -285,6 +289,9 @@ private fun offer(
                 .expireDate(0)
                 .side(Side.get(pool.side[slot]))
                 .smpStrategy(SmpStrategy.get(spec.smpStrategy))
+            // The order's index as its decimal string (Design.md §5, "Client order ids"), written in
+            // place: the receiver parses it back to find the order, and nothing is allocated.
+            ClOrdId.encodeDecimal(clOrdId, claim.buffer(), encoder.offset() + NewOrderSingleEncoder.clOrdIdEncodingOffset())
             claim.commit()
             return true
         }
@@ -327,13 +334,14 @@ private fun offer(
  * an order below [ordersBefore] with no report was never sequenced. A request the gateway cannot
  * forward moves to the next gateway, and the fence starts again there.
  */
-private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: Int) {
+private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: Int, bounded: Boolean = false) {
     val header = MessageHeaderEncoder()
     val encoder = ReportResendRequestEncoder()
     val claim = BufferClaim()
     val length = ParticipantRequests.RESEND_REQUEST_LENGTH
     val generation = run.fenceGeneration + 1
     run.fenceOrders[generation.toInt() and FENCE_SLOTS_MASK] = ordersBefore
+    run.fenceClean = true
     run.pendingCompletions = run.spec.participantCount
     run.fenceGeneration = generation
     run.fences++
@@ -343,15 +351,18 @@ private fun sendFence(gateways: List<Publication>, run: LoadRun, ordersBefore: I
             val result = gateways[run.activeGateway].tryClaim(length, claim)
             if (result > 0L) {
                 // A plain publication: encode at claim.offset(), with no cluster session header.
+                // A gap below reports already received is asked for by its bounds, which the receiver
+                // worked out (Design.md §5); a switch or the final fence asks for everything.
                 ParticipantRequests.encodeReportResendRequest(
                     claim.buffer(), claim.offset(), run.ledger.participantId(p), generation,
-                    run.ledger.firstMissing(p), encoder, header,
+                    run.ledger.firstMissing(p), if (bounded) run.gapEnds[p] else ParticipantRequests.UNBOUNDED,
+                    encoder, header,
                 )
                 claim.commit()
                 break
             }
             if (result == Publication.NOT_CONNECTED && switchGateway(gateways, run)) {
-                return sendFence(gateways, run, ordersBefore)
+                return sendFence(gateways, run, ordersBefore, bounded)
             }
             if (result != Publication.BACK_PRESSURED && result != Publication.ADMIN_ACTION ||
                 ++attempts >= BACKPRESSURE_RETRY_LIMIT
@@ -392,7 +403,7 @@ private fun establishBaseline(gateways: List<Publication>, run: LoadRun) {
                 // A plain publication: encode at claim.offset(), with no cluster session header.
                 ParticipantRequests.encodeReportResendRequest(
                     claim.buffer(), claim.offset(), run.ledger.participantId(p), BASELINE_REQUEST_ID,
-                    Long.MAX_VALUE, encoder, header,
+                    Long.MAX_VALUE, ParticipantRequests.UNBOUNDED, encoder, header,
                 )
                 claim.commit()
                 break
@@ -524,7 +535,7 @@ private fun receiveReports(subscriptions: List<Subscription>, run: LoadRun) {
                 // A replay re-sends reports the run already has; count each report once.
                 val gapsBefore = run.ledger.gapsOpened
                 if (!run.ledger.accept(decoder.participantId(), decoder.reportSeq())) return@FragmentAssembler
-                if (run.ledger.gapsOpened != gapsBefore) run.fenceWanted = true
+                if (run.ledger.gapsOpened != gapsBefore) run.wantFence()
                 if (decoder.execType() == ExecType.ORDER_STATUS) {
                     run.onOrderStatus(decoder, System.nanoTime())
                     return@FragmentAssembler
@@ -592,6 +603,21 @@ private class LoadRun(val spec: LoadSpec) {
     @Volatile var fenceWanted = false
     var fences = 0L
 
+    /**
+     * Each participant's gap end for a bounded fence ([ReportLedger.gapEnd]), worked out by the
+     * receiver, which owns the ledger, and published to the sender by the volatile [fenceWanted].
+     */
+    val gapEnds = LongArray(spec.participantCount)
+
+    /** False once a completion of the fence in flight left a report below its nextSeq missing. */
+    @Volatile var fenceClean = true
+
+    /** Receiver thread: a fence is owed, bounded to each participant's gap where it has one. */
+    fun wantFence() {
+        for (p in 0..<spec.participantCount) gapEnds[p] = ledger.gapEnd(p)
+        fenceWanted = true
+    }
+
     /** Orders below this index were settled by a completed fence. Receiver thread. */
     @Volatile var settledBefore = 0
     var replayed = 0L
@@ -629,7 +655,7 @@ private class LoadRun(val spec: LoadSpec) {
      */
     fun onOrderStatus(decoder: ClientExecutionReportDecoder, nowNs: Long) {
         statusReportsSeen++
-        val index = decoder.clOrdId() - spec.clOrdIdBase
+        val index = orderIndex(decoder)
         if (index < 0L || index >= spec.count) return
         val i = index.toInt()
         if (sendNs[i] == 0L || ackNs[i] != 0L) return
@@ -663,8 +689,19 @@ private class LoadRun(val spec: LoadSpec) {
                     truncatedParticipant[p] = true
                     statusWanted.set(p, 1)
                 }
-                else if (p in 0..<spec.participantCount) missingAfterComplete += ledger.missingBelow(p, decoder.nextSeq())
-                if (--pendingCompletions == 0) {
+                else if (p in 0..<spec.participantCount) {
+                    val missing = ledger.missingBelow(p, decoder.nextSeq())
+                    if (missing > 0L) {
+                        // Nothing is settled until every report below nextSeq is held (Design.md §5,
+                        // "The request is a fence"). Above a bounded fence's toSeq that is a report the
+                        // gateway dropped on the way, and the next fence asks for it; below an
+                        // unbounded one it is a report the engine says it sent and never arrived.
+                        fenceClean = false
+                        if (decoder.toSeq() == ParticipantRequests.UNBOUNDED) missingAfterComplete += missing
+                        wantFence()
+                    }
+                }
+                if (--pendingCompletions == 0 && fenceClean) {
                     settledBefore = fenceOrders[decoder.requestId().toInt() and FENCE_SLOTS_MASK]
                 }
             }
@@ -701,8 +738,16 @@ private class LoadRun(val spec: LoadSpec) {
      */
     private var maxAckedIndex = -1
 
+    /** The run's index of the order a report is for, or -1 when its id is not one this run sent. */
+    private fun orderIndex(decoder: ClientExecutionReportDecoder): Long {
+        val sent = ClOrdId.parseDecimal(
+            decoder.buffer(), decoder.offset() + ClientExecutionReportDecoder.clOrdIdEncodingOffset(),
+        )
+        return if (sent < 0L) -1L else sent - spec.clOrdIdBase
+    }
+
     fun onReport(decoder: ClientExecutionReportDecoder, nowNs: Long) {
-        val index = decoder.clOrdId() - spec.clOrdIdBase
+        val index = orderIndex(decoder)
         val participant = decoder.participantId()
         if (index < 0L || index >= spec.count ||
             participant < spec.participantBase ||

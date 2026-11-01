@@ -1,5 +1,6 @@
 package nl.lamia.most.exchange.gateway
 
+import nl.lamia.most.exchange.client.ClOrdId
 import nl.lamia.most.exchange.sbe.ClientExecutionReportEncoder
 import nl.lamia.most.exchange.sbe.Enrichment
 import nl.lamia.most.exchange.sbe.ExecType
@@ -126,6 +127,21 @@ class GatewayService(
     var refusedCommands = 0L
         private set
 
+    /**
+     * Orders and cancels refused `INVALID_CL_ORD_ID`: an id that is not 1-20 characters of the
+     * charset, NUL-padded (Design.md §5, "Client order ids"). Also counted in [rejectedLocally].
+     */
+    var invalidClOrdIdRejects = 0L
+        private set
+
+    /**
+     * Orders and cancels from a client, and reports from an engine, in a schema version before 8:
+     * dropped, since their layout cannot be read as version 8, and nothing this gateway sends could
+     * be read by the client that sent one.
+     */
+    var refusedSchemaVersion = 0L
+        private set
+
     // ------------------------------------------------------------- inbound
 
     /**
@@ -149,12 +165,18 @@ class GatewayService(
         // backpressure still cost this process the time, and dropping those samples would make the
         // leg look fastest exactly when the cluster is struggling.
         val action = when (header.templateId()) {
-            NewOrderSingleDecoder.TEMPLATE_ID -> {
+            NewOrderSingleDecoder.TEMPLATE_ID -> if (version < ClOrdId.SINCE_SCHEMA_VERSION) {
+                refusedSchemaVersion++
+                ClientMessageAction.CONSUME
+            } else {
                 newOrder.wrap(buffer, body, blockLength, version)
                 onNewOrder(buffer, offset, length)
             }
 
-            OrderCancelRequestDecoder.TEMPLATE_ID -> {
+            OrderCancelRequestDecoder.TEMPLATE_ID -> if (version < ClOrdId.SINCE_SCHEMA_VERSION) {
+                refusedSchemaVersion++
+                ClientMessageAction.CONSUME
+            } else {
                 cancel.wrap(buffer, body, blockLength, version)
                 onCancel(buffer, offset, length)
             }
@@ -196,20 +218,22 @@ class GatewayService(
         length: Int,
     ): ClientMessageAction {
         val participantId = newOrder.participantId()
-        val clOrdId = newOrder.clOrdId()
+        val clOrdId = newOrder.offset() + NewOrderSingleDecoder.clOrdIdEncodingOffset()
         val securityId = newOrder.securityId()
         val qty = newOrder.qty()
         val price = newOrder.price()
         val side = newOrder.side()
 
         // First, so a participant this gateway may not act for learns nothing about the shard.
-        val reason = if (!access.mayPlace(participantId)) RejectReason.UNAUTHORIZED_PARTICIPANT
-        else validate(securityId, qty, price)
+        val reason = when {
+            !access.mayPlace(participantId) -> RejectReason.UNAUTHORIZED_PARTICIPANT
+            !ClOrdId.isValid(buffer, clOrdId) -> RejectReason.INVALID_CL_ORD_ID
+            else -> validate(securityId, qty, price)
+        }
         if (reason != RejectReason.NONE) {
-            if (reason == RejectReason.UNAUTHORIZED_PARTICIPANT) unauthorizedRejects++
-            else rejectedLocally++
+            countLocalReject(reason)
             emitClientReport(
-                participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
+                participantId, buffer, clOrdId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
                 price = price, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = qty,
                 rejectReason = reason,
             )
@@ -223,7 +247,7 @@ class GatewayService(
             ClusterOffer.FAILED -> {
                 unreachableRejects++
                 emitClientReport(
-                    participantId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
+                    participantId, buffer, clOrdId, clOrdId, 0L, securityId, ExecType.REJECTED, side,
                     price = price, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = qty,
                     rejectReason = RejectReason.GATEWAY_UNAVAILABLE,
                 )
@@ -238,19 +262,22 @@ class GatewayService(
         length: Int,
     ): ClientMessageAction {
         val securityId = cancel.securityId()
+        val clOrdId = cancel.offset() + OrderCancelRequestDecoder.clOrdIdEncodingOffset()
+        val origClOrdId = cancel.offset() + OrderCancelRequestDecoder.origClOrdIdEncodingOffset()
         // Checked, not trusted: the engine's own cancel check is that this participant id matches
         // the order's, which only means something once the gateway has established the id is one
         // this endpoint may use (Design.md §1).
         val reason = when {
             !access.mayCancel(cancel.participantId()) -> RejectReason.UNAUTHORIZED_PARTICIPANT
+            !ClOrdId.isValid(buffer, clOrdId) || !ClOrdId.isValid(buffer, origClOrdId) ->
+                RejectReason.INVALID_CL_ORD_ID
             indexOf(securityId) < 0 -> RejectReason.UNKNOWN_SECURITY
             else -> RejectReason.NONE
         }
         if (reason != RejectReason.NONE) {
-            if (reason == RejectReason.UNAUTHORIZED_PARTICIPANT) unauthorizedRejects++
-            else rejectedLocally++
+            countLocalReject(reason)
             emitClientReport(
-                cancel.participantId(), cancel.clOrdId(), cancel.exchangeOrderId(), securityId,
+                cancel.participantId(), buffer, clOrdId, origClOrdId, cancel.exchangeOrderId(), securityId,
                 ExecType.REJECTED, cancel.side(),
                 price = 0L, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = 0L,
                 rejectReason = reason,
@@ -263,7 +290,7 @@ class GatewayService(
             ClusterOffer.FAILED -> {
                 unreachableRejects++
                 emitClientReport(
-                    cancel.participantId(), cancel.clOrdId(), cancel.exchangeOrderId(), securityId,
+                    cancel.participantId(), buffer, clOrdId, origClOrdId, cancel.exchangeOrderId(), securityId,
                     ExecType.REJECTED, cancel.side(),
                     price = 0L, lastQty = 0L, leavesQty = 0L, cumQty = 0L, origQty = 0L,
                     rejectReason = RejectReason.GATEWAY_UNAVAILABLE,
@@ -351,10 +378,23 @@ class GatewayService(
             .oldestRetainedSeq(0L)
             .replayedCount(0)
             .status(status)
+            // Echoed as the engine echoes it: 0 for no bound, whatever a version 7 request decodes to.
+            .toSeq(resendRequest.toSeq().let { if (it <= 0L) 0L else it })
         sink.toClient(
             outbound, 0,
             MessageHeaderEncoder.ENCODED_LENGTH + ReportResendCompleteEncoder.BLOCK_LENGTH,
         )
+    }
+
+    private fun countLocalReject(reason: RejectReason) {
+        when (reason) {
+            RejectReason.UNAUTHORIZED_PARTICIPANT -> unauthorizedRejects++
+            RejectReason.INVALID_CL_ORD_ID -> {
+                invalidClOrdIdRejects++
+                rejectedLocally++
+            }
+            else -> rejectedLocally++
+        }
     }
 
     /**
@@ -387,6 +427,12 @@ class GatewayService(
             return
         }
         if (header.templateId() != ExecutionReportDecoder.TEMPLATE_ID) return
+        // Version 8 changed the layout in place: an older engine's report would be read as somebody
+        // else's numbers. Dropped and counted, as an older client's order is (Design.md §5).
+        if (header.version() < ClOrdId.SINCE_SCHEMA_VERSION) {
+            refusedSchemaVersion++
+            return
+        }
         // Started after the template check, so a foreign fragment is not counted as a report the
         // gateway handled quickly.
         val started = if (metrics != null) metrics.nanoTime() else 0L
@@ -398,22 +444,22 @@ class GatewayService(
         )
 
         val participantId = execReport.participantId()
-        val clOrdId = execReport.clOrdId()
         val exchangeOrderId = execReport.exchangeOrderId()
         val execType = execReport.execType()
         val leavesQty = execReport.leavesQty()
 
-        // Both stated by the engine. A version 2 report carries neither, and an order restored
-        // from a version 2 snapshot carries origQty = 0 -- in both cases the number is genuinely
-        // unknown, and saying so is the point: cumQty = 0 on a half-filled order is a confident
-        // lie the client has no way to detect. A rejected order has no accumulated quantity to
-        // know, so it is not counted as a loss.
+        // Both stated by the engine. An order restored from a version 2 snapshot carries
+        // origQty = 0 -- the number is genuinely unknown, and saying so is the point: cumQty = 0 on
+        // a half-filled order is a confident lie the client has no way to detect. A rejected order
+        // has no accumulated quantity to know, so it is not counted as a loss.
         val reportedOrigQty = execReport.origQty()
-        val known = reportedOrigQty != ORIG_QTY_ABSENT && reportedOrigQty != 0L
+        val known = reportedOrigQty != 0L
         if (!known && execType != ExecType.REJECTED) untrackedReports++
 
         emitClientReport(
-            participantId, clOrdId, exchangeOrderId, execReport.securityId(), execType,
+            participantId, buffer, execReport.offset() + ExecutionReportDecoder.clOrdIdEncodingOffset(),
+            execReport.offset() + ExecutionReportDecoder.origClOrdIdEncodingOffset(),
+            exchangeOrderId, execReport.securityId(), execType,
             execReport.side(), price = execReport.price(), lastQty = execReport.lastQty(),
             leavesQty = leavesQty,
             cumQty = if (known) execReport.cumQty() else 0L,
@@ -421,18 +467,24 @@ class GatewayService(
             rejectReason = execReport.rejectReason(),
             enrichment = if (known || execType == ExecType.REJECTED) Enrichment.KNOWN
             else Enrichment.UNKNOWN,
-            // Copied, never assigned here: the sequence is the engine's, per participant. A report
-            // from an engine older than version 6 has none, and 0 says so.
-            reportSeq = execReport.reportSeq().let { if (it == REPORT_SEQ_ABSENT) 0L else it },
+            // Copied, never assigned here: the sequence is the engine's, per participant.
+            reportSeq = execReport.reportSeq(),
         )
 
         metrics?.outbound?.record(metrics.nanoTime() - started)
     }
 
+    /**
+     * [ids] holds the report's two client order ids at [clOrdIdAt] and [origClOrdIdAt]: the engine's
+     * report on the way out, or the client's own request for a report the gateway makes itself. They
+     * are copied byte for byte, never parsed (Design.md §5, "Client order ids").
+     */
     @Suppress("LongParameterList")
     private fun emitClientReport(
         participantId: Long,
-        clOrdId: Long,
+        ids: DirectBuffer,
+        clOrdIdAt: Int,
+        origClOrdIdAt: Int,
         exchangeOrderId: Long,
         securityId: Int,
         execType: ExecType,
@@ -458,7 +510,6 @@ class GatewayService(
     ) {
         clientReport.wrapAndApplyHeader(outbound, 0, headerEncoder)
             .participantId(participantId)
-            .clOrdId(clOrdId)
             .exchangeOrderId(exchangeOrderId)
             .price(price)
             .lastQty(lastQty)
@@ -471,6 +522,9 @@ class GatewayService(
             .side(side)
             .enrichment(enrichment)
             .reportSeq(reportSeq)
+        val body = clientReport.offset()
+        ClOrdId.copy(ids, clOrdIdAt, outbound, body + ClientExecutionReportEncoder.clOrdIdEncodingOffset())
+        ClOrdId.copy(ids, origClOrdIdAt, outbound, body + ClientExecutionReportEncoder.origClOrdIdEncodingOffset())
         sink.toClient(
             outbound, 0,
             MessageHeaderEncoder.ENCODED_LENGTH + ClientExecutionReportEncoder.BLOCK_LENGTH,
@@ -482,11 +536,4 @@ class GatewayService(
         return -1
     }
 
-    private companion object {
-        /** What an `origQty` decodes to on a report from an engine older than schema version 3. */
-        val ORIG_QTY_ABSENT: Long = ExecutionReportDecoder.origQtyNullValue()
-
-        /** What a `reportSeq` decodes to on a report from an engine older than schema version 6. */
-        val REPORT_SEQ_ABSENT: Long = ExecutionReportDecoder.reportSeqNullValue()
-    }
 }

@@ -506,10 +506,14 @@ nothing here, and are the cheaper next look.
 | Structure | Size |
 | --- | --- |
 | Order pool: 10 books × 1M orders × 64 B | 640 MB |
+| Cold words (§3.1): 10 books × 1M orders × 32 B, `origQty` and the 20-byte `clOrdId` | 320 MB |
 | `orderIdToIndex` maps: 10 × ~34 MB (`Long2LongHashMap`, 2²¹ slots × 16 B) | 336 MB |
 | Price ladders: 10 books × 2 sides × 65,536 levels × 20 B | 26 MB |
-| Report ring (§5, "Report sequence and resend"): 1,048,576 reports × 96 B, plus per-slot participant, sequence and two links | 124 MB |
-| **Total** | **~1.1 GB** |
+| Report ring (§5, "Report sequence and resend"): 1,048,576 reports × 128 B, plus per-slot participant, sequence and two links | 156 MB |
+| **Total** | **~1.5 GB** |
+
+Version 8 (§5, "Client order ids") added 240 MB of cold words and 32 MB of ring to the ~1.2 GB
+before it. The table above version 8 left the 80 MB of cold words out.
 
 Allocated eagerly at startup and never grown. This footprint mandates huge pages (§7).
 
@@ -572,11 +576,17 @@ resting order continue to participate in matching with its true remaining quanti
 
 **`origQty` is stored, in a cold word beside the line rather than in it.** Self-match prevention
 (§4.5) requires an `smpId` on every resting order and the eight words are full, so a parallel
-`LongArray` — `ColdField`, stride 1 today — carries what matching does not read. It is touched only
-where an execution report is generated or the book is walked for a snapshot, never inside the
-matching loop, so it costs a cache miss on paths that were already taking one and nothing at all on
-the path the budget in §2 is about. Eight bytes an order: 8 MB per million-order book, 80 MB per
-shard against the ~0.9 GB of §2.
+`LongArray` — `ColdField` — carries what matching does not read. It is touched only where an
+execution report is generated, a cancel is checked, or the book is walked for a snapshot, never inside
+the matching loop, so it costs a cache miss on paths that were already taking one and nothing at all
+on the path the budget in §2 is about.
+
+**Since version 8 the client's order id is there too** (§5, "Client order ids"): `ColdField` is
+stride 4, `origQty` and the 20-byte `clOrdId` as three words, 32 bytes, two orders to a cache line.
+A maker's report reads `origQty` from the same line, so the id costs no second miss. That freed word
+4 of the order's line, `OrderField.SPARE`: the first candidate for an attribute that matching does
+read, such as an iceberg's display quantity. Thirty-two bytes an order: 32 MB per million-order book,
+320 MB per shard.
 
 That reverses an earlier decision, and the reason is worth stating. `origQty` used to live only in
 the gateway, which reconstructed `cumQty` from the `origQty` it had sent. It worked, and it made the
@@ -1001,8 +1011,11 @@ Fields are declared in descending width order so natural alignment falls out of 
 | `25` | `SessionChanged` | Outbound, book event | IPC 12 |
 | `26` | `VolatilityHalted` | Outbound, book event | IPC 12 |
 | `27`–`29` | `BookImageBegin` / `BookImageLevel` / `BookImageEnd` | Outbound, book event | IPC 12 |
-| `30`–`33` | `SnapshotEngineState` / `SnapshotBook` / `SnapshotOrder` / `SnapshotEnd` | Snapshot | Cluster snapshot |
+| `30`–`31` | `SnapshotEngineState` / `SnapshotBook` | Snapshot | Cluster snapshot |
+| `32` | `SnapshotOrderV7` | Snapshot, read only: an order with the int64 `clOrdId` of a snapshot before version 8 | Cluster snapshot |
+| `33` | `SnapshotEnd` | Snapshot | Cluster snapshot |
 | `34` | `SnapshotReportSeq` | Snapshot, one per participant | Cluster snapshot |
+| `35` | `SnapshotOrder` | Snapshot: an order, with its `char[20]` `clOrdId` (version 8) | Cluster snapshot |
 
 The snapshot messages are cluster-internal and never reach a client. A snapshot walks each book's
 ladders and writes only **occupied** orders, never the whole 1M-slot pool; restoring replays them in
@@ -1109,6 +1122,47 @@ engine, so an event stamped with another shard means it is pointed at the wrong 
 counted and dropped rather than aggregated, which turns a misconfiguration that would have silently
 folded another shard's orders into these books into a visible counter.
 
+#### Client order ids
+
+**A participant's order ids are its own, carried through the exchange as sent** (decided
+2026-11-01, §8 "String client order ids"; schema version 8). The FIX adapter no longer derives an
+integer per request, and a drop copy can state the id the participant used.
+
+* **`ClOrdId` is `char[20]`, US-ASCII, NUL-padded.** A valid id has 1 to 20 characters from
+  `A-Z a-z 0-9 - _ + ; : . /`, starting at the first byte, and every byte after the first NUL is NUL.
+  That is the only form two ids compare in: byte for byte, all 20 bytes. `client`'s `ClOrdId` is the
+  one implementation of the rule, and the gateway, the CLI and the SDK all use it.
+* **The gateway checks every id** on `NewOrderSingle` (`clOrdId`) and `OrderCancelRequest` (`clOrdId`
+  and `origClOrdId`) and refuses a malformed one before the log, with a local reject of
+  `RejectReason.INVALID_CL_ORD_ID` that echoes the 20 bytes as sent. **The engine never validates an
+  id.** It holds the bytes and compares them, which is deterministic whatever they are.
+* **Every `ExecutionReport` and `ClientExecutionReport` carries both `clOrdId` and `origClOrdId`.**
+  A participant's cancel is answered with the cancel's `clOrdId` and the order's `origClOrdId`: its
+  `CANCELED` report, or its `REJECTED` one with the `origClOrdId` the cancel named. Every other report
+  states the order's own id in both: a new order's, a fill's, an unsolicited cancel's (self-match
+  prevention, a volatility halt, a bulk cancel), an expiry's, an `ORDER_STATUS`.
+* **The engine holds the id in `ColdField`** (§3.1), never in the order's cache line. A cancel names
+  its order by `exchangeOrderId` and is refused `UNAUTHORIZED_PARTICIPANT` unless its participant and
+  `origClOrdId` match the order's, as before. The engine does not check that an id is unique; that is
+  still the client's (Adapters.md §2).
+* **Version 8 changes the layout of `NewOrderSingle`, `OrderCancelRequest`, `ExecutionReport` and
+  `ClientExecutionReport` in place**, so an earlier version of those four cannot be decoded as
+  version 8.
+  * **The gateway** drops a version 7 order or cancel from a client, unanswered, since it can send
+    nothing a version 7 client could read, and counts it (`refusedSchemaVersion`). It drops and
+    counts an `ExecutionReport` from an engine before version 8 the same way, rather than read
+    another layout's bytes as one.
+  * **The engine refuses** a version 7 order or cancel in the log. It can only be a log tail written
+    under version 7, or a gateway that was not upgraded. It stops applying and exits non-zero,
+    through `SchemaMismatch`, as a configuration mismatch does.
+  * **The schema version is part of the engine fingerprint**, so a cluster of mixed versions refuses
+    through the announcement (§7, "Enforced through the log").
+  * **The upgrade is `most cluster shutdown` and a restart on version 8**, which leaves a snapshot at
+    the end of the log. A version 7 snapshot restores: its orders are `SnapshotOrderV7` (id 32), and
+    each integer `clOrdId` becomes its decimal string. Every `int64` fits in 20 characters,
+    `Long.MIN_VALUE` exactly. Version 8 writes `SnapshotOrder` (id 35).
+* **The four `requestId` fields keep `int64`**, as their own type, `RequestId`.
+
 #### Report sequence and resend
 
 **A participant can always learn the outcome of an order it sent, and of every fill against it,
@@ -1119,32 +1173,47 @@ including across a failover** (decided 2026-10-03; §8 has the reasoning). Schem
   node whether or not the report is delivered**, because a follower's egress is mocked and a new
   leader's goes nowhere until its gateway reconnects, and the counter must agree regardless. The
   gateway copies it onto `ClientExecutionReport`. A report the gateway makes itself (a local reject)
-  carries `0`: it never reached the log and has no place in the sequence. A report from before
-  version 6 decodes as `0` too.
+  carries `0`: it never reached the log and has no place in the sequence. ~~A report from before
+  version 6 decodes as `0` too.~~ *Superseded by version 8* ("Client order ids"): the gateway drops a
+  report from before version 8 instead of translating it.
 * **Retention.** Every node keeps the last `engine.reportRetention` reports in a preallocated ring,
   chained per participant. Every node generates the same reports, so every node holds the same ring,
   and the new leader after a failover holds the reports that were never delivered. The ring is not
   snapshotted.
-* **`ReportResendRequest(participantId, requestId, fromSeq)`.** The gateway checks it as it checks a
+* **`ReportResendRequest(participantId, requestId, fromSeq, toSeq)`.** The gateway checks it as it checks a
   cancel. It refuses with a `ReportResendComplete` of status `UNAUTHORIZED_PARTICIPANT` or
   `GATEWAY_UNAVAILABLE`, exactly where it would refuse an order. The engine sequences it like an
-  order. It replays that participant's retained reports from `fromSeq`, each with its original
-  `reportSeq`, on the requesting session, then sends **`ReportResendComplete`**: `nextSeq` (everything
-  below it has now been sent), `oldestRetainedSeq`, `replayedCount`, and `COMPLETE`, or `TRUNCATED`
-  when the reports between `fromSeq` and `oldestRetainedSeq` are no longer retained. **A `fromSeq`
+  order. It replays that participant's retained reports from `fromSeq` to `toSeq` inclusive, each with
+  its original `reportSeq`, on the requesting session, then sends **`ReportResendComplete`**: `nextSeq`
+  (the participant's next `reportSeq`: every report below it was generated before the request), the
+  `fromSeq` and `toSeq` asked for, `oldestRetainedSeq`, `replayedCount`, and `COMPLETE`, or `TRUNCATED`
+  when some of the reports asked for, between `fromSeq` and `oldestRetainedSeq`, are no longer
+  retained. **`toSeq` 0 asks for everything** retained from `fromSeq` on, which is what a version 7
+  request, which has no `toSeq`, is read as. `toSeq` added in version 8. **A `fromSeq`
   past the participant's last report replays nothing** and completes `COMPLETE`, so its `nextSeq` is
   a cheap answer to "where does my sequence stand". `most load` asks it before its first order. A
   client that starts at 1 on a cluster that has numbered reports already sees its first report as a
   gap, and the fence then replays the whole ring.
-* **The request is a fence.** Everything sequenced before it is reflected in the replay. So after the
-  completion, an unacknowledged order with no report **was never sequenced**: the client rejects it
-  upstream or resends it, and either way it executes at most once. A gap in `reportSeq` is how a maker
-  learns it missed a fill.
+* **The request is a fence.** Every report generated before it is numbered below `nextSeq`, and egress
+  to one session is ordered, so the live reports above `toSeq` were sent before the completion too. So
+  **once a client holds every report below `nextSeq`, an unacknowledged order sent before the request
+  with no report was never sequenced**: the client rejects it upstream or resends it, and either way
+  it executes at most once. A client still missing a report below `nextSeq` after the completion (one
+  the gateway dropped on the way, open issue 1) fences again before it settles anything. A gap in
+  `reportSeq` is how a maker learns it missed a fill.
+* **A gap is asked for by its bounds** (decided 2026-11-01, §8 "A resend is bounded only below").
+  Unbounded, one lost report replays everything retained after it: 1.3–2.4M duplicates at the knee,
+  into an egress that is already full (Measurements.md, "The harness replayed the ring"). A client
+  that has received reports above a gap asks for `fromSeq` = the gap's first missing and `toSeq` = its
+  last. After a gateway switch, or for an order unanswered too long, it asks unbounded (`toSeq` 0),
+  because what it may be missing lies above everything it has seen.
 
-**What a client does.** It tracks the `reportSeq` it has received per participant. On a gap, or
-after it switches gateway, it sends one `ReportResendRequest` per participant from its first
-missing report, counts a replayed report it already had once, and after the completions treats
-every still-unanswered order sent before the request as never sequenced. `most load` is the worked
+**What a client does.** It tracks the `reportSeq` it has received per participant. On a gap it sends
+a bounded `ReportResendRequest` for that gap; after it switches gateway, or when an order has gone
+unanswered too long, an unbounded one from its first missing report. It counts a replayed report it
+already had once. After a completion, if it holds every report below `nextSeq`, it treats every
+still-unanswered order sent before the request as never sequenced; if it does not, it fences again
+for what is still missing. `most load` is the worked
 example (`ReportLedger`). `e2e/run-failover.sh` requires that no order is left unknown in either
 placement.
 
@@ -1167,7 +1236,8 @@ deferred: the client fence is needed for the never-sequenced orders either way.
 **Implementation.**
 - `MatchingEngineService.sendExecutionReport` numbers and retains first, then routes.
 - `ReportRing` is the ring.
-- The leader copies the retained report into its `tryClaim`: one 96 B copy, never an `offer`.
+- The leader copies the retained report into its `tryClaim`: one 128 B copy (96 B before version 8),
+  never an `offer`. A ring slot is 128 B.
 - `SnapshotReportSeq` (id 34) carries each participant's last sequence, counted by
   `participantSeqCount` on `SnapshotEngineState`. The ring is not snapshotted.
 - `engine.reportRetention` is in the engine fingerprint.
@@ -1327,7 +1397,7 @@ answers, and a consumer must not render the first when it means the second.
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
 <sbe:messageSchema xmlns:sbe="http://fixprotocol.io/2016/sbe"
-                   package="nl.lamia.most.exchange.sbe" id="1" version="7"
+                   package="nl.lamia.most.exchange.sbe" id="1" version="8"
                    semanticVersion="1.0" byteOrder="littleEndian">
   <types>
     <!-- SBE frame header: 8 bytes, so every message body starts 8-byte aligned. -->
@@ -1339,7 +1409,14 @@ answers, and a consumer must not render the first when it means the second.
     </composite>
 
     <type name="ParticipantId"   primitiveType="int64"/>
-    <type name="ClOrdId"         primitiveType="int64"/>
+    <!-- A participant's own order id (Design.md §5, "Client order ids"): 1-20 characters of
+         A-Z a-z 0-9 - _ + ; : . /, NUL-padded. Checked by the gateway, opaque to the engine.
+         client's ClOrdId is the one implementation of the rule. An int64 before version 8. -->
+    <type name="ClOrdId"         primitiveType="char" length="20" characterEncoding="US-ASCII"/>
+    <!-- The int64 clOrdId of version 7, kept for SnapshotOrderV7 only. -->
+    <type name="ClOrdIdV7"       primitiveType="int64"/>
+    <!-- A client's own id for a resend or a status request, echoed on the completion. -->
+    <type name="RequestId"       primitiveType="int64"/>
     <type name="ExchangeOrderId" primitiveType="int64"/>
     <type name="SecurityId"      primitiveType="int32"/>
     <type name="Price"           primitiveType="int64" description="Fixed point, 8 implied decimals"/>
@@ -1414,6 +1491,9 @@ answers, and a consumer must not render the first when it means the second.
       <!-- Gateway-only: the cluster session could not accept the message. The engine
            never emits it, since a message it never saw cannot be rejected by it. -->
       <validValue name="GATEWAY_UNAVAILABLE">11</validValue>
+      <!-- Gateway-only: a clOrdId or origClOrdId that is not 1-20 characters of the charset, NUL-padded
+           (Design.md §5, "Client order ids"). The engine never emits it. Added in version 8. -->
+      <validValue name="INVALID_CL_ORD_ID">12</validValue>
     </enum>
     <!-- How a participant's request ended: a ReportResendRequest or an OrderMassStatusRequest.
          COMPLETE: everything asked for was sent. TRUNCATED (resend only): the reports from fromSeq
@@ -1431,25 +1511,29 @@ answers, and a consumer must not render the first when it means the second.
 
   <!-- ============================ Inbound ============================ -->
 
-  <sbe:message name="NewOrderSingle" id="1" blockLength="56">
-    <field name="participantId" id="1" type="ParticipantId"/>
-    <field name="clOrdId"       id="2" type="ClOrdId"/>
-    <field name="price"         id="3" type="Price"/>
-    <field name="qty"           id="4" type="Quantity"/>
-    <field name="smpId"         id="5" type="SmpId"/>
-    <field name="securityId"    id="6" type="SecurityId"/>
-    <field name="expireDate"    id="7" type="TradingDate"/>
-    <field name="side"          id="8" type="Side"/>
-    <field name="smpStrategy"   id="9" type="SmpStrategy"/>
+  <!-- Version 8 changed the layout in place: clOrdId is char[20], at the end of the block. A version 7
+       order cannot be read as version 8; the gateway drops one and the engine refuses one (Design.md
+       §5, "Client order ids"). -->
+  <sbe:message name="NewOrderSingle" id="1" blockLength="64">
+    <field name="participantId" id="1" type="ParticipantId" offset="0"/>
+    <field name="price"         id="3" type="Price"         offset="8"/>
+    <field name="qty"           id="4" type="Quantity"      offset="16"/>
+    <field name="smpId"         id="5" type="SmpId"         offset="24"/>
+    <field name="securityId"    id="6" type="SecurityId"    offset="32"/>
+    <field name="expireDate"    id="7" type="TradingDate"   offset="36"/>
+    <field name="side"          id="8" type="Side"          offset="40"/>
+    <field name="smpStrategy"   id="9" type="SmpStrategy"   offset="41"/>
+    <field name="clOrdId"       id="2" type="ClOrdId"       offset="44"/>
   </sbe:message>
 
-  <sbe:message name="OrderCancelRequest" id="2" blockLength="40">
-    <field name="participantId"   id="1" type="ParticipantId"/>
-    <field name="origClOrdId"     id="2" type="ClOrdId"/>
-    <field name="clOrdId"         id="3" type="ClOrdId"/>
-    <field name="exchangeOrderId" id="4" type="ExchangeOrderId"/>
-    <field name="securityId"      id="5" type="SecurityId"/>
-    <field name="side"            id="6" type="Side"/>
+  <!-- Version 8 changed the layout in place, as for NewOrderSingle. -->
+  <sbe:message name="OrderCancelRequest" id="2" blockLength="64">
+    <field name="participantId"   id="1" type="ParticipantId"   offset="0"/>
+    <field name="exchangeOrderId" id="4" type="ExchangeOrderId" offset="8"/>
+    <field name="securityId"      id="5" type="SecurityId"      offset="16"/>
+    <field name="side"            id="6" type="Side"            offset="20"/>
+    <field name="origClOrdId"     id="2" type="ClOrdId"         offset="24"/>
+    <field name="clOrdId"         id="3" type="ClOrdId"         offset="44"/>
   </sbe:message>
 
   <sbe:message name="SessionTransition" id="3" blockLength="16">
@@ -1498,12 +1582,15 @@ answers, and a consumer must not render the first when it means the second.
        "Report sequence and resend"). Sent after a failover, or on any gap in reportSeq. The gateway
        checks it as it checks a cancel. The engine sequences it like any order, so it is a fence:
        every report generated before it is replayed, ReportResendComplete follows, and an order of
-       this participant's that still has no report after that was never sequenced. requestId is the
-       client's own, echoed on the completion. Added in version 6. -->
-  <sbe:message name="ReportResendRequest" id="9" blockLength="24" sinceVersion="6">
+       this participant's that still has no report after that was never sequenced, once every report
+       below the completion's nextSeq is held. requestId is the client's own, echoed on the
+       completion. Added in version 6. toSeq bounds the replay, inclusive; 0 asks for everything from
+       fromSeq on, and is what a version 7 request, which has none, is read as. Added in version 8. -->
+  <sbe:message name="ReportResendRequest" id="9" blockLength="32" sinceVersion="6">
     <field name="participantId" id="1" type="ParticipantId"/>
-    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="requestId"     id="2" type="RequestId"/>
     <field name="fromSeq"       id="3" type="SeqNum"/>
+    <field name="toSeq"         id="4" type="SeqNum" offset="24" sinceVersion="8"/>
   </sbe:message>
 
   <!-- A participant asking for the state of all its open orders (Design.md §5, "Order mass
@@ -1514,7 +1601,7 @@ answers, and a consumer must not render the first when it means the second.
        OrderMassStatusComplete. Added in version 7. -->
   <sbe:message name="OrderMassStatusRequest" id="12" blockLength="24" sinceVersion="7">
     <field name="participantId" id="1" type="ParticipantId"/>
-    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="requestId"     id="2" type="RequestId"/>
     <field name="securityId"    id="3" type="SecurityId"/>
   </sbe:message>
 
@@ -1540,21 +1627,25 @@ answers, and a consumer must not render the first when it means the second.
        reportSeq is this participant's report sequence, from 1, gap-free, and consumed on every node
        whether or not the report reaches anyone (Design.md §5, "Report sequence and resend"). A
        replayed report carries its original reportSeq. Absent before version 6, read as 0: not
-       sequenced. -->
-  <sbe:message name="ExecutionReport" id="10" blockLength="88">
-    <field name="participantId"   id="1" type="ParticipantId"/>
-    <field name="clOrdId"         id="2" type="ClOrdId"/>
-    <field name="exchangeOrderId" id="3" type="ExchangeOrderId"/>
-    <field name="price"           id="4" type="Price"/>
-    <field name="lastQty"         id="5" type="Quantity"/>
-    <field name="leavesQty"       id="6" type="Quantity"/>
-    <field name="securityId"      id="7" type="SecurityId"/>
-    <field name="rejectReason"    id="8" type="RejectReason"/>
-    <field name="execType"        id="9" type="ExecType"/>
-    <field name="side"            id="10" type="Side"/>
-    <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
-    <field name="cumQty"          id="12" type="Quantity" offset="72" sinceVersion="3"/>
-    <field name="reportSeq"       id="13" type="SeqNum"   offset="80" sinceVersion="6"/>
+       sequenced.
+       Version 8 changed the layout in place: clOrdId is char[20], and origClOrdId is added. A cancel's
+       report carries the cancel's clOrdId and the order's origClOrdId; every other report carries the
+       order's own id in both (Design.md §5, "Client order ids"). -->
+  <sbe:message name="ExecutionReport" id="10" blockLength="120">
+    <field name="participantId"   id="1"  type="ParticipantId"   offset="0"/>
+    <field name="exchangeOrderId" id="3"  type="ExchangeOrderId" offset="8"/>
+    <field name="price"           id="4"  type="Price"           offset="16"/>
+    <field name="lastQty"         id="5"  type="Quantity"        offset="24"/>
+    <field name="leavesQty"       id="6"  type="Quantity"        offset="32"/>
+    <field name="origQty"         id="11" type="Quantity"        offset="40"/>
+    <field name="cumQty"          id="12" type="Quantity"        offset="48"/>
+    <field name="reportSeq"       id="13" type="SeqNum"          offset="56"/>
+    <field name="securityId"      id="7"  type="SecurityId"      offset="64"/>
+    <field name="rejectReason"    id="8"  type="RejectReason"    offset="68"/>
+    <field name="execType"        id="9"  type="ExecType"        offset="72"/>
+    <field name="side"            id="10" type="Side"            offset="73"/>
+    <field name="clOrdId"         id="2"  type="ClOrdId"         offset="74"/>
+    <field name="origClOrdId"     id="14" type="ClOrdId"         offset="94"/>
   </sbe:message>
 
   <!-- The end of a resend: everything this participant was reported before nextSeq has now been
@@ -1562,15 +1653,17 @@ answers, and a consumer must not render the first when it means the second.
        reports, and the gateway forwards it to the client unchanged; the gateway also emits one itself,
        with nothing replayed, when it refuses the request. oldestRetainedSeq is the lowest reportSeq the
        engine could still send for this participant; above fromSeq, status is TRUNCATED and the reports
-       in between are gone. Added in version 6. -->
-  <sbe:message name="ReportResendComplete" id="11" blockLength="48" sinceVersion="6">
+       in between are gone. Added in version 6. toSeq is the request's, echoed; 0 when it asked for
+       everything. Added in version 8. -->
+  <sbe:message name="ReportResendComplete" id="11" blockLength="56" sinceVersion="6">
     <field name="participantId"     id="1" type="ParticipantId"/>
-    <field name="requestId"         id="2" type="ClOrdId"/>
+    <field name="requestId"         id="2" type="RequestId"/>
     <field name="fromSeq"           id="3" type="SeqNum"/>
     <field name="nextSeq"           id="4" type="SeqNum"/>
     <field name="oldestRetainedSeq" id="5" type="SeqNum"/>
     <field name="replayedCount"     id="6" type="OrderCount"/>
     <field name="status"            id="7" type="RequestStatus"/>
+    <field name="toSeq"             id="8" type="SeqNum" offset="48" sinceVersion="8"/>
   </sbe:message>
 
   <!-- The end of a mass status: orderCount ORDER_STATUS reports were sent before it. nextSeq is the
@@ -1581,7 +1674,7 @@ answers, and a consumer must not render the first when it means the second.
        request. Added in version 7. -->
   <sbe:message name="OrderMassStatusComplete" id="13" blockLength="40" sinceVersion="7">
     <field name="participantId" id="1" type="ParticipantId"/>
-    <field name="requestId"     id="2" type="ClOrdId"/>
+    <field name="requestId"     id="2" type="RequestId"/>
     <field name="nextSeq"       id="3" type="SeqNum"/>
     <field name="orderCount"    id="4" type="OrderCount"/>
     <field name="securityId"    id="5" type="SecurityId"/>
@@ -1784,28 +1877,29 @@ answers, and a consumer must not render the first when it means the second.
   <!-- Both quantities come from the engine, which holds origQty in the cold word beside the
        order's cache line (Design.md §3.1). The gateway copies them across rather than deriving
        anything, which is why it needs no per-order state of its own. -->
-  <sbe:message name="ClientExecutionReport" id="50" blockLength="88">
-    <field name="participantId"   id="1"  type="ParticipantId"/>
-    <field name="clOrdId"         id="2"  type="ClOrdId"/>
-    <field name="exchangeOrderId" id="3"  type="ExchangeOrderId"/>
-    <field name="price"           id="4"  type="Price"/>
-    <field name="lastQty"         id="5"  type="Quantity"/>
-    <field name="leavesQty"       id="6"  type="Quantity"/>
-    <field name="cumQty"          id="7"  type="Quantity"/>
-    <field name="origQty"         id="8"  type="Quantity"/>
-    <field name="securityId"      id="9"  type="SecurityId"/>
-    <field name="rejectReason"    id="10" type="RejectReason"/>
-    <field name="execType"        id="11" type="ExecType"/>
-    <field name="side"            id="12" type="Side"/>
-    <!-- Fits inside the block's existing padding, so blockLength is unchanged and a version 1
-         reader is unaffected. UNKNOWN means the engine could not state origQty, which happens for
-         an order restored from a version 2 snapshot, so the two quantities above are not to be
-         believed. -->
-    <field name="enrichment"      id="13" type="Enrichment" sinceVersion="2"/>
+  <!-- Version 8 changed the layout in place, as for ExecutionReport: clOrdId is char[20], and
+       origClOrdId is added, copied from the engine's report. -->
+  <sbe:message name="ClientExecutionReport" id="50" blockLength="120">
+    <field name="participantId"   id="1"  type="ParticipantId"   offset="0"/>
+    <field name="exchangeOrderId" id="3"  type="ExchangeOrderId" offset="8"/>
+    <field name="price"           id="4"  type="Price"           offset="16"/>
+    <field name="lastQty"         id="5"  type="Quantity"        offset="24"/>
+    <field name="leavesQty"       id="6"  type="Quantity"        offset="32"/>
+    <field name="cumQty"          id="7"  type="Quantity"        offset="40"/>
+    <field name="origQty"         id="8"  type="Quantity"        offset="48"/>
     <!-- Copied from the engine's report. 0 on a report the gateway made itself (a local reject),
          which never reached the log and so has no place in the sequence; a client tracks gaps over
          the reports carrying one. Added in version 6. -->
-    <field name="reportSeq"       id="14" type="SeqNum" offset="80" sinceVersion="6"/>
+    <field name="reportSeq"       id="14" type="SeqNum"          offset="56"/>
+    <field name="securityId"      id="9"  type="SecurityId"      offset="64"/>
+    <field name="rejectReason"    id="10" type="RejectReason"    offset="68"/>
+    <field name="execType"        id="11" type="ExecType"        offset="72"/>
+    <field name="side"            id="12" type="Side"            offset="73"/>
+    <!-- UNKNOWN means the engine could not state origQty, which happens for an order restored from a
+         version 2 snapshot, so the two quantities above are not to be believed. Added in version 2. -->
+    <field name="enrichment"      id="13" type="Enrichment"      offset="74"/>
+    <field name="clOrdId"         id="2"  type="ClOrdId"         offset="75"/>
+    <field name="origClOrdId"     id="15" type="ClOrdId"         offset="95"/>
   </sbe:message>
 
 
@@ -1896,13 +1990,15 @@ answers, and a consumer must not render the first when it means the second.
     <field name="restingOrderCount" id="12" type="OrderCount" offset="64" sinceVersion="2"/>
   </sbe:message>
 
-  <!-- origQty is the cold word of §3.1, snapshotted so a restored order can still have its
-       cumQty stated on a report. Absent on a version 2 snapshot, which restores it as 0 = unknown
-       rather than inventing a value. -->
-  <sbe:message name="SnapshotOrder" id="32" blockLength="72">
+  <!-- An order in a snapshot taken before version 8, with the int64 clOrdId of its time. Read only,
+       never written: a restore turns its clOrdId into its decimal string (Design.md §5, "Client
+       order ids"). origQty is the cold word of §3.1, snapshotted so a restored order can still have
+       its cumQty stated on a report. Absent on a version 2 snapshot, which restores it as
+       0 = unknown rather than inventing a value. -->
+  <sbe:message name="SnapshotOrderV7" id="32" blockLength="72">
     <field name="participantId"   id="1" type="ParticipantId"/>
     <field name="smpId"           id="2" type="SmpId"/>
-    <field name="clOrdId"         id="3" type="ClOrdId"/>
+    <field name="clOrdId"         id="3" type="ClOrdIdV7"/>
     <field name="exchangeOrderId" id="4" type="ExchangeOrderId"/>
     <field name="price"           id="5" type="Price"/>
     <field name="leavesQty"       id="6" type="Quantity"/>
@@ -1911,6 +2007,22 @@ answers, and a consumer must not render the first when it means the second.
     <field name="side"            id="9" type="Side"/>
     <field name="smpStrategy"     id="10" type="SmpStrategy"/>
     <field name="origQty"         id="11" type="Quantity" offset="64" sinceVersion="3"/>
+  </sbe:message>
+
+  <!-- An order in a snapshot from version 8 on: SnapshotOrderV7 with the clOrdId the participant
+       sent, as char[20]. Written by every version 8 node. -->
+  <sbe:message name="SnapshotOrder" id="35" blockLength="80" sinceVersion="8">
+    <field name="participantId"   id="1"  type="ParticipantId"   offset="0"/>
+    <field name="smpId"           id="2"  type="SmpId"           offset="8"/>
+    <field name="exchangeOrderId" id="4"  type="ExchangeOrderId" offset="16"/>
+    <field name="price"           id="5"  type="Price"           offset="24"/>
+    <field name="leavesQty"       id="6"  type="Quantity"        offset="32"/>
+    <field name="origQty"         id="11" type="Quantity"        offset="40"/>
+    <field name="securityId"      id="7"  type="SecurityId"      offset="48"/>
+    <field name="expireDate"      id="8"  type="TradingDate"     offset="52"/>
+    <field name="side"            id="9"  type="Side"            offset="56"/>
+    <field name="smpStrategy"     id="10" type="SmpStrategy"     offset="57"/>
+    <field name="clOrdId"         id="3"  type="ClOrdId"         offset="58"/>
   </sbe:message>
 
   <sbe:message name="SnapshotEnd" id="33" blockLength="8">
@@ -3457,8 +3569,10 @@ It found three defects that unit tests could not:
   decoding moved to `BookEventReader`, which consumes a sequence for every book event and none for a
   book image, and `BookEventReaderTest` pins both halves against this section. The class exists
   separately because the defect survived on a code path that needed a media driver to reach.
-* **String client order ids. Decided 2026-11-01 (user), and measured the same day. Not built.**
-  Today `clOrdId` and `origClOrdId` are `int64`, so a FIX adapter must derive one per request
+* ~~**String client order ids.**~~ **Built 2026-11-01, schema version 8** (§5, "Client order ids";
+  §3.1). Decided the same day by the user and measured first. Not yet run through the e2e scripts
+  at the time of writing; Status.md says which have. Until version 8, `clOrdId` and `origClOrdId`
+  were `int64`, so a FIX adapter had to derive one per request
   (most-exchange-fix Design.md §3.2). That derivation is what makes an id collision, its block and
   its operator reset possible there. The decision, every point the recommendation:
   - **`char[20]`, null-padded,** in `NewOrderSingle`, `OrderCancelRequest`, `ExecutionReport`,
@@ -3475,7 +3589,8 @@ It found three defects that unit tests could not:
   - **`ExecutionReport` and `ClientExecutionReport` carry both ids.** A cancel's report states the
     cancel's `clOrdId` and the order's `origClOrdId`, and every other report states the order's id
     in both. The second id is free under frame alignment: the block is 120 B, the egress frame
-    192 B, and the ring slot 128 B (+32 MB per node).
+    192 B, and the ring slot 128 B (+32 MB per node). *As built*, the gateway drops a report from an
+    engine before version 8 as well, and counts it.
   - **The fields change in place, at schema version 8.** This is not an append: appending would
     keep a dead `int64` and take the egress frame to 224 B. The snapshot order record gets a **new
     template id**, and the old one is kept so that a version 7 snapshot still restores. A restored
@@ -3496,9 +3611,24 @@ It found three defects that unit tests could not:
     from 500–550k/s to 450–500k/s, in both interleaved repeats. Below the knee, at 450k/s, the
     response p50 is 290–541 µs against 97–147 µs. IPC egress and 8 KB datagrams are not measured;
     the datagram count does not bind there.
-* **A resend is bounded only below.** `ReportResendRequest` names a `fromSeq` and no end, so one lost
-  report costs a replay of everything retained after it. Below the knee that is a few thousand
-  reports. At the knee, measured on 2026-11-01 (Measurements.md, "The harness replayed the ring"), it
-  is 1.3–2.4M duplicates, sent into an egress that is already full, which turns a dropped report
-  into more drops. `OrderEntrySession` fences the same way. A `toSeq` or a count would bound it to
-  the gap: a wire change, not decided.
+* ~~**A resend is bounded only below.**~~ **Built 2026-11-01 with version 8** (decided by the user
+  that day; §5, "Report sequence and resend"). `ReportResendRequest` named a `fromSeq` and no end, so
+  one lost report cost a replay of everything retained after it. Below the knee that was a few
+  thousand reports; at the knee, measured on 2026-11-01 (Measurements.md, "The harness replayed the
+  ring"), 1.3–2.4M duplicates into an egress already full. Now:
+  - **`toSeq`**, inclusive, 0 for no bound; a version 7 request without one reads as 0;
+  - **a client asks for a gap by its bounds**, and unbounded only after a switch or for an order
+    unanswered too long;
+  - **the settle rule moved with it:** a client settles unanswered orders as never sequenced only
+    once it holds every report below the completion's `nextSeq`, and fences again first if not.
+    Bounded, a report the gateway dropped above `toSeq` would otherwise have made a sequenced order
+    look never sequenced. `OrderEntrySession` and `most load` both follow it, and its mutation is
+    caught (`OrderEntrySessionTest`, "a fence that leaves a report below nextSeq missing").
+* **Found while building it (2026-11-01): a resend could send one participant another's reports.**
+  When every retained report of a participant had been evicted, `slotOf` fell back to its newest
+  slot, which by then held someone else's report, and the replay sent that report, and the chain
+  after it, to the participant asking. On a follower the walk could reach slot −1 and throw on every
+  node. Reproduced on version 7 by a test before the fix (`ReportSequenceTest`, "a participant whose
+  every report was evicted"), and fixed by replaying only from a retained report. Every deployment
+  before version 8 has it: a quiet participant whose last report has left the ring, asking for a
+  resend.

@@ -319,6 +319,8 @@ fun main(args: Array<String>) {
                         "undeliverableCommands=${service.undeliverableCommands} " +
                         "unauthorizedRejects=${service.unauthorizedRejects} " +
                         "refusedCommands=${service.refusedCommands} " +
+                        "invalidClOrdIdRejects=${service.invalidClOrdIdRejects} " +
+                        "refusedSchemaVersion=${service.refusedSchemaVersion} " +
                         "untrackedReports=${service.untrackedReports}"
                 )
                 metrics?.let { m ->
